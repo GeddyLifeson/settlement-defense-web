@@ -1,5 +1,8 @@
-// Real Eat/Sleep job execution, condensed from SD.Sim's job-priority system: citizens with low
-// hunger/rest walk to the nearest matching zone and refill there, instead of pure wander.
+// Real Eat/Sleep/Harvest/Build job execution, condensed from SD.Sim's job-priority system:
+// citizens with low hunger/rest walk to the nearest matching zone and refill there; citizens
+// with nothing urgent pending instead work the colony's economy -- finishing player-placed
+// blueprints first (Prison-Architect-style "you ordered it, someone builds it"), then
+// harvesting scrap nodes when nothing needs building (RimWorld-style raw-material gathering).
 import { ZoneKind } from './zones.js';
 
 export const JobState = Object.freeze({
@@ -10,10 +13,13 @@ export const JobState = Object.freeze({
   Sleeping: 4,
   SeekingRec: 5,
   Recreating: 6,
+  SeekingBuild: 7,
+  Building: 8,
+  SeekingScrap: 9,
+  Harvesting: 10,
 });
 
 const SEEK_SOCIAL_THRESHOLD = 0.35;
-
 const SEEK_HUNGER_THRESHOLD = 0.45;
 const SEEK_REST_THRESHOLD = 0.4;
 const SATISFIED_THRESHOLD = 0.85;
@@ -21,14 +27,40 @@ const REFILL_RATE = 0.05; // per tick while occupying the zone
 const ARRIVE_DIST = 0.35;
 const JOB_SPEED = 0.09; // citizens hustle to zones -- travel time was the dominant cost in the needs loop
 
+const BUILD_RATE = 0.012; // per tick, scaled by construction skill below
+const BUILD_SKILL_GAIN = 0.02;
+const HARVEST_RATE = 3; // scrap per tick pulled from a node
+const HARVEST_SKILL_GAIN = 0.01;
+
 export function isOnJob(store, i) {
   return store.jobState[i] !== JobState.Idle;
 }
 
-export function tickJobs(store, zones, staffOnDuty) {
+function findNearestBlueprint(structures, x, y, excludeClaimedBy) {
+  let best = null, bestDist = Infinity;
+  for (const s of structures) {
+    if (!s.underConstruction || s.destroyed) continue;
+    if (s.claimedBy != null && s.claimedBy !== excludeClaimedBy) continue;
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  return best;
+}
+
+function findNearestNode(nodes, x, y) {
+  let best = null, bestDist = Infinity;
+  for (const n of nodes) {
+    if (n.depleted) continue;
+    const d = Math.hypot(n.x - x, n.y - y);
+    if (d < bestDist) { bestDist = d; best = n; }
+  }
+  return best;
+}
+
+export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, onScrapGain) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
-    if (staffOnDuty(i)) continue; // guards/snipers hold their post, no eat/sleep jobs
+    if (staffOnDuty(i)) continue; // guards/snipers hold their post, no eat/sleep/work jobs
 
     const state = store.jobState[i];
 
@@ -45,17 +77,37 @@ export function tickJobs(store, zones, staffOnDuty) {
         const rec = zones.nearestOfKind(ZoneKind.Recreation, store.x[i], store.y[i]);
         if (rec) { store.jobState[i] = JobState.SeekingRec; store.targetX[i] = rec.x; store.targetY[i] = rec.y; continue; }
       }
+
+      const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i));
+      if (blueprint) {
+        blueprint.claimedBy = idOf(i);
+        store.jobState[i] = JobState.SeekingBuild;
+        store.targetX[i] = blueprint.x; store.targetY[i] = blueprint.y;
+        store._jobRef[i] = blueprint;
+        continue;
+      }
+
+      const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
+      if (node) {
+        store.jobState[i] = JobState.SeekingScrap;
+        store.targetX[i] = node.x; store.targetY[i] = node.y;
+        store._jobRef[i] = node;
+        continue;
+      }
       continue;
     }
 
-    if (state === JobState.SeekingFood || state === JobState.SeekingBed || state === JobState.SeekingRec) {
+    if (state === JobState.SeekingFood || state === JobState.SeekingBed || state === JobState.SeekingRec
+      || state === JobState.SeekingBuild || state === JobState.SeekingScrap) {
       const dx = store.targetX[i] - store.x[i];
       const dy = store.targetY[i] - store.y[i];
       const dist = Math.hypot(dx, dy);
       if (dist < ARRIVE_DIST) {
         store.jobState[i] = state === JobState.SeekingFood ? JobState.Eating
           : state === JobState.SeekingBed ? JobState.Sleeping
-          : JobState.Recreating;
+          : state === JobState.SeekingRec ? JobState.Recreating
+          : state === JobState.SeekingBuild ? JobState.Building
+          : JobState.Harvesting;
       } else {
         const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1);
         store.x[i] += (dx / dist) * speed;
@@ -79,6 +131,31 @@ export function tickJobs(store, zones, staffOnDuty) {
     if (state === JobState.Recreating) {
       store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * (store.trait[i]?.socialGainMult ?? 1));
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
+      continue;
+    }
+
+    if (state === JobState.Building) {
+      const bp = store._jobRef?.[i];
+      if (!bp || bp.destroyed || !bp.underConstruction) { store.jobState[i] = JobState.Idle; continue; }
+      bp.buildProgress = Math.min(1, (bp.buildProgress || 0) + BUILD_RATE * (1 + store.skillConstruction[i]));
+      if (bp.buildProgress >= 1) {
+        bp.underConstruction = false;
+        bp.claimedBy = null;
+        store.skillConstruction[i] += BUILD_SKILL_GAIN;
+        store.jobState[i] = JobState.Idle;
+      }
+      continue;
+    }
+
+    if (state === JobState.Harvesting) {
+      const node = store._jobRef?.[i];
+      if (!node || node.depleted) { store.jobState[i] = JobState.Idle; continue; }
+      const take = Math.min(HARVEST_RATE, node.amount);
+      node.amount -= take;
+      onScrapGain?.(take);
+      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2;
+      if (node.amount <= 0) node.depleted = true;
+      if (node.depleted) store.jobState[i] = JobState.Idle;
       continue;
     }
   }

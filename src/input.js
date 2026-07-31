@@ -12,6 +12,10 @@ export const TOOLS = [
   { key: '5', tool: 'zone-food', label: 'Food Zone', cost: null },
   { key: '6', tool: 'zone-bedroom', label: 'Bedroom Zone', cost: null },
   { key: '7', tool: 'zone-recreation', label: 'Recreation Zone', cost: null },
+  { key: 'b', tool: 'bed', label: 'Bed', cost: BUILD_COST.bed },
+  { key: 't', tool: 'table', label: 'Table', cost: BUILD_COST.table },
+  { key: 'y', tool: 'door', label: 'Door', cost: BUILD_COST.door },
+  { key: 'g', tool: 'generator', label: 'Generator', cost: BUILD_COST.generator },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -93,11 +97,9 @@ export class InputController {
 
     if (!canAfford(world, this.tool)) { this.onToast?.('Not enough scrap'); return; }
     spend(world, this.tool);
-    if (this.tool === 'wall') {
-      world.grid.setWall(x, y, 1);
-    } else {
-      world.build(this.tool, x + 0.5, y + 0.5);
-    }
+    // Every buildable -- including walls -- is placed as a blueprint that a citizen has to
+    // walk over and actually construct (see jobs.js JobState.Building), not instant placement.
+    world.build(this.tool, x + 0.5, y + 0.5);
   }
 
   _pickCitizen(world) {

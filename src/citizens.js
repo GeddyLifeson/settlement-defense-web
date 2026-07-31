@@ -35,6 +35,7 @@ export class CitizenStore {
     this.skillCombat = new Float32Array(capacity);
     this.skillConstruction = new Float32Array(capacity);
     this._staffCooldown = new Float32Array(capacity); // used by siege.js tickStaffCombat
+    this._jobRef = {}; // used by jobs.js: index -> blueprint/resource-node object currently targeted
     this.trait = new Array(capacity).fill(null);
     this._nextId = 1;
   }

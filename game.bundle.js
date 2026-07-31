@@ -168,6 +168,10 @@ const BUILD_COST = {
   fence: 3,
   trap: 15,
   turret: 25,
+  bed: 8,
+  table: 6,
+  door: 5,
+  generator: 30,
 };
 
 const SCRAP_PER_KILL = 4;
@@ -181,6 +185,137 @@ function spend(world, kind) {
   if (world.scrap < cost) return false;
   world.scrap -= cost;
   return true;
+}
+
+
+// ---- resources.js ----
+// Scrap deposits scattered across the map -- the "harvest materials" loop that was missing
+// (scrap only came from combat kills before). Citizens with no urgent need or job walk to the
+// nearest node and harvest it over time, matching RimWorld's "colonists gather raw resources"
+// loop rather than Prison Architect's pure-cash-purchase model (which still exists too: scrap
+// from kills/recycling is the "it gets bought for you" side of the same resource).
+class ResourceNode {
+  constructor(x, y, amount) {
+    this.x = x; this.y = y;
+    this.amount = amount;
+    this.maxAmount = amount;
+    this.depleted = false;
+  }
+}
+
+const NODE_MIN = 40, NODE_MAX = 90;
+
+function scatterNodes(grid, rng, count, avoidRadius, avoidX, avoidY) {
+  const nodes = [];
+  let tries = 0;
+  while (nodes.length < count && tries < count * 30) {
+    tries++;
+    const x = Math.floor(rng() * grid.width);
+    const y = Math.floor(rng() * grid.height);
+    if (Math.hypot(x - avoidX, y - avoidY) < avoidRadius) continue;
+    if (grid.isBlocked(x, y)) continue;
+    nodes.push(new ResourceNode(x + 0.5, y + 0.5, NODE_MIN + rng() * (NODE_MAX - NODE_MIN)));
+  }
+  return nodes;
+}
+
+// Occasionally drops a fresh node somewhere on the map so the economy doesn't dry up over a
+// long session -- soak-testing the first version of this game showed scrap flow stalling hard
+// once kill-rewards were the only source and the player wasn't actively harvesting.
+function maybeSpawnNode(nodes, grid, rng, currentTick, avoidX, avoidY) {
+  if (currentTick % 400 !== 0) return;
+  if (nodes.filter(n => !n.depleted).length > 14) return;
+  const spawned = scatterNodes(grid, rng, 1, 10, avoidX, avoidY);
+  nodes.push(...spawned);
+}
+
+
+// ---- vehicles.js ----
+// Vehicles, the Super Energy Apocalypse: Recycled side of the mashup -- garbage/recycling
+// trucks that periodically roll in, haul off a resource node or battlefield scrap, and roll
+// back out. Purely automatic (no player driving), matching SEA:R's background-hauler flavor
+// rather than a controllable unit.
+const VEHICLE_SPEED = 0.11;
+const SPAWN_INTERVAL_MIN = 500, SPAWN_INTERVAL_MAX = 900;
+const GARBAGE_BONUS_MIN = 15, GARBAGE_BONUS_MAX = 40;
+
+class Vehicle {
+  constructor(kind, x, y) {
+    this.kind = kind; // 'recycling' | 'garbage'
+    this.x = x; this.y = y;
+    this.phase = 'inbound'; // inbound -> working -> outbound
+    this.workTimer = 0;
+    this.targetNode = null;
+  }
+}
+
+function edgePoint(grid, rng) {
+  const edge = Math.floor(rng() * 4);
+  if (edge === 0) return { x: 0, y: rng() * grid.height };
+  if (edge === 1) return { x: grid.width - 1, y: rng() * grid.height };
+  if (edge === 2) return { x: rng() * grid.width, y: 0 };
+  return { x: rng() * grid.width, y: grid.height - 1 };
+}
+
+function maybeSpawnVehicle(world) {
+  if (world.currentTick < world._nextVehicleTick) return;
+  world._nextVehicleTick = world.currentTick + SPAWN_INTERVAL_MIN +
+    Math.floor(world.rng() * (SPAWN_INTERVAL_MAX - SPAWN_INTERVAL_MIN));
+
+  const kind = world.rng() < 0.5 ? 'recycling' : 'garbage';
+  const spawn = edgePoint(world.grid, world.rng);
+  const v = new Vehicle(kind, spawn.x, spawn.y);
+
+  if (kind === 'recycling') {
+    const candidates = world.resourceNodes.filter(n => !n.depleted && n.amount > 10);
+    v.targetNode = candidates.length ? candidates[Math.floor(world.rng() * candidates.length)] : null;
+    if (!v.targetNode) return; // nothing worth hauling right now, skip this spawn
+  } else {
+    v.targetX = world.width / 2 + (world.rng() - 0.5) * 6;
+    v.targetY = world.height / 2 + (world.rng() - 0.5) * 6;
+  }
+  world.vehicles.push(v);
+}
+
+function tickVehicles(world) {
+  for (let i = world.vehicles.length - 1; i >= 0; i--) {
+    const v = world.vehicles[i];
+
+    if (v.phase === 'inbound') {
+      const tx = v.kind === 'recycling' ? v.targetNode?.x : v.targetX;
+      const ty = v.kind === 'recycling' ? v.targetNode?.y : v.targetY;
+      if (tx == null || (v.kind === 'recycling' && v.targetNode.depleted)) { v.phase = 'outbound'; continue; }
+      const dx = tx - v.x, dy = ty - v.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 0.6) { v.phase = 'working'; v.workTimer = 20; }
+      else { v.x += (dx / dist) * VEHICLE_SPEED; v.y += (dy / dist) * VEHICLE_SPEED; }
+      continue;
+    }
+
+    if (v.phase === 'working') {
+      v.workTimer--;
+      if (v.workTimer <= 0) {
+        if (v.kind === 'recycling' && v.targetNode && !v.targetNode.depleted) {
+          world.addScrap(Math.round(v.targetNode.amount));
+          v.targetNode.amount = 0;
+          v.targetNode.depleted = true;
+        } else {
+          world.addScrap(GARBAGE_BONUS_MIN + Math.floor(world.rng() * (GARBAGE_BONUS_MAX - GARBAGE_BONUS_MIN)));
+        }
+        const exit = edgePoint(world.grid, world.rng);
+        v.targetX = exit.x; v.targetY = exit.y;
+        v.phase = 'outbound';
+      }
+      continue;
+    }
+
+    if (v.phase === 'outbound') {
+      const dx = v.targetX - v.x, dy = v.targetY - v.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 0.6) { world.vehicles.splice(i, 1); continue; }
+      v.x += (dx / dist) * VEHICLE_SPEED; v.y += (dy / dist) * VEHICLE_SPEED;
+    }
+  }
 }
 
 
@@ -221,6 +356,7 @@ class CitizenStore {
     this.skillCombat = new Float32Array(capacity);
     this.skillConstruction = new Float32Array(capacity);
     this._staffCooldown = new Float32Array(capacity); // used by siege.js tickStaffCombat
+    this._jobRef = {}; // used by jobs.js: index -> blueprint/resource-node object currently targeted
     this.trait = new Array(capacity).fill(null);
     this._nextId = 1;
   }
@@ -437,13 +573,19 @@ class AttackerStore {
 }
 
 class Structure {
-  constructor(kind, x, y) {
-    this.kind = kind; // 'turret' | 'fence' | 'trap'
+  constructor(kind, x, y, opts = {}) {
+    this.kind = kind; // 'turret' | 'fence' | 'trap' | 'bed' | 'table' | 'door' | 'generator' | 'wall'
     this.x = x; this.y = y;
     this.health = kind === 'fence' ? 0.6 : 1;
     this.destroyed = false;
     this.cooldown = 0;
     this.triggered = false; // traps: single-use
+    // Blueprint/construction pipeline (RimWorld-style: place an order, a citizen builds it over
+    // time instead of it appearing instantly) -- opts.instant skips this for the wave-4-starter
+    // turrets so a fresh colony isn't defenseless while nobody has built anything yet.
+    this.underConstruction = !opts.instant;
+    this.buildProgress = opts.instant ? 1 : 0;
+    this.claimedBy = null;
   }
 }
 
@@ -522,7 +664,7 @@ function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, 
     }
 
     for (const t of structures) {
-      if (t.kind !== 'trap' || t.triggered) continue;
+      if (t.kind !== 'trap' || t.triggered || t.underConstruction) continue;
       if (Math.hypot(attackers.x[i] - t.x, attackers.y[i] - t.y) < TRAP_TRIGGER_RANGE) {
         attackers.health[i] -= TRAP_DAMAGE;
         t.triggered = true; t.destroyed = true;
@@ -534,7 +676,7 @@ function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, 
 
 function findBlockingFence(structures, x, y) {
   for (const s of structures) {
-    if (s.kind !== 'fence' || s.destroyed) continue;
+    if (s.kind !== 'fence' || s.destroyed || s.underConstruction) continue;
     if (Math.hypot(x - s.x, y - s.y) < FENCE_CONTACT_RANGE) return s;
   }
   return null;
@@ -542,7 +684,7 @@ function findBlockingFence(structures, x, y) {
 
 function tickTurrets(structures, attackers, onScrap) {
   for (const s of structures) {
-    if (s.kind !== 'turret' || s.destroyed) continue;
+    if (s.kind !== 'turret' || s.destroyed || s.underConstruction) continue;
     if (s.cooldown > 0) { s.cooldown--; continue; }
 
     const bestI = nearestAliveAttacker(attackers, s.x, s.y, TURRET_RANGE);
@@ -673,8 +815,11 @@ function directWaveSpawner(world) {
 
 
 // ---- jobs.js ----
-// Real Eat/Sleep job execution, condensed from SD.Sim's job-priority system: citizens with low
-// hunger/rest walk to the nearest matching zone and refill there, instead of pure wander.
+// Real Eat/Sleep/Harvest/Build job execution, condensed from SD.Sim's job-priority system:
+// citizens with low hunger/rest walk to the nearest matching zone and refill there; citizens
+// with nothing urgent pending instead work the colony's economy -- finishing player-placed
+// blueprints first (Prison-Architect-style "you ordered it, someone builds it"), then
+// harvesting scrap nodes when nothing needs building (RimWorld-style raw-material gathering).
 
 const JobState = Object.freeze({
   Idle: 0,
@@ -684,10 +829,13 @@ const JobState = Object.freeze({
   Sleeping: 4,
   SeekingRec: 5,
   Recreating: 6,
+  SeekingBuild: 7,
+  Building: 8,
+  SeekingScrap: 9,
+  Harvesting: 10,
 });
 
 const SEEK_SOCIAL_THRESHOLD = 0.35;
-
 const SEEK_HUNGER_THRESHOLD = 0.45;
 const SEEK_REST_THRESHOLD = 0.4;
 const SATISFIED_THRESHOLD = 0.85;
@@ -695,14 +843,40 @@ const REFILL_RATE = 0.05; // per tick while occupying the zone
 const ARRIVE_DIST = 0.35;
 const JOB_SPEED = 0.09; // citizens hustle to zones -- travel time was the dominant cost in the needs loop
 
+const BUILD_RATE = 0.012; // per tick, scaled by construction skill below
+const BUILD_SKILL_GAIN = 0.02;
+const HARVEST_RATE = 3; // scrap per tick pulled from a node
+const HARVEST_SKILL_GAIN = 0.01;
+
 function isOnJob(store, i) {
   return store.jobState[i] !== JobState.Idle;
 }
 
-function tickJobs(store, zones, staffOnDuty) {
+function findNearestBlueprint(structures, x, y, excludeClaimedBy) {
+  let best = null, bestDist = Infinity;
+  for (const s of structures) {
+    if (!s.underConstruction || s.destroyed) continue;
+    if (s.claimedBy != null && s.claimedBy !== excludeClaimedBy) continue;
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  return best;
+}
+
+function findNearestNode(nodes, x, y) {
+  let best = null, bestDist = Infinity;
+  for (const n of nodes) {
+    if (n.depleted) continue;
+    const d = Math.hypot(n.x - x, n.y - y);
+    if (d < bestDist) { bestDist = d; best = n; }
+  }
+  return best;
+}
+
+function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, onScrapGain) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
-    if (staffOnDuty(i)) continue; // guards/snipers hold their post, no eat/sleep jobs
+    if (staffOnDuty(i)) continue; // guards/snipers hold their post, no eat/sleep/work jobs
 
     const state = store.jobState[i];
 
@@ -719,17 +893,37 @@ function tickJobs(store, zones, staffOnDuty) {
         const rec = zones.nearestOfKind(ZoneKind.Recreation, store.x[i], store.y[i]);
         if (rec) { store.jobState[i] = JobState.SeekingRec; store.targetX[i] = rec.x; store.targetY[i] = rec.y; continue; }
       }
+
+      const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i));
+      if (blueprint) {
+        blueprint.claimedBy = idOf(i);
+        store.jobState[i] = JobState.SeekingBuild;
+        store.targetX[i] = blueprint.x; store.targetY[i] = blueprint.y;
+        store._jobRef[i] = blueprint;
+        continue;
+      }
+
+      const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
+      if (node) {
+        store.jobState[i] = JobState.SeekingScrap;
+        store.targetX[i] = node.x; store.targetY[i] = node.y;
+        store._jobRef[i] = node;
+        continue;
+      }
       continue;
     }
 
-    if (state === JobState.SeekingFood || state === JobState.SeekingBed || state === JobState.SeekingRec) {
+    if (state === JobState.SeekingFood || state === JobState.SeekingBed || state === JobState.SeekingRec
+      || state === JobState.SeekingBuild || state === JobState.SeekingScrap) {
       const dx = store.targetX[i] - store.x[i];
       const dy = store.targetY[i] - store.y[i];
       const dist = Math.hypot(dx, dy);
       if (dist < ARRIVE_DIST) {
         store.jobState[i] = state === JobState.SeekingFood ? JobState.Eating
           : state === JobState.SeekingBed ? JobState.Sleeping
-          : JobState.Recreating;
+          : state === JobState.SeekingRec ? JobState.Recreating
+          : state === JobState.SeekingBuild ? JobState.Building
+          : JobState.Harvesting;
       } else {
         const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1);
         store.x[i] += (dx / dist) * speed;
@@ -755,6 +949,31 @@ function tickJobs(store, zones, staffOnDuty) {
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
+
+    if (state === JobState.Building) {
+      const bp = store._jobRef?.[i];
+      if (!bp || bp.destroyed || !bp.underConstruction) { store.jobState[i] = JobState.Idle; continue; }
+      bp.buildProgress = Math.min(1, (bp.buildProgress || 0) + BUILD_RATE * (1 + store.skillConstruction[i]));
+      if (bp.buildProgress >= 1) {
+        bp.underConstruction = false;
+        bp.claimedBy = null;
+        store.skillConstruction[i] += BUILD_SKILL_GAIN;
+        store.jobState[i] = JobState.Idle;
+      }
+      continue;
+    }
+
+    if (state === JobState.Harvesting) {
+      const node = store._jobRef?.[i];
+      if (!node || node.depleted) { store.jobState[i] = JobState.Idle; continue; }
+      const take = Math.min(HARVEST_RATE, node.amount);
+      node.amount -= take;
+      onScrapGain?.(take);
+      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2;
+      if (node.amount <= 0) node.depleted = true;
+      if (node.depleted) store.jobState[i] = JobState.Idle;
+      continue;
+    }
   }
 }
 
@@ -762,6 +981,8 @@ function tickJobs(store, zones, staffOnDuty) {
 // ---- world.js ----
 // Ported from SD.Headless/SimWorld.cs -- the composition root that owns every store/system
 // and advances them one fixed tick at a time (10 Hz, matching ARCHITECTURE.md section 2).
+
+
 
 
 
@@ -823,13 +1044,17 @@ class SimWorld {
     }
 
     for (const [tx, ty] of [[13, 20], [29, 20], [21, 13], [21, 27]]) {
-      this.structures.push(new Structure('turret', tx, ty));
+      this.structures.push(new Structure('turret', tx, ty, { instant: true }));
     }
 
     // Default zones so the job system has somewhere to send citizens out of the box.
     for (let x = 17; x <= 20; x++) for (let y = 17; y <= 20; y++) this.zones.set(x, y, ZoneKind.Food);
     for (let x = 22; x <= 25; x++) for (let y = 17; y <= 20; y++) this.zones.set(x, y, ZoneKind.Bedroom);
     for (let x = 17; x <= 20; x++) for (let y = 22; y <= 23; y++) this.zones.set(x, y, ZoneKind.Recreation);
+
+    this.resourceNodes = scatterNodes(this.grid, this.rng, 16, 14, this.width / 2, this.height / 2);
+    this.vehicles = [];
+    this._nextVehicleTick = 200;
   }
 
   idOf(i) { return this.citizens.id[i]; }
@@ -846,11 +1071,16 @@ class SimWorld {
     this.currentTick++;
 
     tickNeedsAndMood(this.citizens, (i) => this.isStaffAt(i), this.rng);
-    tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i));
+    tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i), this.structures, this.resourceNodes,
+      (i) => this.idOf(i), (amt) => this.addScrap(amt));
     tickStaffDuty(this.citizens, this.roster, (i) => this.idOf(i));
     tickWander(this.citizens, this.grid, this.rng, 0.04, (i) => this.isStaffAt(i) || isOnJob(this.citizens, i));
     tickDogs(this.dogs, this.citizens, this.roster, this.attackers, (amt) => this.addScrap(amt));
     this.relationships.tick(this.citizens, (i) => this.citizens.name[i], this.currentTick);
+
+    maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
+    maybeSpawnVehicle(this);
+    tickVehicles(this);
 
     directWaveSpawner(this);
     this.waveSpawner.tick(this.currentTick, this.attackers, this.rng);
@@ -858,6 +1088,17 @@ class SimWorld {
     tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt));
     tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt));
     tickAttackerVsCitizens(this.attackers, this.citizens);
+
+    // Wall blueprints live in this.structures like everything else (for the ghost render +
+    // construction progress), but the actual passability/terrain effect lives on the grid --
+    // apply it the tick a wall blueprint finishes, then drop the now-redundant entry.
+    this.structures = this.structures.filter(s => {
+      if (s.kind === 'wall' && !s.underConstruction) {
+        this.grid.setWall(Math.floor(s.x), Math.floor(s.y), 1);
+        return false;
+      }
+      return true;
+    });
 
     if (this.waveSpawner.waveNumber > this._lastWaveLogged) {
       this._lastWaveLogged = this.waveSpawner.waveNumber;
@@ -892,14 +1133,19 @@ class SimWorld {
         alive: Array.from(this.citizens.alive.slice(0, this.citizens.count)),
         flags: Array.from(this.citizens.flags.slice(0, this.citizens.count)),
         skillCombat: Array.from(this.citizens.skillCombat.slice(0, this.citizens.count)),
+        skillConstruction: Array.from(this.citizens.skillConstruction.slice(0, this.citizens.count)),
         trait: this.citizens.trait.slice(0, this.citizens.count).map(t => t?.name ?? null),
       },
       roster: Array.from(this.roster._roleById.entries()).map(([id, kind]) => ({
         id, kind, post: this.roster._postById.get(id) || null,
       })),
-      structures: this.structures.map(s => ({ kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed })),
+      structures: this.structures.map(s => ({
+        kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed,
+        underConstruction: s.underConstruction, buildProgress: s.buildProgress,
+      })),
       zones: Array.from(this.zones.kind),
       dogs: this.dogs.map(d => ({ ownerId: d.ownerId, x: d.x, y: d.y })),
+      resourceNodes: this.resourceNodes.map(n => ({ x: n.x, y: n.y, amount: n.amount, maxAmount: n.maxAmount, depleted: n.depleted })),
     };
   }
 
@@ -921,13 +1167,18 @@ class SimWorld {
       w.citizens.mood[i] = c.mood[i]; w.citizens.health[i] = c.health[i]; w.citizens.alive[i] = c.alive[i];
       w.citizens.flags[i] = c.flags ? c.flags[i] : 0;
       w.citizens.skillCombat[i] = c.skillCombat ? c.skillCombat[i] : 0;
+      w.citizens.skillConstruction[i] = c.skillConstruction ? c.skillConstruction[i] : 0;
       w.citizens.trait[i] = c.trait && c.trait[i] ? TRAITS.find(t => t.name === c.trait[i]) : null;
     }
     w.roster = new (Object.getPrototypeOf(w.roster).constructor)();
     for (const r of json.roster) w.roster.assign(r.id, r.kind, r.post);
-    w.structures = json.structures.map(s => Object.assign(new Structure(s.kind, s.x, s.y), s));
+    w.structures = json.structures.map(s => Object.assign(new Structure(s.kind, s.x, s.y, { instant: true }), s));
     if (json.zones) w.zones.kind.set(json.zones);
     if (json.dogs) w.dogs = json.dogs.map(d => ({ ...d, cooldown: 0 }));
+    if (json.resourceNodes) {
+      w.resourceNodes = json.resourceNodes.map(n => Object.assign(new ResourceNode(n.x, n.y, n.maxAmount), n));
+    }
+    w.vehicles = [];
     return w;
   }
 }
@@ -1012,10 +1263,12 @@ class Renderer {
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this._drawGround(world);
     this._drawZones(world);
+    this._drawResourceNodes(world);
     this._drawStructures(world);
     this._drawCitizens(world);
     this._drawDogs(world);
     this._drawAttackers(world);
+    this._drawVehicles(world);
     if (input) {
       this._drawCursor(world, input);
       this._drawSelection(world, input);
@@ -1156,29 +1409,110 @@ class Renderer {
       const [sx, sy] = this.worldToScreen(s.x, s.y);
       const size = CELL * this.zoom * 0.85;
 
-      if (s.kind === 'fence') {
-        ctx.strokeStyle = s.destroyed ? 'rgba(80,60,40,0.4)' : '#a8825a';
-        ctx.lineWidth = Math.max(2, size * 0.12);
-        ctx.beginPath();
-        ctx.moveTo(sx - size / 2, sy);
-        ctx.lineTo(sx + size / 2, sy);
-        ctx.stroke();
-        continue;
-      }
+      ctx.save();
+      if (s.underConstruction) ctx.globalAlpha = 0.4 + 0.3 * (s.buildProgress || 0);
+      this._drawStructureShape(ctx, s, sx, sy, size);
+      ctx.restore();
 
-      if (s.kind === 'trap') {
-        ctx.fillStyle = 'rgba(140,20,20,0.55)';
-        ctx.beginPath();
-        ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2);
-        ctx.fill();
-        continue;
+      if (s.underConstruction && (s.buildProgress || 0) > 0) {
+        const barW = size * 0.9;
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(sx - barW / 2, sy + size * 0.55, barW, size * 0.1);
+        ctx.fillStyle = '#e0a336';
+        ctx.fillRect(sx - barW / 2, sy + size * 0.55, barW * s.buildProgress, size * 0.1);
       }
+    }
+  }
 
-      ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
+  _drawStructureShape(ctx, s, sx, sy, size) {
+    if (s.kind === 'wall') {
+      ctx.fillStyle = '#3a3630';
       ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
-      if (s.kind === 'turret' && !s.destroyed) {
-        ctx.fillStyle = '#2b2b2b';
-        ctx.fillRect(sx - size * 0.08, sy - size * 0.6, size * 0.16, size * 0.4);
+      return;
+    }
+    if (s.kind === 'fence') {
+      ctx.strokeStyle = s.destroyed ? 'rgba(80,60,40,0.4)' : '#a8825a';
+      ctx.lineWidth = Math.max(2, size * 0.12);
+      ctx.beginPath();
+      ctx.moveTo(sx - size / 2, sy);
+      ctx.lineTo(sx + size / 2, sy);
+      ctx.stroke();
+      return;
+    }
+    if (s.kind === 'trap') {
+      ctx.fillStyle = 'rgba(140,20,20,0.55)';
+      ctx.beginPath();
+      ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    if (s.kind === 'bed') {
+      ctx.fillStyle = '#5a6fb0';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
+      ctx.fillStyle = '#8898cc';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.18);
+      return;
+    }
+    if (s.kind === 'table') {
+      ctx.fillStyle = '#a87d4a';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
+      return;
+    }
+    if (s.kind === 'door') {
+      ctx.fillStyle = '#7a5a30';
+      ctx.fillRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
+      return;
+    }
+    if (s.kind === 'generator') {
+      ctx.fillStyle = '#4a4a52';
+      ctx.fillRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
+      ctx.fillStyle = '#e0a336';
+      ctx.beginPath();
+      ctx.arc(sx, sy, size * 0.18, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    // turret (default)
+    ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
+    ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+    if (!s.destroyed) {
+      ctx.fillStyle = '#2b2b2b';
+      ctx.fillRect(sx - size * 0.08, sy - size * 0.6, size * 0.16, size * 0.4);
+    }
+  }
+
+  _drawResourceNodes(world) {
+    const ctx = this.ctx;
+    for (const n of world.resourceNodes || []) {
+      if (n.depleted) continue;
+      const [sx, sy] = this.worldToScreen(n.x, n.y);
+      const s = CELL * this.zoom * (0.35 + 0.35 * (n.amount / n.maxAmount));
+      ctx.fillStyle = '#8a8060';
+      ctx.beginPath();
+      ctx.moveTo(sx - s * 0.5, sy + s * 0.3);
+      ctx.lineTo(sx - s * 0.15, sy - s * 0.35);
+      ctx.lineTo(sx + s * 0.2, sy - s * 0.1);
+      ctx.lineTo(sx + s * 0.5, sy + s * 0.35);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#b5aa80';
+      ctx.fillRect(sx - s * 0.1, sy - s * 0.15, s * 0.18, s * 0.18);
+    }
+  }
+
+  _drawVehicles(world) {
+    const ctx = this.ctx;
+    for (const v of world.vehicles || []) {
+      const [sx, sy] = this.worldToScreen(v.x, v.y);
+      const s = CELL * this.zoom * 0.75;
+      ctx.fillStyle = v.kind === 'recycling' ? '#3d7a4a' : '#7a6a3d';
+      ctx.fillRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(sx - s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx + s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
+      if (v.phase === 'working') {
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.fillRect(sx - s * 0.1, sy - s * 0.55, s * 0.2, s * 0.15);
       }
     }
   }
@@ -1199,6 +1533,10 @@ const TOOLS = [
   { key: '5', tool: 'zone-food', label: 'Food Zone', cost: null },
   { key: '6', tool: 'zone-bedroom', label: 'Bedroom Zone', cost: null },
   { key: '7', tool: 'zone-recreation', label: 'Recreation Zone', cost: null },
+  { key: 'b', tool: 'bed', label: 'Bed', cost: BUILD_COST.bed },
+  { key: 't', tool: 'table', label: 'Table', cost: BUILD_COST.table },
+  { key: 'y', tool: 'door', label: 'Door', cost: BUILD_COST.door },
+  { key: 'g', tool: 'generator', label: 'Generator', cost: BUILD_COST.generator },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -1280,11 +1618,9 @@ class InputController {
 
     if (!canAfford(world, this.tool)) { this.onToast?.('Not enough scrap'); return; }
     spend(world, this.tool);
-    if (this.tool === 'wall') {
-      world.grid.setWall(x, y, 1);
-    } else {
-      world.build(this.tool, x + 0.5, y + 0.5);
-    }
+    // Every buildable -- including walls -- is placed as a blueprint that a citizen has to
+    // walk over and actually construct (see jobs.js JobState.Building), not instant placement.
+    world.build(this.tool, x + 0.5, y + 0.5);
   }
 
   _pickCitizen(world) {

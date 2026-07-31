@@ -4,6 +4,10 @@ export const BUILD_COST = {
   fence: 3,
   trap: 15,
   turret: 25,
+  bed: 8,
+  table: 6,
+  door: 5,
+  generator: 30,
 };
 
 export const SCRAP_PER_KILL = 4;

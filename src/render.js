@@ -77,10 +77,12 @@ export class Renderer {
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this._drawGround(world);
     this._drawZones(world);
+    this._drawResourceNodes(world);
     this._drawStructures(world);
     this._drawCitizens(world);
     this._drawDogs(world);
     this._drawAttackers(world);
+    this._drawVehicles(world);
     if (input) {
       this._drawCursor(world, input);
       this._drawSelection(world, input);
@@ -221,29 +223,110 @@ export class Renderer {
       const [sx, sy] = this.worldToScreen(s.x, s.y);
       const size = CELL * this.zoom * 0.85;
 
-      if (s.kind === 'fence') {
-        ctx.strokeStyle = s.destroyed ? 'rgba(80,60,40,0.4)' : '#a8825a';
-        ctx.lineWidth = Math.max(2, size * 0.12);
-        ctx.beginPath();
-        ctx.moveTo(sx - size / 2, sy);
-        ctx.lineTo(sx + size / 2, sy);
-        ctx.stroke();
-        continue;
-      }
+      ctx.save();
+      if (s.underConstruction) ctx.globalAlpha = 0.4 + 0.3 * (s.buildProgress || 0);
+      this._drawStructureShape(ctx, s, sx, sy, size);
+      ctx.restore();
 
-      if (s.kind === 'trap') {
-        ctx.fillStyle = 'rgba(140,20,20,0.55)';
-        ctx.beginPath();
-        ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2);
-        ctx.fill();
-        continue;
+      if (s.underConstruction && (s.buildProgress || 0) > 0) {
+        const barW = size * 0.9;
+        ctx.fillStyle = 'rgba(0,0,0,0.5)';
+        ctx.fillRect(sx - barW / 2, sy + size * 0.55, barW, size * 0.1);
+        ctx.fillStyle = '#e0a336';
+        ctx.fillRect(sx - barW / 2, sy + size * 0.55, barW * s.buildProgress, size * 0.1);
       }
+    }
+  }
 
-      ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
+  _drawStructureShape(ctx, s, sx, sy, size) {
+    if (s.kind === 'wall') {
+      ctx.fillStyle = '#3a3630';
       ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
-      if (s.kind === 'turret' && !s.destroyed) {
-        ctx.fillStyle = '#2b2b2b';
-        ctx.fillRect(sx - size * 0.08, sy - size * 0.6, size * 0.16, size * 0.4);
+      return;
+    }
+    if (s.kind === 'fence') {
+      ctx.strokeStyle = s.destroyed ? 'rgba(80,60,40,0.4)' : '#a8825a';
+      ctx.lineWidth = Math.max(2, size * 0.12);
+      ctx.beginPath();
+      ctx.moveTo(sx - size / 2, sy);
+      ctx.lineTo(sx + size / 2, sy);
+      ctx.stroke();
+      return;
+    }
+    if (s.kind === 'trap') {
+      ctx.fillStyle = 'rgba(140,20,20,0.55)';
+      ctx.beginPath();
+      ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    if (s.kind === 'bed') {
+      ctx.fillStyle = '#5a6fb0';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
+      ctx.fillStyle = '#8898cc';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.18);
+      return;
+    }
+    if (s.kind === 'table') {
+      ctx.fillStyle = '#a87d4a';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
+      return;
+    }
+    if (s.kind === 'door') {
+      ctx.fillStyle = '#7a5a30';
+      ctx.fillRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
+      return;
+    }
+    if (s.kind === 'generator') {
+      ctx.fillStyle = '#4a4a52';
+      ctx.fillRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
+      ctx.fillStyle = '#e0a336';
+      ctx.beginPath();
+      ctx.arc(sx, sy, size * 0.18, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    // turret (default)
+    ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
+    ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+    if (!s.destroyed) {
+      ctx.fillStyle = '#2b2b2b';
+      ctx.fillRect(sx - size * 0.08, sy - size * 0.6, size * 0.16, size * 0.4);
+    }
+  }
+
+  _drawResourceNodes(world) {
+    const ctx = this.ctx;
+    for (const n of world.resourceNodes || []) {
+      if (n.depleted) continue;
+      const [sx, sy] = this.worldToScreen(n.x, n.y);
+      const s = CELL * this.zoom * (0.35 + 0.35 * (n.amount / n.maxAmount));
+      ctx.fillStyle = '#8a8060';
+      ctx.beginPath();
+      ctx.moveTo(sx - s * 0.5, sy + s * 0.3);
+      ctx.lineTo(sx - s * 0.15, sy - s * 0.35);
+      ctx.lineTo(sx + s * 0.2, sy - s * 0.1);
+      ctx.lineTo(sx + s * 0.5, sy + s * 0.35);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#b5aa80';
+      ctx.fillRect(sx - s * 0.1, sy - s * 0.15, s * 0.18, s * 0.18);
+    }
+  }
+
+  _drawVehicles(world) {
+    const ctx = this.ctx;
+    for (const v of world.vehicles || []) {
+      const [sx, sy] = this.worldToScreen(v.x, v.y);
+      const s = CELL * this.zoom * 0.75;
+      ctx.fillStyle = v.kind === 'recycling' ? '#3d7a4a' : '#7a6a3d';
+      ctx.fillRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
+      ctx.fillStyle = '#222';
+      ctx.beginPath(); ctx.arc(sx - s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx + s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
+      if (v.phase === 'working') {
+        ctx.fillStyle = 'rgba(255,255,255,0.7)';
+        ctx.fillRect(sx - s * 0.1, sy - s * 0.55, s * 0.2, s * 0.15);
       }
     }
   }

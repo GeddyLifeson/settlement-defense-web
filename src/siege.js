@@ -35,13 +35,19 @@ export class AttackerStore {
 }
 
 export class Structure {
-  constructor(kind, x, y) {
-    this.kind = kind; // 'turret' | 'fence' | 'trap'
+  constructor(kind, x, y, opts = {}) {
+    this.kind = kind; // 'turret' | 'fence' | 'trap' | 'bed' | 'table' | 'door' | 'generator' | 'wall'
     this.x = x; this.y = y;
     this.health = kind === 'fence' ? 0.6 : 1;
     this.destroyed = false;
     this.cooldown = 0;
     this.triggered = false; // traps: single-use
+    // Blueprint/construction pipeline (RimWorld-style: place an order, a citizen builds it over
+    // time instead of it appearing instantly) -- opts.instant skips this for the wave-4-starter
+    // turrets so a fresh colony isn't defenseless while nobody has built anything yet.
+    this.underConstruction = !opts.instant;
+    this.buildProgress = opts.instant ? 1 : 0;
+    this.claimedBy = null;
   }
 }
 
@@ -120,7 +126,7 @@ export function tickAttackers(attackers, structures, grid, centerX, centerY, cit
     }
 
     for (const t of structures) {
-      if (t.kind !== 'trap' || t.triggered) continue;
+      if (t.kind !== 'trap' || t.triggered || t.underConstruction) continue;
       if (Math.hypot(attackers.x[i] - t.x, attackers.y[i] - t.y) < TRAP_TRIGGER_RANGE) {
         attackers.health[i] -= TRAP_DAMAGE;
         t.triggered = true; t.destroyed = true;
@@ -132,7 +138,7 @@ export function tickAttackers(attackers, structures, grid, centerX, centerY, cit
 
 function findBlockingFence(structures, x, y) {
   for (const s of structures) {
-    if (s.kind !== 'fence' || s.destroyed) continue;
+    if (s.kind !== 'fence' || s.destroyed || s.underConstruction) continue;
     if (Math.hypot(x - s.x, y - s.y) < FENCE_CONTACT_RANGE) return s;
   }
   return null;
@@ -140,7 +146,7 @@ function findBlockingFence(structures, x, y) {
 
 export function tickTurrets(structures, attackers, onScrap) {
   for (const s of structures) {
-    if (s.kind !== 'turret' || s.destroyed) continue;
+    if (s.kind !== 'turret' || s.destroyed || s.underConstruction) continue;
     if (s.cooldown > 0) { s.cooldown--; continue; }
 
     const bestI = nearestAliveAttacker(attackers, s.x, s.y, TURRET_RANGE);

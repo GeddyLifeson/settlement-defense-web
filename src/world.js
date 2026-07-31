@@ -13,6 +13,8 @@ import { tickJobs, isOnJob } from './jobs.js';
 import { RelationshipWeb } from './relationships.js';
 import { directWaveSpawner } from './director.js';
 import { TRAITS } from './traits.js';
+import { scatterNodes, maybeSpawnNode, ResourceNode } from './resources.js';
+import { maybeSpawnVehicle, tickVehicles } from './vehicles.js';
 
 const STARTER_NAMES = [
   'Marlon', 'Aisling', 'Niamh', 'Reeli', 'Cascade', 'Orrery', 'Motoko',
@@ -65,13 +67,17 @@ export class SimWorld {
     }
 
     for (const [tx, ty] of [[13, 20], [29, 20], [21, 13], [21, 27]]) {
-      this.structures.push(new Structure('turret', tx, ty));
+      this.structures.push(new Structure('turret', tx, ty, { instant: true }));
     }
 
     // Default zones so the job system has somewhere to send citizens out of the box.
     for (let x = 17; x <= 20; x++) for (let y = 17; y <= 20; y++) this.zones.set(x, y, ZoneKind.Food);
     for (let x = 22; x <= 25; x++) for (let y = 17; y <= 20; y++) this.zones.set(x, y, ZoneKind.Bedroom);
     for (let x = 17; x <= 20; x++) for (let y = 22; y <= 23; y++) this.zones.set(x, y, ZoneKind.Recreation);
+
+    this.resourceNodes = scatterNodes(this.grid, this.rng, 16, 14, this.width / 2, this.height / 2);
+    this.vehicles = [];
+    this._nextVehicleTick = 200;
   }
 
   idOf(i) { return this.citizens.id[i]; }
@@ -88,11 +94,16 @@ export class SimWorld {
     this.currentTick++;
 
     tickNeedsAndMood(this.citizens, (i) => this.isStaffAt(i), this.rng);
-    tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i));
+    tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i), this.structures, this.resourceNodes,
+      (i) => this.idOf(i), (amt) => this.addScrap(amt));
     tickStaffDuty(this.citizens, this.roster, (i) => this.idOf(i));
     tickWander(this.citizens, this.grid, this.rng, 0.04, (i) => this.isStaffAt(i) || isOnJob(this.citizens, i));
     tickDogs(this.dogs, this.citizens, this.roster, this.attackers, (amt) => this.addScrap(amt));
     this.relationships.tick(this.citizens, (i) => this.citizens.name[i], this.currentTick);
+
+    maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
+    maybeSpawnVehicle(this);
+    tickVehicles(this);
 
     directWaveSpawner(this);
     this.waveSpawner.tick(this.currentTick, this.attackers, this.rng);
@@ -100,6 +111,17 @@ export class SimWorld {
     tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt));
     tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt));
     tickAttackerVsCitizens(this.attackers, this.citizens);
+
+    // Wall blueprints live in this.structures like everything else (for the ghost render +
+    // construction progress), but the actual passability/terrain effect lives on the grid --
+    // apply it the tick a wall blueprint finishes, then drop the now-redundant entry.
+    this.structures = this.structures.filter(s => {
+      if (s.kind === 'wall' && !s.underConstruction) {
+        this.grid.setWall(Math.floor(s.x), Math.floor(s.y), 1);
+        return false;
+      }
+      return true;
+    });
 
     if (this.waveSpawner.waveNumber > this._lastWaveLogged) {
       this._lastWaveLogged = this.waveSpawner.waveNumber;
@@ -134,14 +156,19 @@ export class SimWorld {
         alive: Array.from(this.citizens.alive.slice(0, this.citizens.count)),
         flags: Array.from(this.citizens.flags.slice(0, this.citizens.count)),
         skillCombat: Array.from(this.citizens.skillCombat.slice(0, this.citizens.count)),
+        skillConstruction: Array.from(this.citizens.skillConstruction.slice(0, this.citizens.count)),
         trait: this.citizens.trait.slice(0, this.citizens.count).map(t => t?.name ?? null),
       },
       roster: Array.from(this.roster._roleById.entries()).map(([id, kind]) => ({
         id, kind, post: this.roster._postById.get(id) || null,
       })),
-      structures: this.structures.map(s => ({ kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed })),
+      structures: this.structures.map(s => ({
+        kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed,
+        underConstruction: s.underConstruction, buildProgress: s.buildProgress,
+      })),
       zones: Array.from(this.zones.kind),
       dogs: this.dogs.map(d => ({ ownerId: d.ownerId, x: d.x, y: d.y })),
+      resourceNodes: this.resourceNodes.map(n => ({ x: n.x, y: n.y, amount: n.amount, maxAmount: n.maxAmount, depleted: n.depleted })),
     };
   }
 
@@ -163,13 +190,18 @@ export class SimWorld {
       w.citizens.mood[i] = c.mood[i]; w.citizens.health[i] = c.health[i]; w.citizens.alive[i] = c.alive[i];
       w.citizens.flags[i] = c.flags ? c.flags[i] : 0;
       w.citizens.skillCombat[i] = c.skillCombat ? c.skillCombat[i] : 0;
+      w.citizens.skillConstruction[i] = c.skillConstruction ? c.skillConstruction[i] : 0;
       w.citizens.trait[i] = c.trait && c.trait[i] ? TRAITS.find(t => t.name === c.trait[i]) : null;
     }
     w.roster = new (Object.getPrototypeOf(w.roster).constructor)();
     for (const r of json.roster) w.roster.assign(r.id, r.kind, r.post);
-    w.structures = json.structures.map(s => Object.assign(new Structure(s.kind, s.x, s.y), s));
+    w.structures = json.structures.map(s => Object.assign(new Structure(s.kind, s.x, s.y, { instant: true }), s));
     if (json.zones) w.zones.kind.set(json.zones);
     if (json.dogs) w.dogs = json.dogs.map(d => ({ ...d, cooldown: 0 }));
+    if (json.resourceNodes) {
+      w.resourceNodes = json.resourceNodes.map(n => Object.assign(new ResourceNode(n.x, n.y, n.maxAmount), n));
+    }
+    w.vehicles = [];
     return w;
   }
 }
