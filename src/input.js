@@ -22,6 +22,7 @@ export class InputController {
     this.SPEEDS = [0, 1, 2, 4];
     this._painting = false;
     this.lastMessage = '';
+    this.selectedCitizen = -1;
 
     canvas.addEventListener('mousemove', (e) => this._onMove(e));
     canvas.addEventListener('mousedown', (e) => this._onDown(e));
@@ -33,6 +34,7 @@ export class InputController {
   _onMove(e) {
     const rect = this.canvas.getBoundingClientRect();
     const [wx, wy] = this.renderer.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    this.hoverWorldX = wx; this.hoverWorldY = wy;
     this.hoverGridX = Math.floor(wx);
     this.hoverGridY = Math.floor(wy);
     if (this._painting) this._place();
@@ -45,9 +47,14 @@ export class InputController {
   }
 
   _place() {
-    if (!this.tool) return;
     const world = this.getWorld();
     if (!world || this.hoverGridX == null) return;
+
+    if (!this.tool) {
+      this._pickCitizen(world);
+      return;
+    }
+
     const x = this.hoverGridX, y = this.hoverGridY;
     if (x < 0 || y < 0 || x >= world.width || y >= world.height) return;
 
@@ -70,6 +77,16 @@ export class InputController {
       world.build(this.tool, x + 0.5, y + 0.5);
     }
     this.lastMessage = '';
+  }
+
+  _pickCitizen(world) {
+    let bestI = -1, bestDist = 0.8; // pick radius in world units
+    for (let i = 0; i < world.citizens.count; i++) {
+      if (!world.citizens.isAliveAt(i)) continue;
+      const d = Math.hypot(world.citizens.x[i] - this.hoverWorldX, world.citizens.y[i] - this.hoverWorldY);
+      if (d < bestDist) { bestDist = d; bestI = i; }
+    }
+    this.selectedCitizen = bestI;
   }
 
   _onKey(e) {

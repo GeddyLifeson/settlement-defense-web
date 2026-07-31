@@ -84,9 +84,20 @@ const TRAP_DAMAGE = 3; // instant-kill-ish burst
 const GUARD_RANGE = 3.5; const GUARD_DAMAGE = 0.05; const GUARD_COOLDOWN = 4;
 const SNIPER_RANGE = 9; const SNIPER_DAMAGE = 0.12; const SNIPER_COOLDOWN = 10;
 
-// Attackers path toward the settlement center but are blocked by un-destroyed fences/walls in
-// their way; they chip away at the blocking structure instead of walking through it.
-export function tickAttackers(attackers, structures, grid, centerX, centerY, onScrap) {
+function nearestLivingCitizen(citizens, x, y) {
+  let bestI = -1, bestDist = Infinity;
+  for (let c = 0; c < citizens.count; c++) {
+    if (!citizens.isAliveAt(c)) continue;
+    const d = Math.hypot(citizens.x[c] - x, citizens.y[c] - y);
+    if (d < bestDist) { bestDist = d; bestI = c; }
+  }
+  return bestI;
+}
+
+// Attackers hunt the nearest living citizen (falling back to the settlement center if the
+// colony is somehow empty) and are blocked by un-destroyed fences/walls in their way; they
+// chip away at the blocking structure instead of walking through it.
+export function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, onScrap) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
 
@@ -97,10 +108,13 @@ export function tickAttackers(attackers, structures, grid, centerX, centerY, onS
       continue;
     }
 
-    const dx = centerX - attackers.x[i];
-    const dy = centerY - attackers.y[i];
+    const targetC = citizens ? nearestLivingCitizen(citizens, attackers.x[i], attackers.y[i]) : -1;
+    const tx = targetC >= 0 ? citizens.x[targetC] : centerX;
+    const ty = targetC >= 0 ? citizens.y[targetC] : centerY;
+    const dx = tx - attackers.x[i];
+    const dy = ty - attackers.y[i];
     const dist = Math.hypot(dx, dy);
-    if (dist > 1) {
+    if (dist > ATTACKER_CONTACT_RANGE * 0.6) {
       attackers.x[i] += (dx / dist) * ATTACKER_SPEED;
       attackers.y[i] += (dy / dist) * ATTACKER_SPEED;
     }

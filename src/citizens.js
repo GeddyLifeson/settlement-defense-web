@@ -7,11 +7,11 @@ export const CitizenFlags = Object.freeze({
   OnBreak: 1 << 1,
 });
 
-const HUNGER_DECAY = 0.010;   // per tick (10 Hz), matches ARCHITECTURE.md "100ms/tick"
-const REST_DECAY = 0.006;
-const SOCIAL_DECAY = 0.004;
+const HUNGER_DECAY = 0.006;   // per tick (10 Hz), matches ARCHITECTURE.md "100ms/tick"
+const REST_DECAY = 0.0035;
+const SOCIAL_DECAY = 0.0025;
 const ON_DUTY_SOCIAL_FULFILLMENT = 0.6; // guards/snipers get partial social fulfillment on duty
-const BREAK_MOOD_THRESHOLD = 0.18;
+const BREAK_MOOD_THRESHOLD = 0.12;
 
 export class CitizenStore {
   constructor(capacity) {

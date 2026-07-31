@@ -19,6 +19,8 @@ renderer.frameOnContent(world);
 let speedMultiplier = 1;
 const input = new InputController(canvas, renderer, () => world, (s) => { speedMultiplier = s; });
 
+window.__debug = { getWorld: () => world, input, renderer };
+
 function save() {
   localStorage.setItem(SAVE_KEY, JSON.stringify(world.serialize()));
   console.log(`[SimWorldHost] Saved at tick ${world.currentTick}.`);
@@ -32,9 +34,17 @@ function load() {
   console.log(`[SimWorldHost] Loaded from tick ${world.currentTick}.`);
 }
 
+function restart() {
+  const seed = Math.floor(Math.random() * 0xffffffff);
+  world = new SimWorld(64, 64, seed, 'Calm', 24);
+  renderer.frameOnContent(world);
+  console.log(`[SimWorldHost] New settlement, seed ${seed}.`);
+}
+
 window.addEventListener('keydown', (e) => {
   if (e.key === 'F5') { e.preventDefault(); save(); }
   if (e.key === 'F9') { e.preventDefault(); load(); }
+  if (e.key === 'r' || e.key === 'R') { restart(); }
 });
 
 let framesSinceReframe = 0;
@@ -53,13 +63,29 @@ function frame() {
   const aliveAttackers = countAlive(world.attackers.count, world.attackers.isAliveAt.bind(world.attackers));
   const state = world.gameOver ? 'GAME OVER' : world.paused ? 'PAUSED' : `speed x${speedMultiplier}`;
   const lastEvents = world.milestoneLog.slice(-3).map(e => e.text).join(' | ');
+
+  let selectedInfo = '';
+  const sel = input.selectedCitizen;
+  if (sel >= 0 && sel < world.citizens.count && world.citizens.isAliveAt(sel)) {
+    const c = world.citizens;
+    const role = world.roster.isStaff(c.id[sel]) ? world.roster.kindOf(c.id[sel]) : 'Citizen';
+    selectedInfo = `\n${c.name[sel]} (${role}) | HP ${(c.health[sel] * 100).toFixed(0)}% | ` +
+      `Hunger ${(c.hunger[sel] * 100).toFixed(0)}% Rest ${(c.rest[sel] * 100).toFixed(0)}% ` +
+      `Social ${(c.social[sel] * 100).toFixed(0)}% Mood ${(c.mood[sel] * 100).toFixed(0)}% | ` +
+      `CombatSkill ${c.skillCombat[sel].toFixed(2)}`;
+  } else if (sel >= 0) {
+    input.selectedCitizen = -1;
+  }
+
   hud.textContent =
     `Tick ${world.currentTick} | ${state} | Citizens ${aliveCitizens} | Attackers ${aliveAttackers} | ` +
     `Scrap ${world.scrap} | Wave ${world.waveSpawner.waveNumber}\n` +
     `${input.paletteText()}\n` +
-    `Space=pause  +/-=speed  F5/F9=save/load\n` +
+    `Space=pause  +/-=speed  F5/F9=save/load  R=restart\n` +
     (lastEvents ? `${lastEvents}` : '') +
-    (input.lastMessage ? `  [${input.lastMessage}]` : '');
+    (input.lastMessage ? `  [${input.lastMessage}]` : '') +
+    selectedInfo +
+    (world.gameOver ? '\n\nGAME OVER -- press R to start a new settlement' : '');
 }
 
 function countAlive(count, isAliveAt) {

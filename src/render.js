@@ -74,7 +74,23 @@ export class Renderer {
     this._drawStructures(world);
     this._drawCitizens(world);
     this._drawAttackers(world);
-    if (input) this._drawCursor(world, input);
+    if (input) {
+      this._drawCursor(world, input);
+      this._drawSelection(world, input);
+    }
+  }
+
+  _drawSelection(world, input) {
+    const sel = input.selectedCitizen;
+    if (sel == null || sel < 0 || sel >= world.citizens.count || !world.citizens.isAliveAt(sel)) return;
+    const ctx = this.ctx;
+    const [sx, sy] = this.worldToScreen(world.citizens.x[sel], world.citizens.y[sel]);
+    const r = CELL * this.zoom * 0.5;
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(sx, sy, r, 0, Math.PI * 2);
+    ctx.stroke();
   }
 
   _drawZones(world) {
@@ -133,7 +149,7 @@ export class Renderer {
     }
   }
 
-  _drawHumanoid(x, y, scale, bodyColor, headColor) {
+  _drawHumanoid(x, y, scale, bodyColor, headColor, healthFrac) {
     const ctx = this.ctx;
     const [sx, sy] = this.worldToScreen(x, y);
     const s = CELL * this.zoom * scale;
@@ -149,6 +165,14 @@ export class Renderer {
     ctx.beginPath();
     ctx.arc(sx, sy - s * 0.28, s * 0.2, 0, Math.PI * 2);
     ctx.fill();
+
+    if (healthFrac !== undefined && healthFrac < 0.98) {
+      const barW = s * 0.5, barY = sy - s * 0.55;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.fillRect(sx - barW / 2, barY, barW, s * 0.08);
+      ctx.fillStyle = healthFrac > 0.5 ? '#5fd15f' : healthFrac > 0.25 ? '#e0c040' : '#e05050';
+      ctx.fillRect(sx - barW / 2, barY, barW * Math.max(0, healthFrac), s * 0.08);
+    }
   }
 
   _drawCitizens(world) {
@@ -157,14 +181,14 @@ export class Renderer {
       const id = world.citizens.id[i];
       const role = world.roster.isStaff(id) ? world.roster.kindOf(id) : StaffRoleKind.None;
       const color = ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None];
-      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], 0.7, color, '#e8c9a0');
+      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], 0.7, color, '#e8c9a0', world.citizens.health[i]);
     }
   }
 
   _drawAttackers(world) {
     for (let i = 0; i < world.attackers.count; i++) {
       if (!world.attackers.isAliveAt(i)) continue;
-      this._drawHumanoid(world.attackers.x[i], world.attackers.y[i], 0.6, '#8a1f1f', '#c76b4a');
+      this._drawHumanoid(world.attackers.x[i], world.attackers.y[i], 0.6, '#8a1f1f', '#c76b4a', world.attackers.health[i]);
     }
   }
 

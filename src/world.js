@@ -34,7 +34,7 @@ export class SimWorld {
     this.grid = new SettlementGrid(width, height);
     this.zones = new ZoneGrid(width, height);
     this.citizens = new CitizenStore(64);
-    this.attackers = new AttackerStore(128);
+    this.attackers = new AttackerStore(1024);
     this.roster = new StaffRoster();
     this.structures = [];
     this.waveSpawner = new WaveSpawner(this.grid);
@@ -63,8 +63,9 @@ export class SimWorld {
     }
 
     // Default zones so the job system has somewhere to send citizens out of the box.
-    for (let x = 18; x <= 20; x++) for (let y = 18; y <= 19; y++) this.zones.set(x, y, ZoneKind.Food);
-    for (let x = 22; x <= 24; x++) for (let y = 18; y <= 19; y++) this.zones.set(x, y, ZoneKind.Bedroom);
+    for (let x = 17; x <= 20; x++) for (let y = 17; y <= 20; y++) this.zones.set(x, y, ZoneKind.Food);
+    for (let x = 22; x <= 25; x++) for (let y = 17; y <= 20; y++) this.zones.set(x, y, ZoneKind.Bedroom);
+    for (let x = 17; x <= 20; x++) for (let y = 22; y <= 23; y++) this.zones.set(x, y, ZoneKind.Recreation);
   }
 
   idOf(i) { return this.citizens.id[i]; }
@@ -88,7 +89,7 @@ export class SimWorld {
 
     directWaveSpawner(this);
     this.waveSpawner.tick(this.currentTick, this.attackers, this.rng);
-    tickAttackers(this.attackers, this.structures, this.grid, this.width / 2, this.height / 2, (amt) => this.addScrap(amt));
+    tickAttackers(this.attackers, this.structures, this.grid, this.width / 2, this.height / 2, this.citizens, (amt) => this.addScrap(amt));
     tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt));
     tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt));
     tickAttackerVsCitizens(this.attackers, this.citizens);
