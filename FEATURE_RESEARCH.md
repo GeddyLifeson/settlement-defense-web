@@ -27,6 +27,25 @@ carceral and need real rework rather than reskinning:
 
 Everything else across all three games is fair game to port with just renaming.
 
+## KNOWN BALANCE REGRESSION (found during this pass, not yet root-caused)
+
+A fresh hands-off colony (zero player building beyond the starting 4 instant turrets) now
+falls in ~7-10k ticks (~12-17 min) regardless of storyteller personality, versus the ~22-36k
+ticks (~35-60 min) the original "Full playable loop" commit soak-tested at. Ruled out during
+this pass: it is NOT the new double-wave mechanic (forced `doubleChance = 0` live via
+`STORYTELLERS.Cassandra.doubleChance = 0` in `window.__debug`, still fell at ~8280 ticks) and
+NOT the storyteller cycle-timing changes (Cassandra's `cycleMult` was tuned back to exactly the
+pre-storyteller baseline formula, no change). Prime suspect, not yet confirmed: the
+blueprint-construction commit (three commits before this session's storyteller work) made
+every buildable -- including fences and traps, previously instant -- require a citizen to walk
+over and build them over real time. A hands-off colony with nobody manually placing new
+defenses starts with only the 4 instant turrets and nothing else ever gets built, so the
+"colony strength" the Director scales against may be growing without the defense actually
+keeping pace the way the original baseline (built before blueprints existed) assumed. Next
+step: re-run the hands-off soak test against the commit just before blueprints were added to
+confirm, then decide whether to (a) retune wave scaling for the blueprint-era baseline, or
+(b) make the Director's strength calculation weight built vs. unbuilt defense differently.
+
 ## Priority recommendation (mine, for discussion — not yet committed to)
 
 Given we already have: needs/mood/traits/skills(partial)/relationships/health(simplified)/

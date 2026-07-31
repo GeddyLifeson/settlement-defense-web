@@ -15,6 +15,7 @@ import { directWaveSpawner } from './director.js';
 import { TRAITS } from './traits.js';
 import { scatterNodes, maybeSpawnNode, ResourceNode } from './resources.js';
 import { tickVehicles, spawnParkedVehicle } from './vehicles.js';
+import { detectRooms, roomContaining } from './rooms.js';
 
 const STARTER_NAMES = [
   'Marlon', 'Aisling', 'Niamh', 'Reeli', 'Cascade', 'Orrery', 'Motoko',
@@ -33,6 +34,10 @@ export class SimWorld {
     this.paused = false;
     this.gameOver = false;
     this.milestoneLog = [];
+    this.pollution = 0; // SEA:R's signature mechanic -- unmanaged waste makes waves worse, see director.js
+    this.storyteller = 'Cassandra'; // Cassandra | Phoebe | Randy, see director.js STORYTELLERS
+    this.rooms = []; // enclosed-room flood-fill, see rooms.js -- recomputed only when walls change
+    this._roomsWallSignature = null;
 
     this.grid = new SettlementGrid(width, height);
     this.zones = new ZoneGrid(width, height);
@@ -104,6 +109,13 @@ export class SimWorld {
     maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
     tickVehicles(this);
 
+    // Pollution: generators produce power at the cost of waste (SEA:R's core tradeoff, see
+    // FEATURE_RESEARCH.md); it decays slowly on its own but climbs faster than that decay once
+    // you have more than a couple of generators running, so a garbage-truck haul run matters.
+    let activeGenerators = 0;
+    for (const s of this.structures) if (s.kind === 'generator' && !s.destroyed && !s.underConstruction) activeGenerators++;
+    this.pollution = Math.max(0, this.pollution + activeGenerators * 0.03 - 0.01);
+
     directWaveSpawner(this);
     this.waveSpawner.tick(this.currentTick, this.attackers, this.rng);
     tickAttackers(this.attackers, this.structures, this.grid, this.width / 2, this.height / 2, this.citizens, (amt) => this.addScrap(amt));
@@ -128,11 +140,29 @@ export class SimWorld {
       return true;
     });
 
+    let wallSum = 0;
+    for (let i = 0; i < this.grid.wallThingId.length; i++) if (this.grid.wallThingId[i] !== 0) wallSum += i + 1;
+    if (wallSum !== this._roomsWallSignature) {
+      this._roomsWallSignature = wallSum;
+      this.rooms = detectRooms(this.grid);
+    }
+
     if (this.waveSpawner.waveNumber > this._lastWaveLogged) {
       this._lastWaveLogged = this.waveSpawner.waveNumber;
       this.milestoneLog.push({ tick: this.currentTick, text: `Wave ${this.waveSpawner.waveNumber} incoming` });
       if (this.milestoneLog.length > 20) this.milestoneLog.shift();
     }
+
+    // Watchtowers (CCTV/early-warning analog, see FEATURE_RESEARCH.md) give advance notice of
+    // an incoming wave before it actually spawns, rather than only finding out at spawn time.
+    const hasWatchtower = this.structures.some(s => s.kind === 'watchtower' && !s.destroyed && !s.underConstruction);
+    if (hasWatchtower && !this._warnedForWave &&
+      this.waveSpawner.nextWaveTick - this.currentTick <= 50 && this.waveSpawner.nextWaveTick > this.currentTick) {
+      this._warnedForWave = this.waveSpawner.waveNumber + 1;
+      this.milestoneLog.push({ tick: this.currentTick, text: 'Watchtower spots raiders massing -- wave incoming soon' });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    }
+    if (this._warnedForWave && this._warnedForWave <= this.waveSpawner.waveNumber) this._warnedForWave = null;
 
     let aliveCitizens = 0;
     for (let i = 0; i < this.citizens.count; i++) if (this.citizens.isAliveAt(i)) aliveCitizens++;
@@ -146,6 +176,7 @@ export class SimWorld {
     return {
       width: this.width, height: this.height, seed: this.seed, aggression: this.aggression,
       currentTick: this.currentTick, scrap: this.scrap, gameOver: this.gameOver,
+      pollution: this.pollution, storyteller: this.storyteller,
       waveNumber: this.waveSpawner.waveNumber, nextWaveTick: this.waveSpawner.nextWaveTick,
       citizens: {
         count: this.citizens.count,
@@ -191,6 +222,8 @@ export class SimWorld {
     w.currentTick = json.currentTick;
     w.scrap = json.scrap;
     w.gameOver = json.gameOver || false;
+    w.pollution = json.pollution || 0;
+    w.storyteller = json.storyteller || 'Cassandra';
     w.waveSpawner.waveNumber = json.waveNumber || 0;
     w.waveSpawner.nextWaveTick = json.nextWaveTick || 300;
     const c = json.citizens;

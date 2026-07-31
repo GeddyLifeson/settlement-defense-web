@@ -10,6 +10,7 @@ export const BUILD_COST = {
   generator: 30,
   garage_recycling: 45,
   garage_garbage: 35,
+  watchtower: 20,
 };
 
 export const SCRAP_PER_KILL = 4;

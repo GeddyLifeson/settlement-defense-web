@@ -6,7 +6,11 @@ export const CitizenFlags = Object.freeze({
   None: 0,
   Dead: 1 << 0,
   OnBreak: 1 << 1,
+  Downed: 1 << 2, // incapacitated but alive (RimWorld-style) -- see siege.js for the transition rules
 });
+
+const DOWNED_RECOVERY_RATE = 0.0015; // per tick, passive -- no dedicated first-aid job yet
+const DOWNED_RECOVER_THRESHOLD = 0.3;
 
 const HUNGER_DECAY = 0.006;   // per tick (10 Hz), matches ARCHITECTURE.md "100ms/tick"
 const REST_DECAY = 0.0035;
@@ -58,6 +62,10 @@ export class CitizenStore {
   isAliveAt(i) {
     return this.alive[i] === 1 && (this.flags[i] & CitizenFlags.Dead) === 0;
   }
+
+  isDownedAt(i) {
+    return (this.flags[i] & CitizenFlags.Downed) !== 0;
+  }
 }
 
 // isStaffAt(i) -> bool, used to decide on-duty social fulfillment (guards/snipers don't
@@ -65,6 +73,15 @@ export class CitizenStore {
 export function tickNeedsAndMood(store, isStaffAt, rng) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
+
+    if (store.isDownedAt(i)) {
+      // Incapacitated: needs don't spiral further while down, but health slowly recovers
+      // (RimWorld-style "downed, not dead" reprieve -- no dedicated first-aid job yet, so
+      // recovery is passive rather than requiring a medic to tend them).
+      store.health[i] = Math.min(1, store.health[i] + DOWNED_RECOVERY_RATE);
+      if (store.health[i] >= DOWNED_RECOVER_THRESHOLD) store.flags[i] &= ~CitizenFlags.Downed;
+      continue;
+    }
 
     const staffFulfillment = isStaffAt(i) ? ON_DUTY_SOCIAL_FULFILLMENT : 0;
     const trait = store.trait[i];
@@ -92,6 +109,7 @@ export function tickNeedsAndMood(store, isStaffAt, rng) {
 export function tickWander(store, grid, rng, speed = 0.04, skipIf = null) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
+    if (store.isDownedAt(i)) continue;
     if (skipIf && skipIf(i)) continue;
 
     const dx = store.targetX[i] - store.x[i];

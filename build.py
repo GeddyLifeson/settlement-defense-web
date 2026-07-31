@@ -13,7 +13,7 @@ SRC = ROOT / "src"
 # way that matters here since everything runs top-to-bottom, but keep it topological anyway).
 ORDER = [
     "core.js", "traits.js", "grid.js", "zones.js", "economy.js", "resources.js", "vehicles.js",
-    "citizens.js", "security.js", "siege.js", "relationships.js", "director.js",
+    "rooms.js", "citizens.js", "security.js", "siege.js", "relationships.js", "director.js",
     "jobs.js", "world.js", "render.js", "input.js", "main.js",
 ]
 

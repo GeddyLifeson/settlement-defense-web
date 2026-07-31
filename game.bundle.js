@@ -174,6 +174,7 @@ const BUILD_COST = {
   generator: 30,
   garage_recycling: 45,
   garage_garbage: 35,
+  watchtower: 20,
 };
 
 const SCRAP_PER_KILL = 4;
@@ -309,6 +310,10 @@ function tickVehicles(world) {
           v.targetNode.amount = 0;
           v.targetNode.depleted = true;
         } else {
+          // Garbage trucks haul off waste rather than scrap -- SEA:R's actual mechanic (see
+          // FEATURE_RESEARCH.md): a real pollution reduction plus a small scrap side-benefit
+          // from whatever's recoverable, not primarily a scrap-generation vehicle.
+          world.pollution = Math.max(0, world.pollution - (25 + world.rng() * 20));
           world.addScrap(GARBAGE_BONUS_MIN + Math.floor(world.rng() * (GARBAGE_BONUS_MAX - GARBAGE_BONUS_MIN)));
         }
         v.targetX = v.garageX; v.targetY = v.garageY;
@@ -334,6 +339,58 @@ function tickVehicles(world) {
 }
 
 
+// ---- rooms.js ----
+// Room detection via flood-fill, condensed from Prison Architect/RimWorld (see
+// FEATURE_RESEARCH.md): a "room" is a connected passable area that does NOT touch the map
+// edge -- i.e., it's actually enclosed by walls, not just open ground. Recomputed only when
+// the wall layout changes (rare), not every tick.
+const NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+const MIN_ROOM_SIZE = 2;
+const MAX_ROOM_SIZE = 400; // discourage "the whole map" from ever counting as one room
+
+function detectRooms(grid) {
+  const visited = new Uint8Array(grid.width * grid.height);
+  const rooms = [];
+
+  for (let y = 0; y < grid.height; y++) {
+    for (let x = 0; x < grid.width; x++) {
+      const idx = grid.index(x, y);
+      if (visited[idx] || grid.wallThingId[idx] !== 0) continue;
+
+      const cells = [];
+      const queue = [[x, y]];
+      visited[idx] = 1;
+      let touchesEdge = (x === 0 || y === 0 || x === grid.width - 1 || y === grid.height - 1);
+
+      while (queue.length) {
+        const [cx, cy] = queue.pop();
+        cells.push(grid.index(cx, cy));
+        for (const [dx, dy] of NEIGHBORS) {
+          const nx = cx + dx, ny = cy + dy;
+          if (!grid.inBounds(nx, ny)) continue;
+          const nidx = grid.index(nx, ny);
+          if (visited[nidx] || grid.wallThingId[nidx] !== 0) continue;
+          visited[nidx] = 1;
+          if (nx === 0 || ny === 0 || nx === grid.width - 1 || ny === grid.height - 1) touchesEdge = true;
+          queue.push([nx, ny]);
+        }
+      }
+
+      if (!touchesEdge && cells.length >= MIN_ROOM_SIZE && cells.length <= MAX_ROOM_SIZE) {
+        rooms.push({ cells: new Set(cells), size: cells.length });
+      }
+    }
+  }
+  return rooms;
+}
+
+function roomContaining(rooms, grid, x, y) {
+  const idx = grid.index(Math.floor(x), Math.floor(y));
+  for (const room of rooms) if (room.cells.has(idx)) return room;
+  return null;
+}
+
+
 // ---- citizens.js ----
 // Ported/condensed from SD.Sim (CitizenStore, NeedsDecaySystem, NeedsMoodBreakTickGroup,
 // SocialInteractionSystem). Struct-of-arrays store, same shape as the C# CitizenStore.
@@ -342,7 +399,11 @@ const CitizenFlags = Object.freeze({
   None: 0,
   Dead: 1 << 0,
   OnBreak: 1 << 1,
+  Downed: 1 << 2, // incapacitated but alive (RimWorld-style) -- see siege.js for the transition rules
 });
+
+const DOWNED_RECOVERY_RATE = 0.0015; // per tick, passive -- no dedicated first-aid job yet
+const DOWNED_RECOVER_THRESHOLD = 0.3;
 
 const HUNGER_DECAY = 0.006;   // per tick (10 Hz), matches ARCHITECTURE.md "100ms/tick"
 const REST_DECAY = 0.0035;
@@ -394,6 +455,10 @@ class CitizenStore {
   isAliveAt(i) {
     return this.alive[i] === 1 && (this.flags[i] & CitizenFlags.Dead) === 0;
   }
+
+  isDownedAt(i) {
+    return (this.flags[i] & CitizenFlags.Downed) !== 0;
+  }
 }
 
 // isStaffAt(i) -> bool, used to decide on-duty social fulfillment (guards/snipers don't
@@ -401,6 +466,15 @@ class CitizenStore {
 function tickNeedsAndMood(store, isStaffAt, rng) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
+
+    if (store.isDownedAt(i)) {
+      // Incapacitated: needs don't spiral further while down, but health slowly recovers
+      // (RimWorld-style "downed, not dead" reprieve -- no dedicated first-aid job yet, so
+      // recovery is passive rather than requiring a medic to tend them).
+      store.health[i] = Math.min(1, store.health[i] + DOWNED_RECOVERY_RATE);
+      if (store.health[i] >= DOWNED_RECOVER_THRESHOLD) store.flags[i] &= ~CitizenFlags.Downed;
+      continue;
+    }
 
     const staffFulfillment = isStaffAt(i) ? ON_DUTY_SOCIAL_FULFILLMENT : 0;
     const trait = store.trait[i];
@@ -428,6 +502,7 @@ function tickNeedsAndMood(store, isStaffAt, rng) {
 function tickWander(store, grid, rng, speed = 0.04, skipIf = null) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
+    if (store.isDownedAt(i)) continue;
     if (skipIf && skipIf(i)) continue;
 
     const dx = store.targetX[i] - store.x[i];
@@ -488,6 +563,7 @@ class StaffRoster {
 function tickStaffDuty(store, roster, idOf, speed = 0.05) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
+    if (store.isDownedAt(i)) continue; // downed staff can't hold their post
     const id = idOf(i);
     if (!roster.isStaff(id)) continue;
     const post = roster.postOf(id);
@@ -610,10 +686,11 @@ class WaveSpawner {
     this.nextWaveTick = 300; // 30s at 10Hz, first wave grace period
     this.waveNumber = 0;
     this.strengthFactor = 1; // set by director.js each tick
+    this.cycleMult = 1; // storyteller-personality breather-length multiplier
+    this.doubleChance = 0.1; // odds of immediately queuing a second wave close behind
   }
 
-  tick(currentTick, attackers, rng) {
-    if (currentTick < this.nextWaveTick) return;
+  spawnOneWave(currentTick, attackers, rng) {
     this.waveNumber++;
     const count = Math.round((2 + Math.min(10, this.waveNumber * 1.5)) * this.strengthFactor);
     for (let n = 0; n < count; n++) {
@@ -625,7 +702,14 @@ class WaveSpawner {
       else { x = rng() * this.grid.width; y = this.grid.height - 1; }
       attackers.spawn(x, y, (1 + this.waveNumber * 0.1) * Math.max(0.7, this.strengthFactor));
     }
-    const delay = 600 - Math.min(300, this.waveNumber * 15);
+  }
+
+  tick(currentTick, attackers, rng) {
+    if (currentTick < this.nextWaveTick) return;
+    this.spawnOneWave(currentTick, attackers, rng);
+    if (rng() < this.doubleChance) this.spawnOneWave(currentTick, attackers, rng); // Cassandra-style back-to-back
+
+    const delay = (600 - Math.min(300, this.waveNumber * 15)) * this.cycleMult;
     this.nextWaveTick = currentTick + Math.round(delay / this.strengthFactor);
   }
 }
@@ -723,17 +807,28 @@ function nearestAliveAttacker(attackers, x, y, maxRange) {
 
 // Attackers in contact range of a living citizen deal damage each tick; citizen dies (Dead
 // flag, permadeath per the RimWorld-style design) at 0 health.
+// Downed-not-dead (RimWorld pattern, see FEATURE_RESEARCH.md): the first time a citizen's
+// health hits 0 they go down but survive; if an attacker lands another hit on them while
+// already down, that's when they actually die. Gives a real reprieve instead of instant
+// permadeath on the first unlucky contact tick.
 function tickAttackerVsCitizens(attackers, citizens) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
     for (let c = 0; c < citizens.count; c++) {
       if (!citizens.isAliveAt(c)) continue;
       if (Math.hypot(attackers.x[i] - citizens.x[c], attackers.y[i] - citizens.y[c]) > ATTACKER_CONTACT_RANGE) continue;
+
+      if (citizens.isDownedAt(c)) {
+        citizens.flags[c] |= CitizenFlags.Dead;
+        citizens.alive[c] = 0;
+        continue;
+      }
+
       const healthMult = citizens.trait[c]?.healthMult ?? 1;
       citizens.health[c] -= ATTACKER_CITIZEN_DAMAGE / healthMult;
       if (citizens.health[c] <= 0) {
-        citizens.flags[c] |= CitizenFlags.Dead;
-        citizens.alive[c] = 0;
+        citizens.health[c] = 0.05;
+        citizens.flags[c] |= CitizenFlags.Downed;
       }
     }
   }
@@ -744,6 +839,7 @@ function tickAttackerVsCitizens(attackers, citizens) {
 function tickStaffCombat(citizens, roster, idOf, attackers, onScrap) {
   for (let i = 0; i < citizens.count; i++) {
     if (!citizens.isAliveAt(i)) continue;
+    if (citizens.isDownedAt(i)) continue; // downed guards/snipers can't fight back
     const kind = roster.kindOf(idOf(i));
     if (kind !== 'Guard' && kind !== 'Sniper') continue;
 
@@ -806,26 +902,56 @@ class RelationshipWeb {
 
 
 // ---- director.js ----
-// Condensed from SD.Director: a storyteller that nudges wave timing/size to match colony
-// strength, so the siege stays challenging without being unfair to a struggling colony.
+// Condensed from RimWorld's AI Storyteller pattern (see FEATURE_RESEARCH.md): the three
+// personalities are just different parameter sets over one scheduler, not three separate
+// systems. Also folds in SEA:R's signature mechanic -- unmanaged pollution makes waves worse,
+// a player-controlled difficulty input distinct from RimWorld's wealth-based one.
 function colonyStrength(world) {
   let aliveCitizens = 0;
   for (let i = 0; i < world.citizens.count; i++) if (world.citizens.isAliveAt(i)) aliveCitizens++;
 
   let structureHealth = 0;
-  for (const s of world.structures) if (!s.destroyed) structureHealth += s.health;
+  for (const s of world.structures) if (!s.destroyed && !s.underConstruction) structureHealth += s.health;
 
   return aliveCitizens * 2 + structureHealth * 3 + world.scrap * 0.1;
 }
 
 const AGGRESSION_MULTIPLIER = { Calm: 0.75, Standard: 1, Aggressive: 1.35 };
 
+// cycleMult: multiplies the base wave-delay formula (bigger = longer breathers).
+// doubleChance: odds a wave, once due, immediately schedules a second one close behind.
+// strengthWeight: how much colony strength (vs. flat randomness) drives wave size/timing --
+// Randy ignores it almost entirely, matching "no curve at all" in the source game.
+// cycleMult tuned relative to 1.0 = the original pre-storyteller baseline (soak-tested at
+// ~22-36 min hands-off survival); Cassandra sits AT that baseline rather than below it --
+// "least forgiving of the three" should mean "no bonus breathing room", not "actively worse
+// than the game was before storytellers existed". First-pass numbers here made ALL three
+// personalities collapse a hands-off colony in ~12-17 min, a real regression caught in
+// soak-testing -- these are the corrected values, re-verify after any further tuning.
+const STORYTELLERS = {
+  Cassandra: { cycleMult: 1.0, doubleChance: 0.12, strengthWeight: 1.0 },
+  Phoebe: { cycleMult: 1.8, doubleChance: 0.02, strengthWeight: 0.75 },
+  Randy: { cycleMultMin: 0.7, cycleMultMax: 1.6, doubleChance: 0.08, strengthWeight: 0.15 }, // randomized per-wave, not fixed -- "no curve at all"
+};
+
 function directWaveSpawner(world) {
   const strength = colonyStrength(world);
   const mult = AGGRESSION_MULTIPLIER[world.aggression] ?? 1;
-  // Stronger colonies get shorter breathers and slightly bigger waves; weak colonies get
-  // more breathing room, matching a RimWorld-style storyteller that chases player capability.
-  world.waveSpawner.strengthFactor = Math.max(0.6, Math.min(1.8, (strength / 120) * mult));
+  const teller = STORYTELLERS[world.storyteller] || STORYTELLERS.Cassandra;
+
+  const strengthTerm = (strength / 120) * mult;
+  const randomTerm = 0.7 + world.rng() * 0.9; // Randy leans almost entirely on this
+  const blended = strengthTerm * teller.strengthWeight + randomTerm * (1 - teller.strengthWeight);
+
+  // Pollution scales the danger multiplier upward -- mismanaged waste literally makes the
+  // siege worse, independent of the storyteller's own curve.
+  const pollutionTerm = 1 + Math.min(1.2, (world.pollution || 0) / 200);
+
+  world.waveSpawner.strengthFactor = Math.max(0.5, Math.min(1.8, blended * pollutionTerm));
+  world.waveSpawner.cycleMult = teller.cycleMultMin != null
+    ? teller.cycleMultMin + world.rng() * (teller.cycleMultMax - teller.cycleMultMin)
+    : teller.cycleMult;
+  world.waveSpawner.doubleChance = teller.doubleChance;
 }
 
 
@@ -836,6 +962,9 @@ function directWaveSpawner(world) {
 // blueprints first (Prison-Architect-style "you ordered it, someone builds it"), then
 // harvesting scrap nodes when nothing needs building (RimWorld-style raw-material gathering).
 
+
+
+const ROOM_REFILL_BONUS = 1.3; // RimWorld/PA-style: an actually-enclosed room works better than open ground
 
 const JobState = Object.freeze({
   Idle: 0,
@@ -894,6 +1023,7 @@ function findNearestNode(nodes, x, y) {
 function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, onScrapGain, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
+    if (store.isDownedAt(i)) continue; // incapacitated, can't work until recovered
     if (staffOnDuty(i)) continue; // guards/snipers hold their post, no eat/sleep/work jobs
 
     const state = store.jobState[i];
@@ -971,19 +1101,22 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
     }
 
     if (state === JobState.Eating) {
-      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE);
+      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus);
       if (store.hunger[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
 
     if (state === JobState.Sleeping) {
-      store.rest[i] = Math.min(1, store.rest[i] + REFILL_RATE);
+      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      store.rest[i] = Math.min(1, store.rest[i] + REFILL_RATE * roomBonus);
       if (store.rest[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
 
     if (state === JobState.Recreating) {
-      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * (store.trait[i]?.socialGainMult ?? 1));
+      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * (store.trait[i]?.socialGainMult ?? 1));
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
@@ -1044,6 +1177,7 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
 
 
 
+
 const STARTER_NAMES = [
   'Marlon', 'Aisling', 'Niamh', 'Reeli', 'Cascade', 'Orrery', 'Motoko',
   'Briar', 'Ansel', 'Sable', 'Quinn', 'Vesper', 'Rowan', 'Isolde', 'Callan',
@@ -1061,6 +1195,10 @@ class SimWorld {
     this.paused = false;
     this.gameOver = false;
     this.milestoneLog = [];
+    this.pollution = 0; // SEA:R's signature mechanic -- unmanaged waste makes waves worse, see director.js
+    this.storyteller = 'Cassandra'; // Cassandra | Phoebe | Randy, see director.js STORYTELLERS
+    this.rooms = []; // enclosed-room flood-fill, see rooms.js -- recomputed only when walls change
+    this._roomsWallSignature = null;
 
     this.grid = new SettlementGrid(width, height);
     this.zones = new ZoneGrid(width, height);
@@ -1132,6 +1270,13 @@ class SimWorld {
     maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
     tickVehicles(this);
 
+    // Pollution: generators produce power at the cost of waste (SEA:R's core tradeoff, see
+    // FEATURE_RESEARCH.md); it decays slowly on its own but climbs faster than that decay once
+    // you have more than a couple of generators running, so a garbage-truck haul run matters.
+    let activeGenerators = 0;
+    for (const s of this.structures) if (s.kind === 'generator' && !s.destroyed && !s.underConstruction) activeGenerators++;
+    this.pollution = Math.max(0, this.pollution + activeGenerators * 0.03 - 0.01);
+
     directWaveSpawner(this);
     this.waveSpawner.tick(this.currentTick, this.attackers, this.rng);
     tickAttackers(this.attackers, this.structures, this.grid, this.width / 2, this.height / 2, this.citizens, (amt) => this.addScrap(amt));
@@ -1156,11 +1301,29 @@ class SimWorld {
       return true;
     });
 
+    let wallSum = 0;
+    for (let i = 0; i < this.grid.wallThingId.length; i++) if (this.grid.wallThingId[i] !== 0) wallSum += i + 1;
+    if (wallSum !== this._roomsWallSignature) {
+      this._roomsWallSignature = wallSum;
+      this.rooms = detectRooms(this.grid);
+    }
+
     if (this.waveSpawner.waveNumber > this._lastWaveLogged) {
       this._lastWaveLogged = this.waveSpawner.waveNumber;
       this.milestoneLog.push({ tick: this.currentTick, text: `Wave ${this.waveSpawner.waveNumber} incoming` });
       if (this.milestoneLog.length > 20) this.milestoneLog.shift();
     }
+
+    // Watchtowers (CCTV/early-warning analog, see FEATURE_RESEARCH.md) give advance notice of
+    // an incoming wave before it actually spawns, rather than only finding out at spawn time.
+    const hasWatchtower = this.structures.some(s => s.kind === 'watchtower' && !s.destroyed && !s.underConstruction);
+    if (hasWatchtower && !this._warnedForWave &&
+      this.waveSpawner.nextWaveTick - this.currentTick <= 50 && this.waveSpawner.nextWaveTick > this.currentTick) {
+      this._warnedForWave = this.waveSpawner.waveNumber + 1;
+      this.milestoneLog.push({ tick: this.currentTick, text: 'Watchtower spots raiders massing -- wave incoming soon' });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    }
+    if (this._warnedForWave && this._warnedForWave <= this.waveSpawner.waveNumber) this._warnedForWave = null;
 
     let aliveCitizens = 0;
     for (let i = 0; i < this.citizens.count; i++) if (this.citizens.isAliveAt(i)) aliveCitizens++;
@@ -1174,6 +1337,7 @@ class SimWorld {
     return {
       width: this.width, height: this.height, seed: this.seed, aggression: this.aggression,
       currentTick: this.currentTick, scrap: this.scrap, gameOver: this.gameOver,
+      pollution: this.pollution, storyteller: this.storyteller,
       waveNumber: this.waveSpawner.waveNumber, nextWaveTick: this.waveSpawner.nextWaveTick,
       citizens: {
         count: this.citizens.count,
@@ -1219,6 +1383,8 @@ class SimWorld {
     w.currentTick = json.currentTick;
     w.scrap = json.scrap;
     w.gameOver = json.gameOver || false;
+    w.pollution = json.pollution || 0;
+    w.storyteller = json.storyteller || 'Cassandra';
     w.waveSpawner.waveNumber = json.waveNumber || 0;
     w.waveSpawner.nextWaveTick = json.nextWaveTick || 300;
     const c = json.citizens;
@@ -1367,10 +1533,22 @@ class Renderer {
     this._drawDogs(world);
     this._drawAttackers(world);
     this._drawVehicles(world);
+    this._drawSmogHaze(world);
     if (input) {
       this._drawCursor(world, input);
       this._drawSelection(world, input);
     }
+  }
+
+  // SEA:R's tonal hook (see FEATURE_RESEARCH.md): mismanaged waste is a visible, worsening
+  // liability, not just a background number -- a sickly haze that thickens with pollution.
+  _drawSmogHaze(world) {
+    const pollution = world.pollution || 0;
+    if (pollution < 40) return;
+    const ctx = this.ctx;
+    const alpha = Math.min(0.35, (pollution - 40) / 400);
+    ctx.fillStyle = `rgba(120,140,60,${alpha})`;
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
   _drawSelection(world, input) {
@@ -1527,9 +1705,10 @@ class Renderer {
       if (!world.citizens.isAliveAt(i)) continue;
       if (world.citizens.jobState[i] === JobState.Driving) continue; // riding inside a vehicle, drawn as part of it
       const id = world.citizens.id[i];
+      const downed = world.citizens.isDownedAt(i);
       const role = world.roster.isStaff(id) ? world.roster.kindOf(id) : StaffRoleKind.None;
-      const color = ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None];
-      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], 0.7, color, '#e8c9a0', world.citizens.health[i]);
+      const color = downed ? '#6b6b6b' : (ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None]);
+      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, downed ? '#8a8a8a' : '#e8c9a0', world.citizens.health[i]);
     }
   }
 
@@ -1643,6 +1822,14 @@ class Renderer {
       ctx.fillRect(sx - size * 0.3, sy - size * 0.1, size * 0.6, size * 0.42); // garage door opening
       return;
     }
+    if (s.kind === 'watchtower') {
+      ctx.fillStyle = '#5a4a3a';
+      ctx.fillRect(sx - size * 0.15, sy - size * 0.1, size * 0.3, size * 0.55); // support post
+      ctx.fillStyle = '#8c949e';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35); // watch platform
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35);
+      return;
+    }
     if (s.kind === 'generator') {
       ctx.fillStyle = '#4a4a52';
       ctx.fillRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
@@ -1739,6 +1926,7 @@ const TOOLS = [
   { key: 'g', tool: 'generator', label: 'Generator', cost: BUILD_COST.generator },
   { key: 'v', tool: 'garage_recycling', label: 'Recycling Garage', cost: BUILD_COST.garage_recycling },
   { key: 'n', tool: 'garage_garbage', label: 'Garbage Garage', cost: BUILD_COST.garage_garbage },
+  { key: 'c', tool: 'watchtower', label: 'Watchtower', cost: BUILD_COST.watchtower },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -1980,10 +2168,13 @@ function updateGameOver() {
 
 // ---------------------------------------------------------------- topbar stats
 function updateTopbar() {
-  document.getElementById('stat-scrap').textContent = world.scrap;
+  document.getElementById('stat-scrap').textContent = Math.round(world.scrap);
   document.getElementById('stat-citizens').textContent = countAlive(world.citizens.count, world.citizens.isAliveAt.bind(world.citizens));
   document.getElementById('stat-attackers').textContent = countAlive(world.attackers.count, world.attackers.isAliveAt.bind(world.attackers));
   document.getElementById('stat-wave').textContent = world.waveSpawner.waveNumber;
+  const pollutionEl = document.getElementById('stat-pollution');
+  pollutionEl.textContent = Math.round(world.pollution);
+  pollutionEl.classList.toggle('danger', world.pollution > 150);
   pauseBtn.textContent = world.paused ? '▶ Resume' : '⏸ Pause';
   pauseBtn.classList.toggle('active', world.paused);
   document.getElementById('speed-label').textContent = speedMultiplier + 'x';

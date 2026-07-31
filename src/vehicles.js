@@ -74,6 +74,10 @@ export function tickVehicles(world) {
           v.targetNode.amount = 0;
           v.targetNode.depleted = true;
         } else {
+          // Garbage trucks haul off waste rather than scrap -- SEA:R's actual mechanic (see
+          // FEATURE_RESEARCH.md): a real pollution reduction plus a small scrap side-benefit
+          // from whatever's recoverable, not primarily a scrap-generation vehicle.
+          world.pollution = Math.max(0, world.pollution - (25 + world.rng() * 20));
           world.addScrap(GARBAGE_BONUS_MIN + Math.floor(world.rng() * (GARBAGE_BONUS_MAX - GARBAGE_BONUS_MIN)));
         }
         v.targetX = v.garageX; v.targetY = v.garageY;

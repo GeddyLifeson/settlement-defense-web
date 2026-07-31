@@ -57,10 +57,11 @@ export class WaveSpawner {
     this.nextWaveTick = 300; // 30s at 10Hz, first wave grace period
     this.waveNumber = 0;
     this.strengthFactor = 1; // set by director.js each tick
+    this.cycleMult = 1; // storyteller-personality breather-length multiplier
+    this.doubleChance = 0.1; // odds of immediately queuing a second wave close behind
   }
 
-  tick(currentTick, attackers, rng) {
-    if (currentTick < this.nextWaveTick) return;
+  spawnOneWave(currentTick, attackers, rng) {
     this.waveNumber++;
     const count = Math.round((2 + Math.min(10, this.waveNumber * 1.5)) * this.strengthFactor);
     for (let n = 0; n < count; n++) {
@@ -72,7 +73,14 @@ export class WaveSpawner {
       else { x = rng() * this.grid.width; y = this.grid.height - 1; }
       attackers.spawn(x, y, (1 + this.waveNumber * 0.1) * Math.max(0.7, this.strengthFactor));
     }
-    const delay = 600 - Math.min(300, this.waveNumber * 15);
+  }
+
+  tick(currentTick, attackers, rng) {
+    if (currentTick < this.nextWaveTick) return;
+    this.spawnOneWave(currentTick, attackers, rng);
+    if (rng() < this.doubleChance) this.spawnOneWave(currentTick, attackers, rng); // Cassandra-style back-to-back
+
+    const delay = (600 - Math.min(300, this.waveNumber * 15)) * this.cycleMult;
     this.nextWaveTick = currentTick + Math.round(delay / this.strengthFactor);
   }
 }
@@ -170,17 +178,28 @@ function nearestAliveAttacker(attackers, x, y, maxRange) {
 
 // Attackers in contact range of a living citizen deal damage each tick; citizen dies (Dead
 // flag, permadeath per the RimWorld-style design) at 0 health.
+// Downed-not-dead (RimWorld pattern, see FEATURE_RESEARCH.md): the first time a citizen's
+// health hits 0 they go down but survive; if an attacker lands another hit on them while
+// already down, that's when they actually die. Gives a real reprieve instead of instant
+// permadeath on the first unlucky contact tick.
 export function tickAttackerVsCitizens(attackers, citizens) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
     for (let c = 0; c < citizens.count; c++) {
       if (!citizens.isAliveAt(c)) continue;
       if (Math.hypot(attackers.x[i] - citizens.x[c], attackers.y[i] - citizens.y[c]) > ATTACKER_CONTACT_RANGE) continue;
+
+      if (citizens.isDownedAt(c)) {
+        citizens.flags[c] |= CitizenFlags.Dead;
+        citizens.alive[c] = 0;
+        continue;
+      }
+
       const healthMult = citizens.trait[c]?.healthMult ?? 1;
       citizens.health[c] -= ATTACKER_CITIZEN_DAMAGE / healthMult;
       if (citizens.health[c] <= 0) {
-        citizens.flags[c] |= CitizenFlags.Dead;
-        citizens.alive[c] = 0;
+        citizens.health[c] = 0.05;
+        citizens.flags[c] |= CitizenFlags.Downed;
       }
     }
   }
@@ -191,6 +210,7 @@ export function tickAttackerVsCitizens(attackers, citizens) {
 export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap) {
   for (let i = 0; i < citizens.count; i++) {
     if (!citizens.isAliveAt(i)) continue;
+    if (citizens.isDownedAt(i)) continue; // downed guards/snipers can't fight back
     const kind = roster.kindOf(idOf(i));
     if (kind !== 'Guard' && kind !== 'Sniper') continue;
 

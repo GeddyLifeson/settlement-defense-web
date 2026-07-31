@@ -108,10 +108,22 @@ export class Renderer {
     this._drawDogs(world);
     this._drawAttackers(world);
     this._drawVehicles(world);
+    this._drawSmogHaze(world);
     if (input) {
       this._drawCursor(world, input);
       this._drawSelection(world, input);
     }
+  }
+
+  // SEA:R's tonal hook (see FEATURE_RESEARCH.md): mismanaged waste is a visible, worsening
+  // liability, not just a background number -- a sickly haze that thickens with pollution.
+  _drawSmogHaze(world) {
+    const pollution = world.pollution || 0;
+    if (pollution < 40) return;
+    const ctx = this.ctx;
+    const alpha = Math.min(0.35, (pollution - 40) / 400);
+    ctx.fillStyle = `rgba(120,140,60,${alpha})`;
+    ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
   _drawSelection(world, input) {
@@ -268,9 +280,10 @@ export class Renderer {
       if (!world.citizens.isAliveAt(i)) continue;
       if (world.citizens.jobState[i] === JobState.Driving) continue; // riding inside a vehicle, drawn as part of it
       const id = world.citizens.id[i];
+      const downed = world.citizens.isDownedAt(i);
       const role = world.roster.isStaff(id) ? world.roster.kindOf(id) : StaffRoleKind.None;
-      const color = ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None];
-      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], 0.7, color, '#e8c9a0', world.citizens.health[i]);
+      const color = downed ? '#6b6b6b' : (ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None]);
+      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, downed ? '#8a8a8a' : '#e8c9a0', world.citizens.health[i]);
     }
   }
 
@@ -382,6 +395,14 @@ export class Renderer {
       ctx.strokeRect(sx - size * 0.45, sy - size * 0.4, size * 0.9, size * 0.8);
       ctx.fillStyle = '#1a1a1a';
       ctx.fillRect(sx - size * 0.3, sy - size * 0.1, size * 0.6, size * 0.42); // garage door opening
+      return;
+    }
+    if (s.kind === 'watchtower') {
+      ctx.fillStyle = '#5a4a3a';
+      ctx.fillRect(sx - size * 0.15, sy - size * 0.1, size * 0.3, size * 0.55); // support post
+      ctx.fillStyle = '#8c949e';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35); // watch platform
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35);
       return;
     }
     if (s.kind === 'generator') {

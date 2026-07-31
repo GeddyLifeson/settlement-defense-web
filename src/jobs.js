@@ -5,6 +5,9 @@
 // harvesting scrap nodes when nothing needs building (RimWorld-style raw-material gathering).
 import { ZoneKind } from './zones.js';
 import { findUndrivenVehicle, boardVehicle } from './vehicles.js';
+import { roomContaining } from './rooms.js';
+
+const ROOM_REFILL_BONUS = 1.3; // RimWorld/PA-style: an actually-enclosed room works better than open ground
 
 export const JobState = Object.freeze({
   Idle: 0,
@@ -63,6 +66,7 @@ function findNearestNode(nodes, x, y) {
 export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, onScrapGain, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
+    if (store.isDownedAt(i)) continue; // incapacitated, can't work until recovered
     if (staffOnDuty(i)) continue; // guards/snipers hold their post, no eat/sleep/work jobs
 
     const state = store.jobState[i];
@@ -140,19 +144,22 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
     }
 
     if (state === JobState.Eating) {
-      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE);
+      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus);
       if (store.hunger[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
 
     if (state === JobState.Sleeping) {
-      store.rest[i] = Math.min(1, store.rest[i] + REFILL_RATE);
+      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      store.rest[i] = Math.min(1, store.rest[i] + REFILL_RATE * roomBonus);
       if (store.rest[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
 
     if (state === JobState.Recreating) {
-      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * (store.trait[i]?.socialGainMult ?? 1));
+      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * (store.trait[i]?.socialGainMult ?? 1));
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }

@@ -134,10 +134,13 @@ function updateGameOver() {
 
 // ---------------------------------------------------------------- topbar stats
 function updateTopbar() {
-  document.getElementById('stat-scrap').textContent = world.scrap;
+  document.getElementById('stat-scrap').textContent = Math.round(world.scrap);
   document.getElementById('stat-citizens').textContent = countAlive(world.citizens.count, world.citizens.isAliveAt.bind(world.citizens));
   document.getElementById('stat-attackers').textContent = countAlive(world.attackers.count, world.attackers.isAliveAt.bind(world.attackers));
   document.getElementById('stat-wave').textContent = world.waveSpawner.waveNumber;
+  const pollutionEl = document.getElementById('stat-pollution');
+  pollutionEl.textContent = Math.round(world.pollution);
+  pollutionEl.classList.toggle('danger', world.pollution > 150);
   pauseBtn.textContent = world.paused ? '▶ Resume' : '⏸ Pause';
   pauseBtn.classList.toggle('active', world.paused);
   document.getElementById('speed-label').textContent = speedMultiplier + 'x';

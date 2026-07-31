@@ -36,6 +36,7 @@ export class StaffRoster {
 export function tickStaffDuty(store, roster, idOf, speed = 0.05) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
+    if (store.isDownedAt(i)) continue; // downed staff can't hold their post
     const id = idOf(i);
     if (!roster.isStaff(id)) continue;
     const post = roster.postOf(id);
