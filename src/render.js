@@ -4,6 +4,7 @@
 // and zone/room tints rather than photographic texture.
 import { StaffRoleKind, TerrainKind } from './core.js';
 import { ZONE_COLOR, ZoneKind } from './zones.js';
+import { JobState } from './jobs.js';
 
 const CELL = 24; // px per grid cell at zoom 1
 const OUTLINE = 'rgba(20,16,12,0.75)';
@@ -25,6 +26,21 @@ const ZONE_BORDER = {
 function cellNoise(x, y) {
   const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
   return n - Math.floor(n);
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Smooth value noise: bilinearly interpolates between noise sampled at integer lattice points,
+// so shading blends continuously across cell boundaries instead of a per-cell checkerboard --
+// "one big piece" rather than visibly tiled squares.
+function smoothNoise(x, y) {
+  const x0 = Math.floor(x), y0 = Math.floor(y);
+  const tx = x - x0, ty = y - y0;
+  const n00 = cellNoise(x0, y0), n10 = cellNoise(x0 + 1, y0);
+  const n01 = cellNoise(x0, y0 + 1), n11 = cellNoise(x0 + 1, y0 + 1);
+  const sx = tx * tx * (3 - 2 * tx); // smoothstep, avoids visible diagonal creases from linear lerp
+  const sy = ty * ty * (3 - 2 * ty);
+  return lerp(lerp(n00, n10, sx), lerp(n01, n11, sx), sy);
 }
 
 export class Renderer {
@@ -149,55 +165,63 @@ export class Renderer {
     ctx.strokeRect(px + 1, py + 1, size - 2, size - 2);
   }
 
-  _drawGround(world) {
-    const ctx = this.ctx;
-    const [x0, y0] = this.worldToScreen(0, 0);
-    const size = CELL * this.zoom;
-    const startCol = Math.max(0, Math.floor(-x0 / size));
-    const startRow = Math.max(0, Math.floor(-y0 / size));
-    const endCol = Math.min(world.width, Math.ceil((this.canvas.width - x0) / size));
-    const endRow = Math.min(world.height, Math.ceil((this.canvas.height - y0) / size));
+  // Ground is pre-rendered once into an offscreen canvas with smooth (bilinearly-interpolated)
+  // noise, so it reads as one continuous blended surface -- like a Minecraft grass block seen
+  // from above, not a checkerboard of individually-colored tiles. Rebuilt only when the wall
+  // layout changes (walls tint the ground dark), not every frame.
+  _buildGroundCache(world) {
+    const SUB = 4; // samples per cell edge in the cache -- enough to hide any per-cell seam
+    const cw = world.width * SUB, ch = world.height * SUB;
+    const cnv = document.createElement('canvas');
+    cnv.width = cw; cnv.height = ch;
+    const cctx = cnv.getContext('2d');
+    const img = cctx.createImageData(cw, ch);
 
-    for (let gy = startRow; gy < endRow; gy++) {
-      for (let gx = startCol; gx < endCol; gx++) {
-        const idx = world.grid.index(gx, gy);
+    for (let py = 0; py < ch; py++) {
+      const gy = py / SUB;
+      const cellY = Math.min(world.height - 1, Math.floor(gy));
+      for (let px = 0; px < cw; px++) {
+        const gx = px / SUB;
+        const cellX = Math.min(world.width - 1, Math.floor(gx));
+        const idx = world.grid.index(cellX, cellY);
         const kind = world.grid.terrain[idx];
         const hasWall = world.grid.wallThingId[idx] !== 0;
-        const n = cellNoise(gx, gy);
+
         let base = [0.5, 0.4, 0.28]; // dirt brown, matches the GDD's scavenged-settlement palette
         if (kind === TerrainKind.Soil) base = [0.4, 0.31, 0.20];
         else if (kind === TerrainKind.Rock) base = [0.47, 0.47, 0.49];
         else if (kind === TerrainKind.Water) base = [0.18, 0.35, 0.55];
         if (hasWall) base = [0.15, 0.14, 0.16];
 
-        const shade = 0.88 + n * 0.24;
-        const r = Math.round(base[0] * 255 * shade);
-        const g = Math.round(base[1] * 255 * shade);
-        const b = Math.round(base[2] * 255 * shade);
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
-        const px = x0 + gx * size, py = y0 + gy * size;
-        ctx.fillRect(px, py, size + 1, size + 1);
+        const n = smoothNoise(gx * 0.6, gy * 0.6); // low frequency -> broad soft blotches, not speckle
+        const shade = 0.86 + n * 0.28;
+        const o = (py * cw + px) * 4;
+        img.data[o] = Math.round(base[0] * 255 * shade);
+        img.data[o + 1] = Math.round(base[1] * 255 * shade);
+        img.data[o + 2] = Math.round(base[2] * 255 * shade);
+        img.data[o + 3] = 255;
       }
     }
+    cctx.putImageData(img, 0, 0);
+    this._groundCache = cnv;
+    this._groundCacheWallSignature = this._wallSignature(world);
+  }
 
-    // Faint grid lines -- the single biggest thing missing for a Prison-Architect-ish read;
-    // a flat noise texture with no grid doesn't feel like a designable floor plan.
-    if (size > 6) {
-      ctx.strokeStyle = 'rgba(0,0,0,0.12)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (let gx = startCol; gx <= endCol; gx++) {
-        const px = Math.round(x0 + gx * size) + 0.5;
-        ctx.moveTo(px, y0 + startRow * size);
-        ctx.lineTo(px, y0 + endRow * size);
-      }
-      for (let gy = startRow; gy <= endRow; gy++) {
-        const py = Math.round(y0 + gy * size) + 0.5;
-        ctx.moveTo(x0 + startCol * size, py);
-        ctx.lineTo(x0 + endCol * size, py);
-      }
-      ctx.stroke();
+  _wallSignature(world) {
+    let sum = 0;
+    for (let i = 0; i < world.grid.wallThingId.length; i++) if (world.grid.wallThingId[i] !== 0) sum += i + 1;
+    return sum;
+  }
+
+  _drawGround(world) {
+    const ctx = this.ctx;
+    if (!this._groundCache || this._groundCacheWallSignature !== this._wallSignature(world)) {
+      this._buildGroundCache(world);
     }
+    const [x0, y0] = this.worldToScreen(0, 0);
+    const size = CELL * this.zoom;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(this._groundCache, x0, y0, world.width * size, world.height * size);
   }
 
   _drawHumanoid(x, y, scale, bodyColor, headColor, healthFrac) {
@@ -242,6 +266,7 @@ export class Renderer {
   _drawCitizens(world) {
     for (let i = 0; i < world.citizens.count; i++) {
       if (!world.citizens.isAliveAt(i)) continue;
+      if (world.citizens.jobState[i] === JobState.Driving) continue; // riding inside a vehicle, drawn as part of it
       const id = world.citizens.id[i];
       const role = world.roster.isStaff(id) ? world.roster.kindOf(id) : StaffRoleKind.None;
       const color = ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None];
@@ -351,6 +376,14 @@ export class Renderer {
       ctx.strokeRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
       return;
     }
+    if (s.kind === 'garage_recycling' || s.kind === 'garage_garbage') {
+      ctx.fillStyle = s.kind === 'garage_recycling' ? '#3a5a3f' : '#5a5030';
+      ctx.fillRect(sx - size * 0.45, sy - size * 0.4, size * 0.9, size * 0.8);
+      ctx.strokeRect(sx - size * 0.45, sy - size * 0.4, size * 0.9, size * 0.8);
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(sx - size * 0.3, sy - size * 0.1, size * 0.6, size * 0.42); // garage door opening
+      return;
+    }
     if (s.kind === 'generator') {
       ctx.fillStyle = '#4a4a52';
       ctx.fillRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
@@ -396,8 +429,11 @@ export class Renderer {
   _drawVehicles(world) {
     const ctx = this.ctx;
     for (const v of world.vehicles || []) {
+      const parked = v.driverId == null;
       const [sx, sy] = this.worldToScreen(v.x, v.y);
       const s = CELL * this.zoom * 0.75;
+      ctx.save();
+      if (parked) ctx.globalAlpha = 0.55; // dimmed -- signals "needs a driver" at a glance
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.4, s * 0.55, s * 0.14, 0, 0, Math.PI * 2); ctx.fill();
       ctx.lineWidth = Math.max(1, s * 0.06);
@@ -411,6 +447,13 @@ export class Renderer {
       if (v.phase === 'working') {
         ctx.fillStyle = 'rgba(255,255,255,0.7)';
         ctx.fillRect(sx - s * 0.1, sy - s * 0.55, s * 0.2, s * 0.15);
+      }
+      ctx.restore();
+      if (parked) {
+        ctx.fillStyle = '#e0a336';
+        ctx.font = `${Math.round(s * 0.4)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('?', sx, sy - s * 0.5);
       }
     }
   }

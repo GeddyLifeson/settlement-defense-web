@@ -14,7 +14,7 @@ import { RelationshipWeb } from './relationships.js';
 import { directWaveSpawner } from './director.js';
 import { TRAITS } from './traits.js';
 import { scatterNodes, maybeSpawnNode, ResourceNode } from './resources.js';
-import { maybeSpawnVehicle, tickVehicles } from './vehicles.js';
+import { tickVehicles, spawnParkedVehicle } from './vehicles.js';
 
 const STARTER_NAMES = [
   'Marlon', 'Aisling', 'Niamh', 'Reeli', 'Cascade', 'Orrery', 'Motoko',
@@ -95,14 +95,13 @@ export class SimWorld {
 
     tickNeedsAndMood(this.citizens, (i) => this.isStaffAt(i), this.rng);
     tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i), this.structures, this.resourceNodes,
-      (i) => this.idOf(i), (amt) => this.addScrap(amt));
+      (i) => this.idOf(i), (amt) => this.addScrap(amt), this);
     tickStaffDuty(this.citizens, this.roster, (i) => this.idOf(i));
     tickWander(this.citizens, this.grid, this.rng, 0.04, (i) => this.isStaffAt(i) || isOnJob(this.citizens, i));
     tickDogs(this.dogs, this.citizens, this.roster, this.attackers, (amt) => this.addScrap(amt));
     this.relationships.tick(this.citizens, (i) => this.citizens.name[i], this.currentTick);
 
     maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
-    maybeSpawnVehicle(this);
     tickVehicles(this);
 
     directWaveSpawner(this);
@@ -114,11 +113,17 @@ export class SimWorld {
 
     // Wall blueprints live in this.structures like everything else (for the ghost render +
     // construction progress), but the actual passability/terrain effect lives on the grid --
-    // apply it the tick a wall blueprint finishes, then drop the now-redundant entry.
+    // apply it the tick a wall blueprint finishes, then drop the now-redundant entry. Garage
+    // blueprints similarly hand off to a parked Vehicle the moment they finish, rather than
+    // acting as a structure themselves once complete.
     this.structures = this.structures.filter(s => {
       if (s.kind === 'wall' && !s.underConstruction) {
         this.grid.setWall(Math.floor(s.x), Math.floor(s.y), 1);
         return false;
+      }
+      if ((s.kind === 'garage_recycling' || s.kind === 'garage_garbage') && !s.underConstruction && !s._vehicleSpawned) {
+        spawnParkedVehicle(this, s.kind === 'garage_recycling' ? 'recycling' : 'garbage', s.x, s.y);
+        s._vehicleSpawned = true;
       }
       return true;
     });
@@ -165,10 +170,19 @@ export class SimWorld {
       structures: this.structures.map(s => ({
         kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed,
         underConstruction: s.underConstruction, buildProgress: s.buildProgress,
+        _vehicleSpawned: s._vehicleSpawned || false,
       })),
       zones: Array.from(this.zones.kind),
       dogs: this.dogs.map(d => ({ ownerId: d.ownerId, x: d.x, y: d.y })),
       resourceNodes: this.resourceNodes.map(n => ({ x: n.x, y: n.y, amount: n.amount, maxAmount: n.maxAmount, depleted: n.depleted })),
+      // targetNode isn't serialized (it's a live reference into resourceNodes) -- a vehicle
+      // mid-haul on save resumes as if just-departed rather than mid-route. Acceptable: it's a
+      // few seconds of game time, not a correctness bug like the duplicate-vehicle-on-load one
+      // this was written alongside (garages need _vehicleSpawned persisted, see above).
+      vehicles: this.vehicles.map(v => ({
+        kind: v.kind, garageX: v.garageX, garageY: v.garageY, x: v.x, y: v.y,
+        driverId: v.driverId, phase: v.driverId == null ? 'parked' : 'inbound', workTimer: 0,
+      })),
     };
   }
 
@@ -198,10 +212,18 @@ export class SimWorld {
     w.structures = json.structures.map(s => Object.assign(new Structure(s.kind, s.x, s.y, { instant: true }), s));
     if (json.zones) w.zones.kind.set(json.zones);
     if (json.dogs) w.dogs = json.dogs.map(d => ({ ...d, cooldown: 0 }));
+    if (json.vehicles) {
+      // Citizen jobState isn't persisted (arrays default back to Idle on the fresh SimWorld
+      // above), so a vehicle can't come back mid-haul with a valid driver -- every vehicle
+      // loads parked; whoever was driving just needs to be reassigned by the job system.
+      w.vehicles = json.vehicles.map(v => ({
+        kind: v.kind, garageX: v.garageX, garageY: v.garageY, x: v.garageX, y: v.garageY,
+        driverId: null, phase: 'parked', workTimer: 0, targetNode: null,
+      }));
+    }
     if (json.resourceNodes) {
       w.resourceNodes = json.resourceNodes.map(n => Object.assign(new ResourceNode(n.x, n.y, n.maxAmount), n));
     }
-    w.vehicles = [];
     return w;
   }
 }

@@ -8,6 +8,8 @@ export const BUILD_COST = {
   table: 6,
   door: 5,
   generator: 30,
+  garage_recycling: 45,
+  garage_garbage: 35,
 };
 
 export const SCRAP_PER_KILL = 4;

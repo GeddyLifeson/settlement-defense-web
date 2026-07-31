@@ -1,57 +1,64 @@
 // Vehicles, the Super Energy Apocalypse: Recycled side of the mashup -- garbage/recycling
-// trucks that periodically roll in, haul off a resource node or battlefield scrap, and roll
-// back out. Purely automatic (no player driving), matching SEA:R's background-hauler flavor
-// rather than a controllable unit.
+// trucks. Unlike the first pass, these don't spawn on their own: a citizen has to build the
+// garage (blueprint, same construction pipeline as everything else) and then a citizen has to
+// drive it. An undriven truck just sits parked at its garage.
 const VEHICLE_SPEED = 0.11;
-const SPAWN_INTERVAL_MIN = 500, SPAWN_INTERVAL_MAX = 900;
 const GARBAGE_BONUS_MIN = 15, GARBAGE_BONUS_MAX = 40;
+const DRIVER_ENTER_RANGE = 0.5;
 
 export class Vehicle {
-  constructor(kind, x, y) {
+  constructor(kind, garageX, garageY) {
     this.kind = kind; // 'recycling' | 'garbage'
-    this.x = x; this.y = y;
-    this.phase = 'inbound'; // inbound -> working -> outbound
+    this.garageX = garageX; this.garageY = garageY;
+    this.x = garageX; this.y = garageY;
+    this.driverId = null;
+    this.phase = 'parked'; // parked -> inbound -> working -> outbound -> parked
     this.workTimer = 0;
     this.targetNode = null;
   }
 }
 
-function edgePoint(grid, rng) {
-  const edge = Math.floor(rng() * 4);
-  if (edge === 0) return { x: 0, y: rng() * grid.height };
-  if (edge === 1) return { x: grid.width - 1, y: rng() * grid.height };
-  if (edge === 2) return { x: rng() * grid.width, y: 0 };
-  return { x: rng() * grid.width, y: grid.height - 1 };
+// Called when a garage blueprint finishes construction (see world.js) -- one vehicle per
+// garage, parked and waiting for a driver.
+export function spawnParkedVehicle(world, kind, x, y) {
+  world.vehicles.push(new Vehicle(kind, x, y));
 }
 
-export function maybeSpawnVehicle(world) {
-  if (world.currentTick < world._nextVehicleTick) return;
-  world._nextVehicleTick = world.currentTick + SPAWN_INTERVAL_MIN +
-    Math.floor(world.rng() * (SPAWN_INTERVAL_MAX - SPAWN_INTERVAL_MIN));
-
-  const kind = world.rng() < 0.5 ? 'recycling' : 'garbage';
-  const spawn = edgePoint(world.grid, world.rng);
-  const v = new Vehicle(kind, spawn.x, spawn.y);
-
-  if (kind === 'recycling') {
-    const candidates = world.resourceNodes.filter(n => !n.depleted && n.amount > 10);
-    v.targetNode = candidates.length ? candidates[Math.floor(world.rng() * candidates.length)] : null;
-    if (!v.targetNode) return; // nothing worth hauling right now, skip this spawn
-  } else {
-    v.targetX = world.width / 2 + (world.rng() - 0.5) * 6;
-    v.targetY = world.height / 2 + (world.rng() - 0.5) * 6;
+export function findUndrivenVehicle(vehicles, x, y) {
+  let best = null, bestDist = Infinity;
+  for (const v of vehicles) {
+    if (v.driverId != null || v.phase !== 'parked') continue;
+    const d = Math.hypot(v.x - x, v.y - y);
+    if (d < bestDist) { bestDist = d; best = v; }
   }
-  world.vehicles.push(v);
+  return best;
+}
+
+// Called by jobs.js once a citizen has walked up to a parked vehicle -- hands over the wheel
+// and kicks off one haul cycle.
+export function boardVehicle(world, vehicle, citizenId) {
+  vehicle.driverId = citizenId;
+  if (vehicle.kind === 'recycling') {
+    const candidates = world.resourceNodes.filter(n => !n.depleted && n.amount > 10);
+    vehicle.targetNode = candidates.length ? candidates[Math.floor(world.rng() * candidates.length)] : null;
+    if (!vehicle.targetNode) { vehicle.phase = 'outbound'; vehicle.targetX = vehicle.garageX; vehicle.targetY = vehicle.garageY; return; }
+  } else {
+    vehicle.targetX = world.width / 2 + (world.rng() - 0.5) * 6;
+    vehicle.targetY = world.height / 2 + (world.rng() - 0.5) * 6;
+  }
+  vehicle.phase = 'inbound';
 }
 
 export function tickVehicles(world) {
-  for (let i = world.vehicles.length - 1; i >= 0; i--) {
-    const v = world.vehicles[i];
+  for (const v of world.vehicles) {
+    if (v.driverId == null) continue; // parked, waiting for a driver -- nothing to do
 
     if (v.phase === 'inbound') {
       const tx = v.kind === 'recycling' ? v.targetNode?.x : v.targetX;
       const ty = v.kind === 'recycling' ? v.targetNode?.y : v.targetY;
-      if (tx == null || (v.kind === 'recycling' && v.targetNode.depleted)) { v.phase = 'outbound'; continue; }
+      if (tx == null || (v.kind === 'recycling' && v.targetNode.depleted)) {
+        v.phase = 'outbound'; v.targetX = v.garageX; v.targetY = v.garageY; continue;
+      }
       const dx = tx - v.x, dy = ty - v.y;
       const dist = Math.hypot(dx, dy);
       if (dist < 0.6) { v.phase = 'working'; v.workTimer = 20; }
@@ -69,8 +76,7 @@ export function tickVehicles(world) {
         } else {
           world.addScrap(GARBAGE_BONUS_MIN + Math.floor(world.rng() * (GARBAGE_BONUS_MAX - GARBAGE_BONUS_MIN)));
         }
-        const exit = edgePoint(world.grid, world.rng);
-        v.targetX = exit.x; v.targetY = exit.y;
+        v.targetX = v.garageX; v.targetY = v.garageY;
         v.phase = 'outbound';
       }
       continue;
@@ -79,7 +85,14 @@ export function tickVehicles(world) {
     if (v.phase === 'outbound') {
       const dx = v.targetX - v.x, dy = v.targetY - v.y;
       const dist = Math.hypot(dx, dy);
-      if (dist < 0.6) { world.vehicles.splice(i, 1); continue; }
+      if (dist < 0.6) {
+        // Back home -- release the driver (jobs.js clears their Driving state next tick when
+        // it sees driverId no longer matches them) and park until someone boards again.
+        v.driverId = null;
+        v.phase = 'parked';
+        v.x = v.garageX; v.y = v.garageY;
+        continue;
+      }
       v.x += (dx / dist) * VEHICLE_SPEED; v.y += (dy / dist) * VEHICLE_SPEED;
     }
   }

@@ -172,6 +172,8 @@ const BUILD_COST = {
   table: 6,
   door: 5,
   generator: 30,
+  garage_recycling: 45,
+  garage_garbage: 35,
 };
 
 const SCRAP_PER_KILL = 4;
@@ -232,59 +234,66 @@ function maybeSpawnNode(nodes, grid, rng, currentTick, avoidX, avoidY) {
 
 // ---- vehicles.js ----
 // Vehicles, the Super Energy Apocalypse: Recycled side of the mashup -- garbage/recycling
-// trucks that periodically roll in, haul off a resource node or battlefield scrap, and roll
-// back out. Purely automatic (no player driving), matching SEA:R's background-hauler flavor
-// rather than a controllable unit.
+// trucks. Unlike the first pass, these don't spawn on their own: a citizen has to build the
+// garage (blueprint, same construction pipeline as everything else) and then a citizen has to
+// drive it. An undriven truck just sits parked at its garage.
 const VEHICLE_SPEED = 0.11;
-const SPAWN_INTERVAL_MIN = 500, SPAWN_INTERVAL_MAX = 900;
 const GARBAGE_BONUS_MIN = 15, GARBAGE_BONUS_MAX = 40;
+const DRIVER_ENTER_RANGE = 0.5;
 
 class Vehicle {
-  constructor(kind, x, y) {
+  constructor(kind, garageX, garageY) {
     this.kind = kind; // 'recycling' | 'garbage'
-    this.x = x; this.y = y;
-    this.phase = 'inbound'; // inbound -> working -> outbound
+    this.garageX = garageX; this.garageY = garageY;
+    this.x = garageX; this.y = garageY;
+    this.driverId = null;
+    this.phase = 'parked'; // parked -> inbound -> working -> outbound -> parked
     this.workTimer = 0;
     this.targetNode = null;
   }
 }
 
-function edgePoint(grid, rng) {
-  const edge = Math.floor(rng() * 4);
-  if (edge === 0) return { x: 0, y: rng() * grid.height };
-  if (edge === 1) return { x: grid.width - 1, y: rng() * grid.height };
-  if (edge === 2) return { x: rng() * grid.width, y: 0 };
-  return { x: rng() * grid.width, y: grid.height - 1 };
+// Called when a garage blueprint finishes construction (see world.js) -- one vehicle per
+// garage, parked and waiting for a driver.
+function spawnParkedVehicle(world, kind, x, y) {
+  world.vehicles.push(new Vehicle(kind, x, y));
 }
 
-function maybeSpawnVehicle(world) {
-  if (world.currentTick < world._nextVehicleTick) return;
-  world._nextVehicleTick = world.currentTick + SPAWN_INTERVAL_MIN +
-    Math.floor(world.rng() * (SPAWN_INTERVAL_MAX - SPAWN_INTERVAL_MIN));
-
-  const kind = world.rng() < 0.5 ? 'recycling' : 'garbage';
-  const spawn = edgePoint(world.grid, world.rng);
-  const v = new Vehicle(kind, spawn.x, spawn.y);
-
-  if (kind === 'recycling') {
-    const candidates = world.resourceNodes.filter(n => !n.depleted && n.amount > 10);
-    v.targetNode = candidates.length ? candidates[Math.floor(world.rng() * candidates.length)] : null;
-    if (!v.targetNode) return; // nothing worth hauling right now, skip this spawn
-  } else {
-    v.targetX = world.width / 2 + (world.rng() - 0.5) * 6;
-    v.targetY = world.height / 2 + (world.rng() - 0.5) * 6;
+function findUndrivenVehicle(vehicles, x, y) {
+  let best = null, bestDist = Infinity;
+  for (const v of vehicles) {
+    if (v.driverId != null || v.phase !== 'parked') continue;
+    const d = Math.hypot(v.x - x, v.y - y);
+    if (d < bestDist) { bestDist = d; best = v; }
   }
-  world.vehicles.push(v);
+  return best;
+}
+
+// Called by jobs.js once a citizen has walked up to a parked vehicle -- hands over the wheel
+// and kicks off one haul cycle.
+function boardVehicle(world, vehicle, citizenId) {
+  vehicle.driverId = citizenId;
+  if (vehicle.kind === 'recycling') {
+    const candidates = world.resourceNodes.filter(n => !n.depleted && n.amount > 10);
+    vehicle.targetNode = candidates.length ? candidates[Math.floor(world.rng() * candidates.length)] : null;
+    if (!vehicle.targetNode) { vehicle.phase = 'outbound'; vehicle.targetX = vehicle.garageX; vehicle.targetY = vehicle.garageY; return; }
+  } else {
+    vehicle.targetX = world.width / 2 + (world.rng() - 0.5) * 6;
+    vehicle.targetY = world.height / 2 + (world.rng() - 0.5) * 6;
+  }
+  vehicle.phase = 'inbound';
 }
 
 function tickVehicles(world) {
-  for (let i = world.vehicles.length - 1; i >= 0; i--) {
-    const v = world.vehicles[i];
+  for (const v of world.vehicles) {
+    if (v.driverId == null) continue; // parked, waiting for a driver -- nothing to do
 
     if (v.phase === 'inbound') {
       const tx = v.kind === 'recycling' ? v.targetNode?.x : v.targetX;
       const ty = v.kind === 'recycling' ? v.targetNode?.y : v.targetY;
-      if (tx == null || (v.kind === 'recycling' && v.targetNode.depleted)) { v.phase = 'outbound'; continue; }
+      if (tx == null || (v.kind === 'recycling' && v.targetNode.depleted)) {
+        v.phase = 'outbound'; v.targetX = v.garageX; v.targetY = v.garageY; continue;
+      }
       const dx = tx - v.x, dy = ty - v.y;
       const dist = Math.hypot(dx, dy);
       if (dist < 0.6) { v.phase = 'working'; v.workTimer = 20; }
@@ -302,8 +311,7 @@ function tickVehicles(world) {
         } else {
           world.addScrap(GARBAGE_BONUS_MIN + Math.floor(world.rng() * (GARBAGE_BONUS_MAX - GARBAGE_BONUS_MIN)));
         }
-        const exit = edgePoint(world.grid, world.rng);
-        v.targetX = exit.x; v.targetY = exit.y;
+        v.targetX = v.garageX; v.targetY = v.garageY;
         v.phase = 'outbound';
       }
       continue;
@@ -312,7 +320,14 @@ function tickVehicles(world) {
     if (v.phase === 'outbound') {
       const dx = v.targetX - v.x, dy = v.targetY - v.y;
       const dist = Math.hypot(dx, dy);
-      if (dist < 0.6) { world.vehicles.splice(i, 1); continue; }
+      if (dist < 0.6) {
+        // Back home -- release the driver (jobs.js clears their Driving state next tick when
+        // it sees driverId no longer matches them) and park until someone boards again.
+        v.driverId = null;
+        v.phase = 'parked';
+        v.x = v.garageX; v.y = v.garageY;
+        continue;
+      }
       v.x += (dx / dist) * VEHICLE_SPEED; v.y += (dy / dist) * VEHICLE_SPEED;
     }
   }
@@ -821,6 +836,7 @@ function directWaveSpawner(world) {
 // blueprints first (Prison-Architect-style "you ordered it, someone builds it"), then
 // harvesting scrap nodes when nothing needs building (RimWorld-style raw-material gathering).
 
+
 const JobState = Object.freeze({
   Idle: 0,
   SeekingFood: 1,
@@ -833,6 +849,8 @@ const JobState = Object.freeze({
   Building: 8,
   SeekingScrap: 9,
   Harvesting: 10,
+  SeekingVehicle: 11,
+  Driving: 12,
 });
 
 const SEEK_SOCIAL_THRESHOLD = 0.35;
@@ -873,7 +891,7 @@ function findNearestNode(nodes, x, y) {
   return best;
 }
 
-function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, onScrapGain) {
+function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, onScrapGain, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
     if (staffOnDuty(i)) continue; // guards/snipers hold their post, no eat/sleep/work jobs
@@ -903,6 +921,19 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
         continue;
       }
 
+      // Driving a built truck is checked before manual harvesting -- one haul cycle moves far
+      // more scrap than one citizen picking at a node by hand, so an idle truck should win the
+      // idle-citizen's attention. With resource nodes almost always available, checking this
+      // after harvesting meant no citizen ever reached it in testing -- a real bug, not a
+      // priority nuance.
+      const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i]);
+      if (vehicle) {
+        store.jobState[i] = JobState.SeekingVehicle;
+        store.targetX[i] = vehicle.x; store.targetY[i] = vehicle.y;
+        store._jobRef[i] = vehicle;
+        continue;
+      }
+
       const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
       if (node) {
         store.jobState[i] = JobState.SeekingScrap;
@@ -914,11 +945,18 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
     }
 
     if (state === JobState.SeekingFood || state === JobState.SeekingBed || state === JobState.SeekingRec
-      || state === JobState.SeekingBuild || state === JobState.SeekingScrap) {
+      || state === JobState.SeekingBuild || state === JobState.SeekingScrap || state === JobState.SeekingVehicle) {
       const dx = store.targetX[i] - store.x[i];
       const dy = store.targetY[i] - store.y[i];
       const dist = Math.hypot(dx, dy);
       if (dist < ARRIVE_DIST) {
+        if (state === JobState.SeekingVehicle) {
+          const vehicle = store._jobRef[i];
+          if (vehicle.driverId != null) { store.jobState[i] = JobState.Idle; continue; } // beaten to it
+          boardVehicle(world, vehicle, idOf(i));
+          store.jobState[i] = JobState.Driving;
+          continue;
+        }
         store.jobState[i] = state === JobState.SeekingFood ? JobState.Eating
           : state === JobState.SeekingBed ? JobState.Sleeping
           : state === JobState.SeekingRec ? JobState.Recreating
@@ -972,6 +1010,19 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2;
       if (node.amount <= 0) node.depleted = true;
       if (node.depleted) store.jobState[i] = JobState.Idle;
+      continue;
+    }
+
+    if (state === JobState.Driving) {
+      const vehicle = store._jobRef?.[i];
+      // vehicles.js clears driverId itself once the haul cycle completes and it's back home --
+      // that's the signal this citizen's shift is over, not a countdown tracked here.
+      if (!vehicle || vehicle.driverId !== idOf(i)) {
+        store.jobState[i] = JobState.Idle;
+        if (vehicle) { store.x[i] = vehicle.garageX; store.y[i] = vehicle.garageY; store.targetX[i] = vehicle.garageX; store.targetY[i] = vehicle.garageY; }
+        continue;
+      }
+      store.x[i] = vehicle.x; store.y[i] = vehicle.y; // riding along, hidden (render.js skips Driving citizens)
       continue;
     }
   }
@@ -1072,14 +1123,13 @@ class SimWorld {
 
     tickNeedsAndMood(this.citizens, (i) => this.isStaffAt(i), this.rng);
     tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i), this.structures, this.resourceNodes,
-      (i) => this.idOf(i), (amt) => this.addScrap(amt));
+      (i) => this.idOf(i), (amt) => this.addScrap(amt), this);
     tickStaffDuty(this.citizens, this.roster, (i) => this.idOf(i));
     tickWander(this.citizens, this.grid, this.rng, 0.04, (i) => this.isStaffAt(i) || isOnJob(this.citizens, i));
     tickDogs(this.dogs, this.citizens, this.roster, this.attackers, (amt) => this.addScrap(amt));
     this.relationships.tick(this.citizens, (i) => this.citizens.name[i], this.currentTick);
 
     maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
-    maybeSpawnVehicle(this);
     tickVehicles(this);
 
     directWaveSpawner(this);
@@ -1091,11 +1141,17 @@ class SimWorld {
 
     // Wall blueprints live in this.structures like everything else (for the ghost render +
     // construction progress), but the actual passability/terrain effect lives on the grid --
-    // apply it the tick a wall blueprint finishes, then drop the now-redundant entry.
+    // apply it the tick a wall blueprint finishes, then drop the now-redundant entry. Garage
+    // blueprints similarly hand off to a parked Vehicle the moment they finish, rather than
+    // acting as a structure themselves once complete.
     this.structures = this.structures.filter(s => {
       if (s.kind === 'wall' && !s.underConstruction) {
         this.grid.setWall(Math.floor(s.x), Math.floor(s.y), 1);
         return false;
+      }
+      if ((s.kind === 'garage_recycling' || s.kind === 'garage_garbage') && !s.underConstruction && !s._vehicleSpawned) {
+        spawnParkedVehicle(this, s.kind === 'garage_recycling' ? 'recycling' : 'garbage', s.x, s.y);
+        s._vehicleSpawned = true;
       }
       return true;
     });
@@ -1142,10 +1198,19 @@ class SimWorld {
       structures: this.structures.map(s => ({
         kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed,
         underConstruction: s.underConstruction, buildProgress: s.buildProgress,
+        _vehicleSpawned: s._vehicleSpawned || false,
       })),
       zones: Array.from(this.zones.kind),
       dogs: this.dogs.map(d => ({ ownerId: d.ownerId, x: d.x, y: d.y })),
       resourceNodes: this.resourceNodes.map(n => ({ x: n.x, y: n.y, amount: n.amount, maxAmount: n.maxAmount, depleted: n.depleted })),
+      // targetNode isn't serialized (it's a live reference into resourceNodes) -- a vehicle
+      // mid-haul on save resumes as if just-departed rather than mid-route. Acceptable: it's a
+      // few seconds of game time, not a correctness bug like the duplicate-vehicle-on-load one
+      // this was written alongside (garages need _vehicleSpawned persisted, see above).
+      vehicles: this.vehicles.map(v => ({
+        kind: v.kind, garageX: v.garageX, garageY: v.garageY, x: v.x, y: v.y,
+        driverId: v.driverId, phase: v.driverId == null ? 'parked' : 'inbound', workTimer: 0,
+      })),
     };
   }
 
@@ -1175,10 +1240,18 @@ class SimWorld {
     w.structures = json.structures.map(s => Object.assign(new Structure(s.kind, s.x, s.y, { instant: true }), s));
     if (json.zones) w.zones.kind.set(json.zones);
     if (json.dogs) w.dogs = json.dogs.map(d => ({ ...d, cooldown: 0 }));
+    if (json.vehicles) {
+      // Citizen jobState isn't persisted (arrays default back to Idle on the fresh SimWorld
+      // above), so a vehicle can't come back mid-haul with a valid driver -- every vehicle
+      // loads parked; whoever was driving just needs to be reassigned by the job system.
+      w.vehicles = json.vehicles.map(v => ({
+        kind: v.kind, garageX: v.garageX, garageY: v.garageY, x: v.garageX, y: v.garageY,
+        driverId: null, phase: 'parked', workTimer: 0, targetNode: null,
+      }));
+    }
     if (json.resourceNodes) {
       w.resourceNodes = json.resourceNodes.map(n => Object.assign(new ResourceNode(n.x, n.y, n.maxAmount), n));
     }
-    w.vehicles = [];
     return w;
   }
 }
@@ -1189,6 +1262,7 @@ class SimWorld {
 // generated images. Visual language borrows from RimWorld/Prison Architect: flat top-down
 // grid, a visible floor grid, outlined silhouettes so units read clearly against the ground,
 // and zone/room tints rather than photographic texture.
+
 
 
 const CELL = 24; // px per grid cell at zoom 1
@@ -1211,6 +1285,21 @@ const ZONE_BORDER = {
 function cellNoise(x, y) {
   const n = Math.sin(x * 127.1 + y * 311.7) * 43758.5453;
   return n - Math.floor(n);
+}
+
+function lerp(a, b, t) { return a + (b - a) * t; }
+
+// Smooth value noise: bilinearly interpolates between noise sampled at integer lattice points,
+// so shading blends continuously across cell boundaries instead of a per-cell checkerboard --
+// "one big piece" rather than visibly tiled squares.
+function smoothNoise(x, y) {
+  const x0 = Math.floor(x), y0 = Math.floor(y);
+  const tx = x - x0, ty = y - y0;
+  const n00 = cellNoise(x0, y0), n10 = cellNoise(x0 + 1, y0);
+  const n01 = cellNoise(x0, y0 + 1), n11 = cellNoise(x0 + 1, y0 + 1);
+  const sx = tx * tx * (3 - 2 * tx); // smoothstep, avoids visible diagonal creases from linear lerp
+  const sy = ty * ty * (3 - 2 * ty);
+  return lerp(lerp(n00, n10, sx), lerp(n01, n11, sx), sy);
 }
 
 class Renderer {
@@ -1335,55 +1424,63 @@ class Renderer {
     ctx.strokeRect(px + 1, py + 1, size - 2, size - 2);
   }
 
-  _drawGround(world) {
-    const ctx = this.ctx;
-    const [x0, y0] = this.worldToScreen(0, 0);
-    const size = CELL * this.zoom;
-    const startCol = Math.max(0, Math.floor(-x0 / size));
-    const startRow = Math.max(0, Math.floor(-y0 / size));
-    const endCol = Math.min(world.width, Math.ceil((this.canvas.width - x0) / size));
-    const endRow = Math.min(world.height, Math.ceil((this.canvas.height - y0) / size));
+  // Ground is pre-rendered once into an offscreen canvas with smooth (bilinearly-interpolated)
+  // noise, so it reads as one continuous blended surface -- like a Minecraft grass block seen
+  // from above, not a checkerboard of individually-colored tiles. Rebuilt only when the wall
+  // layout changes (walls tint the ground dark), not every frame.
+  _buildGroundCache(world) {
+    const SUB = 4; // samples per cell edge in the cache -- enough to hide any per-cell seam
+    const cw = world.width * SUB, ch = world.height * SUB;
+    const cnv = document.createElement('canvas');
+    cnv.width = cw; cnv.height = ch;
+    const cctx = cnv.getContext('2d');
+    const img = cctx.createImageData(cw, ch);
 
-    for (let gy = startRow; gy < endRow; gy++) {
-      for (let gx = startCol; gx < endCol; gx++) {
-        const idx = world.grid.index(gx, gy);
+    for (let py = 0; py < ch; py++) {
+      const gy = py / SUB;
+      const cellY = Math.min(world.height - 1, Math.floor(gy));
+      for (let px = 0; px < cw; px++) {
+        const gx = px / SUB;
+        const cellX = Math.min(world.width - 1, Math.floor(gx));
+        const idx = world.grid.index(cellX, cellY);
         const kind = world.grid.terrain[idx];
         const hasWall = world.grid.wallThingId[idx] !== 0;
-        const n = cellNoise(gx, gy);
+
         let base = [0.5, 0.4, 0.28]; // dirt brown, matches the GDD's scavenged-settlement palette
         if (kind === TerrainKind.Soil) base = [0.4, 0.31, 0.20];
         else if (kind === TerrainKind.Rock) base = [0.47, 0.47, 0.49];
         else if (kind === TerrainKind.Water) base = [0.18, 0.35, 0.55];
         if (hasWall) base = [0.15, 0.14, 0.16];
 
-        const shade = 0.88 + n * 0.24;
-        const r = Math.round(base[0] * 255 * shade);
-        const g = Math.round(base[1] * 255 * shade);
-        const b = Math.round(base[2] * 255 * shade);
-        ctx.fillStyle = `rgb(${r},${g},${b})`;
-        const px = x0 + gx * size, py = y0 + gy * size;
-        ctx.fillRect(px, py, size + 1, size + 1);
+        const n = smoothNoise(gx * 0.6, gy * 0.6); // low frequency -> broad soft blotches, not speckle
+        const shade = 0.86 + n * 0.28;
+        const o = (py * cw + px) * 4;
+        img.data[o] = Math.round(base[0] * 255 * shade);
+        img.data[o + 1] = Math.round(base[1] * 255 * shade);
+        img.data[o + 2] = Math.round(base[2] * 255 * shade);
+        img.data[o + 3] = 255;
       }
     }
+    cctx.putImageData(img, 0, 0);
+    this._groundCache = cnv;
+    this._groundCacheWallSignature = this._wallSignature(world);
+  }
 
-    // Faint grid lines -- the single biggest thing missing for a Prison-Architect-ish read;
-    // a flat noise texture with no grid doesn't feel like a designable floor plan.
-    if (size > 6) {
-      ctx.strokeStyle = 'rgba(0,0,0,0.12)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      for (let gx = startCol; gx <= endCol; gx++) {
-        const px = Math.round(x0 + gx * size) + 0.5;
-        ctx.moveTo(px, y0 + startRow * size);
-        ctx.lineTo(px, y0 + endRow * size);
-      }
-      for (let gy = startRow; gy <= endRow; gy++) {
-        const py = Math.round(y0 + gy * size) + 0.5;
-        ctx.moveTo(x0 + startCol * size, py);
-        ctx.lineTo(x0 + endCol * size, py);
-      }
-      ctx.stroke();
+  _wallSignature(world) {
+    let sum = 0;
+    for (let i = 0; i < world.grid.wallThingId.length; i++) if (world.grid.wallThingId[i] !== 0) sum += i + 1;
+    return sum;
+  }
+
+  _drawGround(world) {
+    const ctx = this.ctx;
+    if (!this._groundCache || this._groundCacheWallSignature !== this._wallSignature(world)) {
+      this._buildGroundCache(world);
     }
+    const [x0, y0] = this.worldToScreen(0, 0);
+    const size = CELL * this.zoom;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(this._groundCache, x0, y0, world.width * size, world.height * size);
   }
 
   _drawHumanoid(x, y, scale, bodyColor, headColor, healthFrac) {
@@ -1428,6 +1525,7 @@ class Renderer {
   _drawCitizens(world) {
     for (let i = 0; i < world.citizens.count; i++) {
       if (!world.citizens.isAliveAt(i)) continue;
+      if (world.citizens.jobState[i] === JobState.Driving) continue; // riding inside a vehicle, drawn as part of it
       const id = world.citizens.id[i];
       const role = world.roster.isStaff(id) ? world.roster.kindOf(id) : StaffRoleKind.None;
       const color = ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None];
@@ -1537,6 +1635,14 @@ class Renderer {
       ctx.strokeRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
       return;
     }
+    if (s.kind === 'garage_recycling' || s.kind === 'garage_garbage') {
+      ctx.fillStyle = s.kind === 'garage_recycling' ? '#3a5a3f' : '#5a5030';
+      ctx.fillRect(sx - size * 0.45, sy - size * 0.4, size * 0.9, size * 0.8);
+      ctx.strokeRect(sx - size * 0.45, sy - size * 0.4, size * 0.9, size * 0.8);
+      ctx.fillStyle = '#1a1a1a';
+      ctx.fillRect(sx - size * 0.3, sy - size * 0.1, size * 0.6, size * 0.42); // garage door opening
+      return;
+    }
     if (s.kind === 'generator') {
       ctx.fillStyle = '#4a4a52';
       ctx.fillRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
@@ -1582,8 +1688,11 @@ class Renderer {
   _drawVehicles(world) {
     const ctx = this.ctx;
     for (const v of world.vehicles || []) {
+      const parked = v.driverId == null;
       const [sx, sy] = this.worldToScreen(v.x, v.y);
       const s = CELL * this.zoom * 0.75;
+      ctx.save();
+      if (parked) ctx.globalAlpha = 0.55; // dimmed -- signals "needs a driver" at a glance
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.4, s * 0.55, s * 0.14, 0, 0, Math.PI * 2); ctx.fill();
       ctx.lineWidth = Math.max(1, s * 0.06);
@@ -1597,6 +1706,13 @@ class Renderer {
       if (v.phase === 'working') {
         ctx.fillStyle = 'rgba(255,255,255,0.7)';
         ctx.fillRect(sx - s * 0.1, sy - s * 0.55, s * 0.2, s * 0.15);
+      }
+      ctx.restore();
+      if (parked) {
+        ctx.fillStyle = '#e0a336';
+        ctx.font = `${Math.round(s * 0.4)}px sans-serif`;
+        ctx.textAlign = 'center';
+        ctx.fillText('?', sx, sy - s * 0.5);
       }
     }
   }
@@ -1621,6 +1737,8 @@ const TOOLS = [
   { key: 't', tool: 'table', label: 'Table', cost: BUILD_COST.table },
   { key: 'y', tool: 'door', label: 'Door', cost: BUILD_COST.door },
   { key: 'g', tool: 'generator', label: 'Generator', cost: BUILD_COST.generator },
+  { key: 'v', tool: 'garage_recycling', label: 'Recycling Garage', cost: BUILD_COST.garage_recycling },
+  { key: 'n', tool: 'garage_garbage', label: 'Garbage Garage', cost: BUILD_COST.garage_garbage },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));

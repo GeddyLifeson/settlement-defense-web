@@ -16,6 +16,8 @@ export const TOOLS = [
   { key: 't', tool: 'table', label: 'Table', cost: BUILD_COST.table },
   { key: 'y', tool: 'door', label: 'Door', cost: BUILD_COST.door },
   { key: 'g', tool: 'generator', label: 'Generator', cost: BUILD_COST.generator },
+  { key: 'v', tool: 'garage_recycling', label: 'Recycling Garage', cost: BUILD_COST.garage_recycling },
+  { key: 'n', tool: 'garage_garbage', label: 'Garbage Garage', cost: BUILD_COST.garage_garbage },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
