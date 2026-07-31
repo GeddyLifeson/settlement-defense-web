@@ -153,9 +153,36 @@ blended terrain not a checkerboard, (c) walls still darken correctly, (d) perfor
 (the cache is built at `world.width*4 x world.height*4` = 256x256px for a 64x64 map, trivial,
 but confirm no visible stutter when it rebuilds after a wall completes).
 
-## NOT STARTED -- next major features, roughly in the order the user asked for them
+## STATUS UPDATE (this pass): items above are DONE
 
-1. **Finish items above**, commit.
+Vehicle rework (garage + citizen driver) and the ground-rendering fix are both finished,
+verified via `window.__debug` soak tests, and committed (`b0aafe0`). Also fixed two real bugs
+caught during that verification: (1) vehicle-driving was checked *after* resource-node
+harvesting in job priority, so with nodes almost always available no citizen ever reached the
+driving job in 6000+ ticks -- moved it above harvesting; (2) garages had no `_vehicleSpawned`
+persistence, so reloading a save would spawn a duplicate vehicle per garage every time -- fixed
+serialize/deserialize for both structures and vehicles.
+
+**Also DONE**: the three-subagent RimWorld/Prison-Architect/SEA:R research pass the user
+explicitly asked for. Full raw findings + a synthesis/priority read are in
+`FEATURE_RESEARCH.md` -- **read that file before deciding what to build next**, don't
+re-research from scratch. Short version: almost none of Prison Architect's mechanics are
+actually carceral in mechanism (flood-fill rooms, power/water graphs, patrol routes, CCTV, K9
+sniffing, needs-sim, schedules, crisis state-machines are all genre-neutral); only four things
+need real rework rather than reskinning (prisoner/warden capture loop, "prison cell" room role,
+kidnapping-as-raid-goal, per-prisoner income model) -- see FEATURE_RESEARCH.md's synthesis
+section for the full list and a cost-sorted recommendation of what to build next.
+
+## NOT STARTED -- next major features
+
+1. **Everything in FEATURE_RESEARCH.md's "not yet built" priority list** -- read it first.
+   Top picks by value/cost: room detection (flood-fill + beauty/cleanliness/impressiveness),
+   a real power/water wire-graph (currently the generator buildable is decorative), a day/night
+   duty-roster schedule system, CCTV/watchtower early warning, multiple storyteller
+   personalities (Cassandra/Phoebe/Randy-equivalent, cheap once you see it's just different
+   parameter sets over one scheduler), a pollution/waste second-resource loop feeding wave
+   difficulty (SEA:R's signature mechanic), fire spread, and a downed-not-dead state for
+   citizens/raiders.
 2. **World map / conquest layer** (explicit ask, Helldivers-2-style control meter per region,
    RimWorld-style multi-settlement). No code exists for this yet. My rough plan (not committed
    to, reconsider if a better approach occurs to you): a `worldmap.js` with ~16 regions in a
@@ -167,13 +194,6 @@ but confirm no visible stutter when it rebuilds after a wall completes).
    trickle from fully-controlled owned regions into whichever region is currently active
    (the "settlements giving each other resources" part of the ask). UI: a topbar button or `M`
    key opens a full-screen map overlay in the same DOM-panel style as the rest of the UI.
-3. **Comprehensive RimWorld/Prison Architect/SEA:R feature inventory via subagents** (explicit
-   ask: "make subagents... more comprehensive and thorough acquisition"). Not started. Suggest:
-   spawn parallel research agents (one per source game) to produce an exhaustive mechanic list,
-   then a synthesis pass mapping each mechanic to a non-carceral equivalent for this game,
-   before implementing more. Don't skip the synthesis/dedup step -- three raw lists dumped
-   together will have overlapping asks (e.g., all three games have some form of "priority
-   queue for jobs").
 
 ## Known gaps / deliberately-simplified systems (carried forward from earlier handoff, still true)
 
