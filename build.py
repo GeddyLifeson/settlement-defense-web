@@ -12,7 +12,7 @@ SRC = ROOT / "src"
 # Dependency order matters for classic scripts (no hoisting across files at parse time in a
 # way that matters here since everything runs top-to-bottom, but keep it topological anyway).
 ORDER = [
-    "core.js", "traits.js", "backstories.js", "grid.js", "zones.js", "economy.js", "research.js", "resources.js", "vehicles.js",
+    "core.js", "assets.js", "traits.js", "backstories.js", "grid.js", "zones.js", "economy.js", "research.js", "resources.js", "vehicles.js",
     "rooms.js", "power.js", "water.js", "citizens.js", "security.js", "siege.js", "relationships.js", "director.js",
     "schedule.js", "jobs.js", "worldmap.js", "fire.js", "weather.js", "grading.js", "audio.js", "metaprogress.js", "world.js", "render.js", "input.js", "tutorial.js", "main.js",
 ]

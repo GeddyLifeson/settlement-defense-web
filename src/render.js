@@ -1,7 +1,9 @@
-// Procedural renderer -- draws every sprite with Canvas 2D shape primitives instead of AI-
-// generated images. Visual language borrows from RimWorld/Prison Architect: flat top-down
-// grid, a visible floor grid, outlined silhouettes so units read clearly against the ground,
-// and zone/room tints rather than photographic texture.
+// Renderer -- real SVG art (see assets.js) for the sprites that most benefit from actual curves
+// and shading (humanoids, animals), Canvas 2D primitives everywhere else (structures, terrain,
+// effects, and the animated per-frame parts of a humanoid like its legs). No AI-generated
+// images anywhere; assets.js's SVGs are hand-authored template strings. Visual language borrows
+// from RimWorld/Prison Architect: flat top-down grid, outlined silhouettes so units read
+// clearly against the ground, and zone/room tints rather than photographic texture.
 import { StaffRoleKind, TerrainKind } from './core.js';
 import { ZONE_COLOR, ZoneKind } from './zones.js';
 import { JobState } from './jobs.js';
@@ -9,6 +11,17 @@ import { isTileEnergized, isSegmentOverloadedAt } from './power.js';
 import { isTileWatered } from './water.js';
 import { isNuclearContained, NUCLEAR_HAZARD_RADIUS } from './siege.js';
 import { roomContaining, ROOM_ROLE_LABEL, RoomRole } from './rooms.js';
+import { drawSprite } from './assets.js';
+
+// Shifts a #rrggbb color toward black (amt<0) or white (amt>0) by `amt` (-1..1) -- used to
+// derive gradient-stop colors (a shadowed underside, a lit highlight) from a single base hex so
+// callers only ever need to track one color per palette slot, not three.
+function shade(hex, amt) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  const mix = (c) => Math.max(0, Math.min(255, Math.round(c + (amt > 0 ? (255 - c) : c) * amt)));
+  return `#${[mix(r), mix(g), mix(b)].map(v => v.toString(16).padStart(2, '0')).join('')}`;
+}
 
 const CELL = 24; // px per grid cell at zoom 1
 const OUTLINE = 'rgba(20,16,12,0.75)';
@@ -476,10 +489,26 @@ export class Renderer {
     ctx.drawImage(this._groundCache, x0, y0, world.width * size, world.height * size);
   }
 
-  _drawHumanoid(x, y, scale, bodyColor, headColor, healthFrac, isAttacker) {
+  // A handful of deterministic hair tones so a crowd of otherwise-identical role-colored
+  // citizens still reads as individuals at a glance, without needing per-citizen sprite data --
+  // picked purely from `seed` (the citizen/attacker's stable id or slot index).
+  static HAIR_TONES = ['#2b2118', '#5c3b1e', '#8a6a3a', '#c9a35a', '#3a3a3a', '#7a2f1f'];
+
+  // The torso+head silhouette is real SVG art (assets.js's humanoid_torso template, recolored
+  // per palette via drawSprite) instead of hand-drawn Canvas paths -- proper curves and gradient
+  // shading read far better than primitive shapes at this sprite size. Legs stay Canvas-drawn
+  // since they're the part that animates every frame via the walk-bob; baking a walk cycle into
+  // multiple SVG frames was tried and read worse here than the cheap procedural bob, so this
+  // hybrid split (SVG for the static silhouette, primitives for per-frame motion + the shadow/
+  // health-bar overlays) is deliberate, not a half-finished migration.
+  _drawHumanoid(x, y, scale, bodyColor, headColor, healthFrac, isAttacker, tick = 0, seed = 0) {
     const ctx = this.ctx;
     const [sx, sy] = this.worldToScreen(x, y);
     const s = CELL * this.zoom * scale;
+    const rr = (x0, y0, w, h, r) => {
+      if (ctx.roundRect) { ctx.beginPath(); ctx.roundRect(x0, y0, w, h, r); }
+      else { ctx.beginPath(); ctx.rect(x0, y0, w, h); } // fallback for older engines, still correct
+    };
 
     if (this.highContrast && isAttacker !== undefined) {
       // Shape/pattern cue independent of hue: solid blue ring = citizen, dashed orange ring =
@@ -502,22 +531,38 @@ export class Renderer {
     ctx.lineWidth = Math.max(1, s * 0.06);
     ctx.strokeStyle = OUTLINE;
 
-    // legs, drawn as two short stubs beneath the body so the silhouette doesn't read as one
-    // flat blob (Prison Architect/RimWorld units both have a visible torso/leg break)
+    // Alternating leg bob -- each leg's vertical offset swings opposite the other, cheap but
+    // reads clearly as a walk cycle from a top-down view. Standing still (stride ~0) settles
+    // back to the original symmetric pose.
+    const phase = tick * 0.35 + seed * 6.28318;
+    const stride = Math.sin(phase) * s * 0.05;
     ctx.fillStyle = bodyColor;
-    ctx.beginPath(); ctx.rect(sx - s * 0.16, sy + s * 0.1, s * 0.12, s * 0.22); ctx.fill(); ctx.stroke();
-    ctx.beginPath(); ctx.rect(sx + s * 0.04, sy + s * 0.1, s * 0.12, s * 0.22); ctx.fill(); ctx.stroke();
+    rr(sx - s * 0.16, sy + s * 0.1 + stride, s * 0.12, s * 0.22, s * 0.04); ctx.fill(); ctx.stroke();
+    rr(sx + s * 0.04, sy + s * 0.1 - stride, s * 0.12, s * 0.22, s * 0.04); ctx.fill(); ctx.stroke();
 
-    ctx.beginPath();
-    ctx.rect(sx - s * 0.19, sy - s * 0.12, s * 0.38, s * 0.28);
-    ctx.fill();
-    ctx.stroke();
-
-    ctx.fillStyle = headColor;
-    ctx.beginPath();
-    ctx.arc(sx, sy - s * 0.3, s * 0.21, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.stroke();
+    // Torso+head: real SVG art (see assets.js's humanoid_torso template) recolored per palette.
+    // Falls back to the old flat primitive shapes for the handful of frames before a brand-new
+    // color combo's sprite finishes decoding (drawSprite returns false while unloaded) --
+    // invisible in practice since the palette space is small (a few role colors x downed/
+    // onBreak states) and every combo gets cached forever after its first appearance.
+    const hair = Renderer.HAIR_TONES[Math.floor(seed * 977) % Renderer.HAIR_TONES.length];
+    const drew = drawSprite(ctx, 'humanoid_torso', {
+      BODY: bodyColor, BODY_SHADOW: shade(bodyColor, -0.35),
+      HEAD: headColor, HEAD_HI: shade(headColor, 0.35),
+      HAIR: hair, OUTLINE,
+    }, sx, sy - s * 0.03, s * 0.85);
+    if (!drew) {
+      ctx.beginPath();
+      ctx.moveTo(sx - s * 0.21, sy - s * 0.12);
+      ctx.lineTo(sx + s * 0.21, sy - s * 0.12);
+      ctx.quadraticCurveTo(sx + s * 0.19, sy + s * 0.16, sx + s * 0.15, sy + s * 0.16);
+      ctx.lineTo(sx - s * 0.15, sy + s * 0.16);
+      ctx.quadraticCurveTo(sx - s * 0.19, sy + s * 0.16, sx - s * 0.21, sy - s * 0.12);
+      ctx.closePath();
+      ctx.fillStyle = bodyColor; ctx.fill(); ctx.stroke();
+      ctx.fillStyle = headColor;
+      ctx.beginPath(); ctx.arc(sx, sy - s * 0.3, s * 0.21, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
 
     if (healthFrac !== undefined && healthFrac < 0.98) {
       const barW = s * 0.5, barY = sy - s * 0.58;
@@ -540,7 +585,7 @@ export class Renderer {
       const color = downed ? '#6b6b6b' : onBreak ? desaturate(baseColor, 0.6) : baseColor;
       const headColor = downed ? '#8a8a8a' : onBreak ? desaturate('#e8c9a0', 0.6) : '#e8c9a0';
       const [sx, sy] = this.worldToScreen(world.citizens.x[i], world.citizens.y[i]);
-      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, headColor, world.citizens.health[i], false);
+      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, headColor, world.citizens.health[i], false, world.currentTick, id);
       if (onBreak) {
         // Small "zzz" tell above the head so low-mood citizens read clearly at a glance,
         // distinct from the flat-gray Downed silhouette.
@@ -573,21 +618,25 @@ export class Renderer {
       const [sx, sy] = this.worldToScreen(dog.x, dog.y);
       const s = CELL * this.zoom * 0.4;
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
-      ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.22, s * 0.34, s * 0.1, 0, 0, Math.PI * 2); ctx.fill();
-      ctx.lineWidth = Math.max(1, s * 0.08);
-      ctx.strokeStyle = OUTLINE;
-      ctx.fillStyle = coatColor;
-      ctx.beginPath();
-      ctx.ellipse(sx, sy, s * 0.32, s * 0.2, 0, 0, Math.PI * 2);
-      ctx.fill(); ctx.stroke();
-      ctx.beginPath();
-      ctx.arc(sx + s * 0.28, sy - s * 0.05, s * 0.14, 0, Math.PI * 2);
-      ctx.fill(); ctx.stroke();
+      ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.32, s * 0.34, s * 0.1, 0, 0, Math.PI * 2); ctx.fill();
+
+      const drew = drawSprite(ctx, 'animal_body', {
+        COAT: coatColor, COAT_HI: shade(coatColor, 0.3), OUTLINE,
+      }, sx, sy, s * 1.15);
+      if (!drew) {
+        // Same primitive fallback the humanoid uses while a brand-new coat color is still
+        // decoding -- see _drawHumanoid's comment, identical rationale here.
+        ctx.lineWidth = Math.max(1, s * 0.08);
+        ctx.strokeStyle = OUTLINE;
+        ctx.fillStyle = coatColor;
+        ctx.beginPath(); ctx.ellipse(sx, sy, s * 0.32, s * 0.2, 0, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.beginPath(); ctx.arc(sx + s * 0.28, sy - s * 0.05, s * 0.14, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      }
       if (collarColor) {
         ctx.strokeStyle = collarColor;
         ctx.lineWidth = Math.max(1, s * 0.1);
         ctx.beginPath();
-        ctx.arc(sx + s * 0.28, sy - s * 0.05, s * 0.19, 0, Math.PI * 2);
+        ctx.arc(sx + s * 0.31, sy - s * 0.07, s * 0.19, 0, Math.PI * 2);
         ctx.stroke();
       }
     }
@@ -632,7 +681,7 @@ export class Renderer {
       }
 
       this._drawHumanoid(world.attackers.x[i], world.attackers.y[i], style.scale,
-        style.body, style.head, world.attackers.health[i], true);
+        style.body, style.head, world.attackers.health[i], true, world.currentTick, i);
 
       if (isBoss) {
         // Spiked crown on top of the head so the boss is distinguishable even in a dense crowd
