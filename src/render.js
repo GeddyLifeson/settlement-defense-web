@@ -43,11 +43,42 @@ function smoothNoise(x, y) {
   return lerp(lerp(n00, n10, sx), lerp(n01, n11, sx), sy);
 }
 
+const MIN_ZOOM = 0.3;
+const MAX_ZOOM = 4;
+
 export class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.camX = 0; this.camY = 0; this.zoom = 1;
+    // Camera starts auto-framed every few seconds (main.js); once the player pans or zooms by
+    // hand, auto-reframe stops fighting them for control until they click Recenter -- there was
+    // previously no manual camera control at all, and re-snapping under the player mid-drag felt
+    // broken.
+    this.manualCamera = false;
+  }
+
+  panByScreenDelta(dxPx, dyPx, world) {
+    this.camX -= dxPx / (CELL * this.zoom);
+    this.camY -= dyPx / (CELL * this.zoom);
+    this.manualCamera = true;
+    if (world) this._clampCamToWorld(world);
+  }
+
+  zoomAt(screenX, screenY, factor, world) {
+    const [wx, wy] = this.screenToWorld(screenX, screenY);
+    this.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, this.zoom * factor));
+    // keep the world point under the cursor stationary on screen rather than zooming toward camX/Y
+    const [nx, ny] = this.screenToWorld(screenX, screenY);
+    this.camX += wx - nx;
+    this.camY += wy - ny;
+    this.manualCamera = true;
+    if (world) this._clampCamToWorld(world);
+  }
+
+  recenter(world) {
+    this.manualCamera = false;
+    this.frameOnContent(world);
   }
 
   resize() {
@@ -81,6 +112,23 @@ export class Renderer {
     const zoomX = this.canvas.width / (w * CELL);
     const zoomY = this.canvas.height / (h * CELL);
     this.zoom = Math.max(0.4, Math.min(2.5, Math.min(zoomX, zoomY)));
+    this._clampCamToWorld(world);
+  }
+
+  // Centering on the settlement's bounding box can point the camera at a spot close enough to
+  // the map edge that the viewport shows raw off-map canvas background -- a stark dark void with
+  // no ground, walls, or fog, since nothing is drawn there. Pull the camera back so the visible
+  // area stays inside the map whenever the map is big enough to allow it (a map smaller than the
+  // viewport still letterboxes evenly, which is fine).
+  _clampCamToWorld(world) {
+    const viewW = this.canvas.width / (CELL * this.zoom);
+    const viewH = this.canvas.height / (CELL * this.zoom);
+    this.camX = viewW >= world.width
+      ? world.width / 2
+      : Math.min(Math.max(this.camX, viewW / 2), world.width - viewW / 2);
+    this.camY = viewH >= world.height
+      ? world.height / 2
+      : Math.min(Math.max(this.camY, viewH / 2), world.height - viewH / 2);
   }
 
   worldToScreen(x, y) {
@@ -413,6 +461,36 @@ export class Renderer {
       ctx.beginPath();
       ctx.arc(sx, sy, size * 0.18, 0, Math.PI * 2);
       ctx.fill();
+      return;
+    }
+    if (s.kind === 'recycling_center') {
+      ctx.fillStyle = '#2e5a4a';
+      ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+      ctx.strokeRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+      ctx.fillStyle = '#7ad9a0';
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - size * 0.2); ctx.lineTo(sx + size * 0.16, sy); ctx.lineTo(sx, sy + size * 0.2);
+      ctx.lineTo(sx - size * 0.16, sy); ctx.closePath();
+      ctx.fill();
+      return;
+    }
+    if (s.kind === 'floodlight') {
+      if (!s.destroyed) {
+        ctx.fillStyle = 'rgba(230,230,150,0.12)';
+        ctx.beginPath(); ctx.arc(sx, sy, size * 1.4, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = '#8c8060';
+      ctx.fillRect(sx - size * 0.08, sy - size * 0.1, size * 0.16, size * 0.5);
+      ctx.fillStyle = s.destroyed ? '#5a5540' : '#f2eec0';
+      ctx.beginPath(); ctx.arc(sx, sy - size * 0.22, size * 0.22, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      return;
+    }
+    if (s.kind === 'tesla') {
+      ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#4a5a8c';
+      ctx.beginPath(); ctx.arc(sx, sy + size * 0.15, size * 0.35, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = s.destroyed ? 'rgba(120,140,220,0.3)' : '#a0c0ff';
+      ctx.lineWidth = Math.max(1, size * 0.06);
+      ctx.beginPath(); ctx.arc(sx, sy - size * 0.15, size * 0.16, 0, Math.PI * 2); ctx.stroke();
       return;
     }
     // turret (default)

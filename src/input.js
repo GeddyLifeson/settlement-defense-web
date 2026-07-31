@@ -19,6 +19,9 @@ export const TOOLS = [
   { key: 'v', tool: 'garage_recycling', label: 'Recycling Garage', cost: BUILD_COST.garage_recycling },
   { key: 'n', tool: 'garage_garbage', label: 'Garbage Garage', cost: BUILD_COST.garage_garbage },
   { key: 'c', tool: 'watchtower', label: 'Watchtower', cost: BUILD_COST.watchtower },
+  { key: 'f', tool: 'floodlight', label: 'Floodlight', cost: BUILD_COST.floodlight },
+  { key: 'x', tool: 'tesla', label: 'Tesla Coil', cost: BUILD_COST.tesla },
+  { key: 'r', tool: 'recycling_center', label: 'Recycling Center', cost: BUILD_COST.recycling_center },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -41,8 +44,10 @@ export class InputController {
 
     canvas.addEventListener('mousemove', (e) => this._onMove(e));
     canvas.addEventListener('mousedown', (e) => this._onDown(e));
-    canvas.addEventListener('mouseup', () => { this._painting = false; });
-    canvas.addEventListener('mouseleave', () => { this.hoverGridX = null; this.hoverGridY = null; this._painting = false; });
+    canvas.addEventListener('mouseup', (e) => this._onUp(e));
+    canvas.addEventListener('mouseleave', () => { this.hoverGridX = null; this.hoverGridY = null; this._painting = false; this._panning = false; });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // right-drag is pan, not a context menu
+    canvas.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
     window.addEventListener('keydown', (e) => this._onKey(e));
   }
 
@@ -61,6 +66,11 @@ export class InputController {
   }
 
   _onMove(e) {
+    if (this._panning) {
+      this.renderer.panByScreenDelta(e.clientX - this._panLastX, e.clientY - this._panLastY, this.getWorld());
+      this._panLastX = e.clientX; this._panLastY = e.clientY;
+      return;
+    }
     const rect = this.canvas.getBoundingClientRect();
     const [wx, wy] = this.renderer.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
     this.hoverWorldX = wx; this.hoverWorldY = wy;
@@ -70,9 +80,34 @@ export class InputController {
   }
 
   _onDown(e) {
+    // Right-click and middle-click drag the camera; left-click keeps its build/select role.
+    // There was previously no way to move the camera by hand at all -- it was 100% auto-framed.
+    if (e.button === 2 || e.button === 1) {
+      e.preventDefault();
+      this._panning = true;
+      this._panLastX = e.clientX; this._panLastY = e.clientY;
+      return;
+    }
     if (e.button !== 0) return;
     this._painting = true;
     this._place();
+  }
+
+  _onUp(e) {
+    if (e.button === 2 || e.button === 1) { this._panning = false; return; }
+    this._painting = false;
+  }
+
+  _onWheel(e) {
+    e.preventDefault();
+    const rect = this.canvas.getBoundingClientRect();
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    this.renderer.zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor, this.getWorld());
+  }
+
+  recenter() {
+    const world = this.getWorld();
+    if (world) this.renderer.recenter(world);
   }
 
   _place() {

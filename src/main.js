@@ -57,6 +57,7 @@ document.getElementById('btn-save').addEventListener('click', () => save());
 document.getElementById('btn-load').addEventListener('click', () => load());
 document.getElementById('btn-restart').addEventListener('click', () => restart());
 document.getElementById('btn-restart-modal').addEventListener('click', () => restart());
+document.getElementById('btn-recenter').addEventListener('click', () => input.recenter());
 
 function save() {
   localStorage.setItem(SAVE_KEY, JSON.stringify(world.serialize()));
@@ -106,7 +107,19 @@ function updateInspector() {
   setBar('rest', c.rest[sel]);
   setBar('social', c.social[sel]);
   setBar('mood', c.mood[sel]);
-  document.getElementById('insp-skill').textContent = `Combat skill: ${c.skillCombat[sel].toFixed(2)}`;
+  document.getElementById('insp-skill').textContent =
+    `Combat: ${skillLevel(c.skillCombat[sel])} · Construction: ${skillLevel(c.skillConstruction[sel])}`;
+}
+
+// Raw skill floats are unbounded accrual values (see jobs.js/siege.js gain rates), not
+// meaningful to a player as-is -- bucket them into RimWorld-style named tiers instead of
+// showing the number directly.
+const SKILL_LEVELS = [
+  [0.15, 'Novice'], [0.5, 'Competent'], [1.2, 'Skilled'], [2.5, 'Expert'], [Infinity, 'Master'],
+];
+function skillLevel(value) {
+  for (const [threshold, name] of SKILL_LEVELS) if (value < threshold) return name;
+  return 'Master';
 }
 
 function setBar(name, frac) {
@@ -161,7 +174,10 @@ function frame() {
   renderer.draw(world, input);
 
   framesSinceReframe++;
-  if (framesSinceReframe > 50) { framesSinceReframe = 0; renderer.frameOnContent(world); }
+  if (framesSinceReframe > 50) {
+    framesSinceReframe = 0;
+    if (!renderer.manualCamera) renderer.frameOnContent(world);
+  }
 
   updateTopbar();
   syncToolbarHighlight();

@@ -175,6 +175,9 @@ const BUILD_COST = {
   garage_recycling: 45,
   garage_garbage: 35,
   watchtower: 20,
+  floodlight: 12,
+  tesla: 40,
+  recycling_center: 55,
 };
 
 const SCRAP_PER_KILL = 4;
@@ -717,6 +720,17 @@ class WaveSpawner {
 const TURRET_RANGE = 8;
 const TURRET_COOLDOWN_TICKS = 8;
 const TURRET_DAMAGE = 0.35;
+const POWER_RANGE = 10; // generators were previously decorative (pollution cost, no consumer side)
+const POWERED_DAMAGE_MULT = 1.5;
+const POWERED_RANGE_MULT = 1.25;
+
+function isPowered(structures, x, y) {
+  for (const s of structures) {
+    if (s.kind !== 'generator' || s.destroyed || s.underConstruction) continue;
+    if (Math.hypot(s.x - x, s.y - y) <= POWER_RANGE) return true;
+  }
+  return false;
+}
 const ATTACKER_SPEED = 0.03;
 const ATTACKER_CITIZEN_DAMAGE = 0.008;
 const ATTACKER_CONTACT_RANGE = 0.5;
@@ -726,6 +740,15 @@ const TRAP_TRIGGER_RANGE = 0.5;
 const TRAP_DAMAGE = 3; // instant-kill-ish burst
 const GUARD_RANGE = 3.5; const GUARD_DAMAGE = 0.05; const GUARD_COOLDOWN = 4;
 const SNIPER_RANGE = 9; const SNIPER_DAMAGE = 0.12; const SNIPER_COOLDOWN = 10;
+
+// Tesla coil (SEA:R): weaker per-hit than a plain turret but chains to every attacker in range
+// each activation -- a crowd-control pick over a single-target DPS pick, not a strict upgrade.
+const TESLA_RANGE = 4.5; const TESLA_DAMAGE = 0.12; const TESLA_COOLDOWN_TICKS = 14;
+
+// Floodlight (SEA:R's "soft wall" -- an area-denial light that slows rather than blocks, so it
+// doesn't need its own health/destroy state like a fence does).
+const FLOODLIGHT_RANGE = 3.5;
+const FLOODLIGHT_SLOW_MULT = 0.35; // attacker speed multiplier while inside the radius
 
 function nearestLivingCitizen(citizens, x, y) {
   let bestI = -1, bestDist = Infinity;
@@ -758,8 +781,11 @@ function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, 
     const dy = ty - attackers.y[i];
     const dist = Math.hypot(dx, dy);
     if (dist > ATTACKER_CONTACT_RANGE * 0.6) {
-      attackers.x[i] += (dx / dist) * ATTACKER_SPEED;
-      attackers.y[i] += (dy / dist) * ATTACKER_SPEED;
+      const inFloodlight = structures.some(s => s.kind === 'floodlight' && !s.destroyed && !s.underConstruction &&
+        Math.hypot(attackers.x[i] - s.x, attackers.y[i] - s.y) <= FLOODLIGHT_RANGE);
+      const speed = ATTACKER_SPEED * (inFloodlight ? FLOODLIGHT_SLOW_MULT : 1);
+      attackers.x[i] += (dx / dist) * speed;
+      attackers.y[i] += (dy / dist) * speed;
     }
 
     for (const t of structures) {
@@ -783,12 +809,33 @@ function findBlockingFence(structures, x, y) {
 
 function tickTurrets(structures, attackers, onScrap) {
   for (const s of structures) {
-    if (s.kind !== 'turret' || s.destroyed || s.underConstruction) continue;
+    if (s.kind !== 'turret' && s.kind !== 'tesla') continue;
+    if (s.destroyed || s.underConstruction) continue;
     if (s.cooldown > 0) { s.cooldown--; continue; }
 
-    const bestI = nearestAliveAttacker(attackers, s.x, s.y, TURRET_RANGE);
+    const powered = isPowered(structures, s.x, s.y);
+    const isTesla = s.kind === 'tesla';
+    const range = (isTesla ? TESLA_RANGE : TURRET_RANGE) * (powered ? POWERED_RANGE_MULT : 1);
+    const damage = (isTesla ? TESLA_DAMAGE : TURRET_DAMAGE) * (powered ? POWERED_DAMAGE_MULT : 1);
+
+    if (isTesla) {
+      // Chains to every attacker in range instead of picking one -- Tesla's SEA:R niche is
+      // crowd control, not single-target DPS (that's what plain turrets are for).
+      let hitAny = false;
+      for (let i = 0; i < attackers.count; i++) {
+        if (!attackers.isAliveAt(i)) continue;
+        if (Math.hypot(attackers.x[i] - s.x, attackers.y[i] - s.y) > range) continue;
+        hitAny = true;
+        attackers.health[i] -= damage;
+        if (attackers.health[i] <= 0) { attackers.alive[i] = 0; onScrap?.(SCRAP_PER_KILL); }
+      }
+      if (hitAny) s.cooldown = TESLA_COOLDOWN_TICKS;
+      continue;
+    }
+
+    const bestI = nearestAliveAttacker(attackers, s.x, s.y, range);
     if (bestI >= 0) {
-      attackers.health[bestI] -= TURRET_DAMAGE;
+      attackers.health[bestI] -= damage;
       if (attackers.health[bestI] <= 0) { attackers.alive[bestI] = 0; onScrap?.(SCRAP_PER_KILL); }
       s.cooldown = TURRET_COOLDOWN_TICKS;
     }
@@ -913,7 +960,14 @@ function colonyStrength(world) {
   let structureHealth = 0;
   for (const s of world.structures) if (!s.destroyed && !s.underConstruction) structureHealth += s.health;
 
-  return aliveCitizens * 2 + structureHealth * 3 + world.scrap * 0.1;
+  // Scrap uses sqrt rather than a linear term. Idle citizens auto-harvest resource nodes even in
+  // a completely hands-off colony (jobs.js's idle-fallback), so scrap keeps growing forever with
+  // zero player action or actual defensive investment -- a linear term let banked scrap alone
+  // saturate strengthFactor to its cap within a few thousand ticks (the root cause of a real
+  // regression: hands-off survival time dropping from ~22-36k ticks to ~7-10k ticks, caught in
+  // soak-testing). Sqrt keeps scrap a meaningful wealth signal without letting passive
+  // accumulation alone drive difficulty as hard as actually-built defense/population.
+  return aliveCitizens * 2 + structureHealth * 3 + Math.sqrt(world.scrap) * 1.5;
 }
 
 const AGGRESSION_MULTIPLIER = { Calm: 0.75, Standard: 1, Aggressive: 1.35 };
@@ -1274,7 +1328,20 @@ class SimWorld {
     // FEATURE_RESEARCH.md); it decays slowly on its own but climbs faster than that decay once
     // you have more than a couple of generators running, so a garbage-truck haul run matters.
     let activeGenerators = 0;
-    for (const s of this.structures) if (s.kind === 'generator' && !s.destroyed && !s.underConstruction) activeGenerators++;
+    let activeRecyclingCenters = 0;
+    for (const s of this.structures) {
+      if (s.destroyed || s.underConstruction) continue;
+      if (s.kind === 'generator') activeGenerators++;
+      else if (s.kind === 'recycling_center') activeRecyclingCenters++;
+    }
+    // Recycling Center (SEA:R): a passive waste->resource sink distinct from garbage trucks --
+    // trucks do one big haul-cycle drop, this trickles constantly in exchange for scrap, so both
+    // remain worth building rather than one obsoleting the other.
+    if (activeRecyclingCenters > 0) {
+      const processed = Math.min(this.pollution, activeRecyclingCenters * 0.4);
+      this.pollution -= processed;
+      this.addScrap(processed * 0.5);
+    }
     this.pollution = Math.max(0, this.pollution + activeGenerators * 0.03 - 0.01);
 
     directWaveSpawner(this);
@@ -1316,9 +1383,13 @@ class SimWorld {
 
     // Watchtowers (CCTV/early-warning analog, see FEATURE_RESEARCH.md) give advance notice of
     // an incoming wave before it actually spawns, rather than only finding out at spawn time.
-    const hasWatchtower = this.structures.some(s => s.kind === 'watchtower' && !s.destroyed && !s.underConstruction);
-    if (hasWatchtower && !this._warnedForWave &&
-      this.waveSpawner.nextWaveTick - this.currentTick <= 50 && this.waveSpawner.nextWaveTick > this.currentTick) {
+    const watchtower = this.structures.find(s => s.kind === 'watchtower' && !s.destroyed && !s.underConstruction);
+    // A powered watchtower (generator in range) sees further out in time, same pattern as the
+    // powered-turret damage/range boost -- generators are now a real consumer-side upgrade
+    // wherever they're built near, not just a pollution-producing decoration.
+    const warningWindow = watchtower ? (isPowered(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
+    if (watchtower && !this._warnedForWave &&
+      this.waveSpawner.nextWaveTick - this.currentTick <= warningWindow && this.waveSpawner.nextWaveTick > this.currentTick) {
       this._warnedForWave = this.waveSpawner.waveNumber + 1;
       this.milestoneLog.push({ tick: this.currentTick, text: 'Watchtower spots raiders massing -- wave incoming soon' });
       if (this.milestoneLog.length > 20) this.milestoneLog.shift();
@@ -1468,11 +1539,42 @@ function smoothNoise(x, y) {
   return lerp(lerp(n00, n10, sx), lerp(n01, n11, sx), sy);
 }
 
+const MIN_ZOOM = 0.3;
+const MAX_ZOOM = 4;
+
 class Renderer {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d');
     this.camX = 0; this.camY = 0; this.zoom = 1;
+    // Camera starts auto-framed every few seconds (main.js); once the player pans or zooms by
+    // hand, auto-reframe stops fighting them for control until they click Recenter -- there was
+    // previously no manual camera control at all, and re-snapping under the player mid-drag felt
+    // broken.
+    this.manualCamera = false;
+  }
+
+  panByScreenDelta(dxPx, dyPx, world) {
+    this.camX -= dxPx / (CELL * this.zoom);
+    this.camY -= dyPx / (CELL * this.zoom);
+    this.manualCamera = true;
+    if (world) this._clampCamToWorld(world);
+  }
+
+  zoomAt(screenX, screenY, factor, world) {
+    const [wx, wy] = this.screenToWorld(screenX, screenY);
+    this.zoom = Math.max(MIN_ZOOM, Math.min(MAX_ZOOM, this.zoom * factor));
+    // keep the world point under the cursor stationary on screen rather than zooming toward camX/Y
+    const [nx, ny] = this.screenToWorld(screenX, screenY);
+    this.camX += wx - nx;
+    this.camY += wy - ny;
+    this.manualCamera = true;
+    if (world) this._clampCamToWorld(world);
+  }
+
+  recenter(world) {
+    this.manualCamera = false;
+    this.frameOnContent(world);
   }
 
   resize() {
@@ -1506,6 +1608,23 @@ class Renderer {
     const zoomX = this.canvas.width / (w * CELL);
     const zoomY = this.canvas.height / (h * CELL);
     this.zoom = Math.max(0.4, Math.min(2.5, Math.min(zoomX, zoomY)));
+    this._clampCamToWorld(world);
+  }
+
+  // Centering on the settlement's bounding box can point the camera at a spot close enough to
+  // the map edge that the viewport shows raw off-map canvas background -- a stark dark void with
+  // no ground, walls, or fog, since nothing is drawn there. Pull the camera back so the visible
+  // area stays inside the map whenever the map is big enough to allow it (a map smaller than the
+  // viewport still letterboxes evenly, which is fine).
+  _clampCamToWorld(world) {
+    const viewW = this.canvas.width / (CELL * this.zoom);
+    const viewH = this.canvas.height / (CELL * this.zoom);
+    this.camX = viewW >= world.width
+      ? world.width / 2
+      : Math.min(Math.max(this.camX, viewW / 2), world.width - viewW / 2);
+    this.camY = viewH >= world.height
+      ? world.height / 2
+      : Math.min(Math.max(this.camY, viewH / 2), world.height - viewH / 2);
   }
 
   worldToScreen(x, y) {
@@ -1840,6 +1959,36 @@ class Renderer {
       ctx.fill();
       return;
     }
+    if (s.kind === 'recycling_center') {
+      ctx.fillStyle = '#2e5a4a';
+      ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+      ctx.strokeRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+      ctx.fillStyle = '#7ad9a0';
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - size * 0.2); ctx.lineTo(sx + size * 0.16, sy); ctx.lineTo(sx, sy + size * 0.2);
+      ctx.lineTo(sx - size * 0.16, sy); ctx.closePath();
+      ctx.fill();
+      return;
+    }
+    if (s.kind === 'floodlight') {
+      if (!s.destroyed) {
+        ctx.fillStyle = 'rgba(230,230,150,0.12)';
+        ctx.beginPath(); ctx.arc(sx, sy, size * 1.4, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.fillStyle = '#8c8060';
+      ctx.fillRect(sx - size * 0.08, sy - size * 0.1, size * 0.16, size * 0.5);
+      ctx.fillStyle = s.destroyed ? '#5a5540' : '#f2eec0';
+      ctx.beginPath(); ctx.arc(sx, sy - size * 0.22, size * 0.22, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      return;
+    }
+    if (s.kind === 'tesla') {
+      ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#4a5a8c';
+      ctx.beginPath(); ctx.arc(sx, sy + size * 0.15, size * 0.35, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      ctx.strokeStyle = s.destroyed ? 'rgba(120,140,220,0.3)' : '#a0c0ff';
+      ctx.lineWidth = Math.max(1, size * 0.06);
+      ctx.beginPath(); ctx.arc(sx, sy - size * 0.15, size * 0.16, 0, Math.PI * 2); ctx.stroke();
+      return;
+    }
     // turret (default)
     ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
     ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
@@ -1927,6 +2076,9 @@ const TOOLS = [
   { key: 'v', tool: 'garage_recycling', label: 'Recycling Garage', cost: BUILD_COST.garage_recycling },
   { key: 'n', tool: 'garage_garbage', label: 'Garbage Garage', cost: BUILD_COST.garage_garbage },
   { key: 'c', tool: 'watchtower', label: 'Watchtower', cost: BUILD_COST.watchtower },
+  { key: 'f', tool: 'floodlight', label: 'Floodlight', cost: BUILD_COST.floodlight },
+  { key: 'x', tool: 'tesla', label: 'Tesla Coil', cost: BUILD_COST.tesla },
+  { key: 'r', tool: 'recycling_center', label: 'Recycling Center', cost: BUILD_COST.recycling_center },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -1949,8 +2101,10 @@ class InputController {
 
     canvas.addEventListener('mousemove', (e) => this._onMove(e));
     canvas.addEventListener('mousedown', (e) => this._onDown(e));
-    canvas.addEventListener('mouseup', () => { this._painting = false; });
-    canvas.addEventListener('mouseleave', () => { this.hoverGridX = null; this.hoverGridY = null; this._painting = false; });
+    canvas.addEventListener('mouseup', (e) => this._onUp(e));
+    canvas.addEventListener('mouseleave', () => { this.hoverGridX = null; this.hoverGridY = null; this._painting = false; this._panning = false; });
+    canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // right-drag is pan, not a context menu
+    canvas.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
     window.addEventListener('keydown', (e) => this._onKey(e));
   }
 
@@ -1969,6 +2123,11 @@ class InputController {
   }
 
   _onMove(e) {
+    if (this._panning) {
+      this.renderer.panByScreenDelta(e.clientX - this._panLastX, e.clientY - this._panLastY, this.getWorld());
+      this._panLastX = e.clientX; this._panLastY = e.clientY;
+      return;
+    }
     const rect = this.canvas.getBoundingClientRect();
     const [wx, wy] = this.renderer.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
     this.hoverWorldX = wx; this.hoverWorldY = wy;
@@ -1978,9 +2137,34 @@ class InputController {
   }
 
   _onDown(e) {
+    // Right-click and middle-click drag the camera; left-click keeps its build/select role.
+    // There was previously no way to move the camera by hand at all -- it was 100% auto-framed.
+    if (e.button === 2 || e.button === 1) {
+      e.preventDefault();
+      this._panning = true;
+      this._panLastX = e.clientX; this._panLastY = e.clientY;
+      return;
+    }
     if (e.button !== 0) return;
     this._painting = true;
     this._place();
+  }
+
+  _onUp(e) {
+    if (e.button === 2 || e.button === 1) { this._panning = false; return; }
+    this._painting = false;
+  }
+
+  _onWheel(e) {
+    e.preventDefault();
+    const rect = this.canvas.getBoundingClientRect();
+    const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    this.renderer.zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor, this.getWorld());
+  }
+
+  recenter() {
+    const world = this.getWorld();
+    if (world) this.renderer.recenter(world);
   }
 
   _place() {
@@ -2091,6 +2275,7 @@ document.getElementById('btn-save').addEventListener('click', () => save());
 document.getElementById('btn-load').addEventListener('click', () => load());
 document.getElementById('btn-restart').addEventListener('click', () => restart());
 document.getElementById('btn-restart-modal').addEventListener('click', () => restart());
+document.getElementById('btn-recenter').addEventListener('click', () => input.recenter());
 
 function save() {
   localStorage.setItem(SAVE_KEY, JSON.stringify(world.serialize()));
@@ -2140,7 +2325,19 @@ function updateInspector() {
   setBar('rest', c.rest[sel]);
   setBar('social', c.social[sel]);
   setBar('mood', c.mood[sel]);
-  document.getElementById('insp-skill').textContent = `Combat skill: ${c.skillCombat[sel].toFixed(2)}`;
+  document.getElementById('insp-skill').textContent =
+    `Combat: ${skillLevel(c.skillCombat[sel])} · Construction: ${skillLevel(c.skillConstruction[sel])}`;
+}
+
+// Raw skill floats are unbounded accrual values (see jobs.js/siege.js gain rates), not
+// meaningful to a player as-is -- bucket them into RimWorld-style named tiers instead of
+// showing the number directly.
+const SKILL_LEVELS = [
+  [0.15, 'Novice'], [0.5, 'Competent'], [1.2, 'Skilled'], [2.5, 'Expert'], [Infinity, 'Master'],
+];
+function skillLevel(value) {
+  for (const [threshold, name] of SKILL_LEVELS) if (value < threshold) return name;
+  return 'Master';
 }
 
 function setBar(name, frac) {
@@ -2195,7 +2392,10 @@ function frame() {
   renderer.draw(world, input);
 
   framesSinceReframe++;
-  if (framesSinceReframe > 50) { framesSinceReframe = 0; renderer.frameOnContent(world); }
+  if (framesSinceReframe > 50) {
+    framesSinceReframe = 0;
+    if (!renderer.manualCamera) renderer.frameOnContent(world);
+  }
 
   updateTopbar();
   syncToolbarHighlight();

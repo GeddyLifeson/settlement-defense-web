@@ -218,6 +218,75 @@ still gets the long survival time. If confirmed, the fix is almost certainly in
    (the "settlements giving each other resources" part of the ask). UI: a topbar button or `M`
    key opens a full-screen map overlay in the same DOM-panel style as the rest of the UI.
 
+## LAUNDRY-LIST PASS (this session): comprehensive audit + implementation, DONE
+
+User asked for a full audit "at every level from code to UI" and to implement improvements, not
+just list them. Full list below, split by what got built this pass vs what's still backlog.
+
+**Done this pass, all rebuilt/verified via `window.__debug` soak tests + real screenshots
+(Claude in Chrome extension, not the Browser-pane tool -- see note at the very bottom):**
+
+1. **Root-caused and fixed the balance regression** flagged in the previous pass. It was NOT the
+   blueprint-construction commit (the prime suspect at the time) -- it was `colonyStrength()` in
+   `director.js` including a raw linear `world.scrap * 0.1` term. Idle citizens auto-harvest
+   resource nodes even in a totally hands-off colony (jobs.js's idle-fallback), so scrap grows
+   unboundedly with zero player action, saturating `strengthFactor` to its cap within a few
+   thousand ticks regardless of actual defense built. Fixed by switching to
+   `Math.sqrt(world.scrap) * 1.5` (diminishing returns, not a hard cap). Re-verified with two
+   fresh soak tests: 31974 and 26735 ticks to game-over, both back in the original 22-36k
+   baseline range (was 7-10k regressed).
+2. **Manual camera control** -- there was previously *no* way for the player to pan or zoom by
+   hand; the camera was 100% auto-framed on a timer (`frameOnContent` every 50 frames). Added
+   scroll-wheel zoom (`Renderer.zoomAt`, keeps the world point under the cursor stationary) and
+   right-click-drag pan (`Renderer.panByScreenDelta`), both clamped to map bounds via the same
+   `_clampCamToWorld` added for the void-bug fix. Auto-reframe now backs off once
+   `renderer.manualCamera` is true; a new topbar "⛶ Recenter" button (`input.recenter()`) hands
+   control back to auto-follow.
+3. **Simple power system** -- generators previously had no consumer side (pollution cost, no
+   benefit). Added `isPowered(structures, x, y)` in `siege.js` (radius check against active
+   generators); turrets/tesla coils get +50% damage and +25% range when powered, watchtowers get
+   a longer early-warning lead time (90 vs 50 ticks). Deliberately NOT a full wire-graph (that's
+   still "medium cost" backlog below) -- this is the "low cost" scoped-down version
+   FEATURE_RESEARCH.md flagged as the alternative.
+4. **Three new SEA:R-flavored buildables**: Floodlight (`$12`, soft-wall -- slows attackers
+   35% inside its radius instead of blocking them like a fence), Tesla Coil (`$40`, chains to
+   every attacker in range per activation instead of picking one target -- a crowd-control pick,
+   not a strict turret upgrade), Recycling Center (`$55`, passive pollution->scrap trickle,
+   complements rather than obsoletes the garbage-truck haul cycle). All three have real Canvas 2D
+   shapes in `render.js`, real economy costs, real toolbar entries with hotkeys (f/x/r).
+5. **Skill levels surfaced in the inspector** -- was a raw unbounded float (`Combat skill: 0.34`),
+   now bucketed into RimWorld-style named tiers (Novice/Competent/Skilled/Expert/Master) for both
+   combat and construction skill.
+
+**Still backlog, not done this pass (roughly cost-sorted, see FEATURE_RESEARCH.md for full
+detail on each):**
+- Full power/water wire-graph (current fix is radius-based, not a real connected network)
+- Day/night duty-roster schedule system
+- Fire spread simulation
+- Truck fuel-type tradeoffs (SEA:R mechanic, distinct from the driver requirement already built)
+- CCTV monitor room bonus (watchtower covers the early-warning half of this; the "manned
+  monitor" staffing bonus from Prison Architect's CCTV system doesn't exist yet)
+- Nuclear-waste-style guarded-hazard-zone mechanic
+- World map / conquest layer (Helldivers-2-style per-region control meter, RimWorld-style
+  multi-settlement) -- explicit user ask from earlier in the project, still not started, still
+  the single largest remaining feature. Rough plan unchanged from the previous handoff pass, see
+  below.
+- Minimap / world overview once a settlement's footprint grows past what one screen can show at
+  a readable zoom (more pressing now that manual zoom exists and players may zoom in tight)
+- Drag-select multiple citizens (currently one at a time via click)
+- Any kind of audio (fully unaddressed all session -- would need to be procedural/WebAudio-
+  generated, consistent with the no-AI-assets rule)
+- No automated test suite for the SoA/job-priority logic -- every verification this whole session
+  has been manual `window.__debug` soak tests, which work but don't guard against regressions the
+  way even a handful of assertion-based smoke tests would
+
+**Note on visual verification tooling**: the Claude_Browser MCP's screenshot/zoom tools cannot
+reliably composite this environment's Browser pane (a "pane is not displayed" error that
+recurred all session). The `mcp__claude-in-chrome__*` tools (the Claude in Chrome extension,
+driving a real Chrome tab) do NOT have this limitation and were used for all real-screenshot
+verification in this pass -- prefer that toolset over Claude_Browser's computer/zoom actions for
+this project going forward.
+
 ## Known gaps / deliberately-simplified systems (carried forward from earlier handoff, still true)
 
 - No power/water utility networks, no room detection/enclosure -- decided early these aren't

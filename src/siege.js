@@ -88,6 +88,17 @@ export class WaveSpawner {
 const TURRET_RANGE = 8;
 const TURRET_COOLDOWN_TICKS = 8;
 const TURRET_DAMAGE = 0.35;
+const POWER_RANGE = 10; // generators were previously decorative (pollution cost, no consumer side)
+const POWERED_DAMAGE_MULT = 1.5;
+const POWERED_RANGE_MULT = 1.25;
+
+export function isPowered(structures, x, y) {
+  for (const s of structures) {
+    if (s.kind !== 'generator' || s.destroyed || s.underConstruction) continue;
+    if (Math.hypot(s.x - x, s.y - y) <= POWER_RANGE) return true;
+  }
+  return false;
+}
 const ATTACKER_SPEED = 0.03;
 const ATTACKER_CITIZEN_DAMAGE = 0.008;
 const ATTACKER_CONTACT_RANGE = 0.5;
@@ -97,6 +108,15 @@ const TRAP_TRIGGER_RANGE = 0.5;
 const TRAP_DAMAGE = 3; // instant-kill-ish burst
 const GUARD_RANGE = 3.5; const GUARD_DAMAGE = 0.05; const GUARD_COOLDOWN = 4;
 const SNIPER_RANGE = 9; const SNIPER_DAMAGE = 0.12; const SNIPER_COOLDOWN = 10;
+
+// Tesla coil (SEA:R): weaker per-hit than a plain turret but chains to every attacker in range
+// each activation -- a crowd-control pick over a single-target DPS pick, not a strict upgrade.
+const TESLA_RANGE = 4.5; const TESLA_DAMAGE = 0.12; const TESLA_COOLDOWN_TICKS = 14;
+
+// Floodlight (SEA:R's "soft wall" -- an area-denial light that slows rather than blocks, so it
+// doesn't need its own health/destroy state like a fence does).
+export const FLOODLIGHT_RANGE = 3.5;
+export const FLOODLIGHT_SLOW_MULT = 0.35; // attacker speed multiplier while inside the radius
 
 function nearestLivingCitizen(citizens, x, y) {
   let bestI = -1, bestDist = Infinity;
@@ -129,8 +149,11 @@ export function tickAttackers(attackers, structures, grid, centerX, centerY, cit
     const dy = ty - attackers.y[i];
     const dist = Math.hypot(dx, dy);
     if (dist > ATTACKER_CONTACT_RANGE * 0.6) {
-      attackers.x[i] += (dx / dist) * ATTACKER_SPEED;
-      attackers.y[i] += (dy / dist) * ATTACKER_SPEED;
+      const inFloodlight = structures.some(s => s.kind === 'floodlight' && !s.destroyed && !s.underConstruction &&
+        Math.hypot(attackers.x[i] - s.x, attackers.y[i] - s.y) <= FLOODLIGHT_RANGE);
+      const speed = ATTACKER_SPEED * (inFloodlight ? FLOODLIGHT_SLOW_MULT : 1);
+      attackers.x[i] += (dx / dist) * speed;
+      attackers.y[i] += (dy / dist) * speed;
     }
 
     for (const t of structures) {
@@ -154,12 +177,33 @@ function findBlockingFence(structures, x, y) {
 
 export function tickTurrets(structures, attackers, onScrap) {
   for (const s of structures) {
-    if (s.kind !== 'turret' || s.destroyed || s.underConstruction) continue;
+    if (s.kind !== 'turret' && s.kind !== 'tesla') continue;
+    if (s.destroyed || s.underConstruction) continue;
     if (s.cooldown > 0) { s.cooldown--; continue; }
 
-    const bestI = nearestAliveAttacker(attackers, s.x, s.y, TURRET_RANGE);
+    const powered = isPowered(structures, s.x, s.y);
+    const isTesla = s.kind === 'tesla';
+    const range = (isTesla ? TESLA_RANGE : TURRET_RANGE) * (powered ? POWERED_RANGE_MULT : 1);
+    const damage = (isTesla ? TESLA_DAMAGE : TURRET_DAMAGE) * (powered ? POWERED_DAMAGE_MULT : 1);
+
+    if (isTesla) {
+      // Chains to every attacker in range instead of picking one -- Tesla's SEA:R niche is
+      // crowd control, not single-target DPS (that's what plain turrets are for).
+      let hitAny = false;
+      for (let i = 0; i < attackers.count; i++) {
+        if (!attackers.isAliveAt(i)) continue;
+        if (Math.hypot(attackers.x[i] - s.x, attackers.y[i] - s.y) > range) continue;
+        hitAny = true;
+        attackers.health[i] -= damage;
+        if (attackers.health[i] <= 0) { attackers.alive[i] = 0; onScrap?.(SCRAP_PER_KILL); }
+      }
+      if (hitAny) s.cooldown = TESLA_COOLDOWN_TICKS;
+      continue;
+    }
+
+    const bestI = nearestAliveAttacker(attackers, s.x, s.y, range);
     if (bestI >= 0) {
-      attackers.health[bestI] -= TURRET_DAMAGE;
+      attackers.health[bestI] -= damage;
       if (attackers.health[bestI] <= 0) { attackers.alive[bestI] = 0; onScrap?.(SCRAP_PER_KILL); }
       s.cooldown = TURRET_COOLDOWN_TICKS;
     }

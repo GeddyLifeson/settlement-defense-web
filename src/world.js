@@ -6,7 +6,7 @@ import { CitizenStore, tickNeedsAndMood, tickWander, CitizenFlags } from './citi
 import { StaffRoster, tickStaffDuty, tickDogs } from './security.js';
 import {
   AttackerStore, Structure, WaveSpawner, tickAttackers, tickTurrets,
-  tickAttackerVsCitizens, tickStaffCombat,
+  tickAttackerVsCitizens, tickStaffCombat, isPowered,
 } from './siege.js';
 import { ZoneGrid, ZoneKind } from './zones.js';
 import { tickJobs, isOnJob } from './jobs.js';
@@ -113,7 +113,20 @@ export class SimWorld {
     // FEATURE_RESEARCH.md); it decays slowly on its own but climbs faster than that decay once
     // you have more than a couple of generators running, so a garbage-truck haul run matters.
     let activeGenerators = 0;
-    for (const s of this.structures) if (s.kind === 'generator' && !s.destroyed && !s.underConstruction) activeGenerators++;
+    let activeRecyclingCenters = 0;
+    for (const s of this.structures) {
+      if (s.destroyed || s.underConstruction) continue;
+      if (s.kind === 'generator') activeGenerators++;
+      else if (s.kind === 'recycling_center') activeRecyclingCenters++;
+    }
+    // Recycling Center (SEA:R): a passive waste->resource sink distinct from garbage trucks --
+    // trucks do one big haul-cycle drop, this trickles constantly in exchange for scrap, so both
+    // remain worth building rather than one obsoleting the other.
+    if (activeRecyclingCenters > 0) {
+      const processed = Math.min(this.pollution, activeRecyclingCenters * 0.4);
+      this.pollution -= processed;
+      this.addScrap(processed * 0.5);
+    }
     this.pollution = Math.max(0, this.pollution + activeGenerators * 0.03 - 0.01);
 
     directWaveSpawner(this);
@@ -155,9 +168,13 @@ export class SimWorld {
 
     // Watchtowers (CCTV/early-warning analog, see FEATURE_RESEARCH.md) give advance notice of
     // an incoming wave before it actually spawns, rather than only finding out at spawn time.
-    const hasWatchtower = this.structures.some(s => s.kind === 'watchtower' && !s.destroyed && !s.underConstruction);
-    if (hasWatchtower && !this._warnedForWave &&
-      this.waveSpawner.nextWaveTick - this.currentTick <= 50 && this.waveSpawner.nextWaveTick > this.currentTick) {
+    const watchtower = this.structures.find(s => s.kind === 'watchtower' && !s.destroyed && !s.underConstruction);
+    // A powered watchtower (generator in range) sees further out in time, same pattern as the
+    // powered-turret damage/range boost -- generators are now a real consumer-side upgrade
+    // wherever they're built near, not just a pollution-producing decoration.
+    const warningWindow = watchtower ? (isPowered(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
+    if (watchtower && !this._warnedForWave &&
+      this.waveSpawner.nextWaveTick - this.currentTick <= warningWindow && this.waveSpawner.nextWaveTick > this.currentTick) {
       this._warnedForWave = this.waveSpawner.waveNumber + 1;
       this.milestoneLog.push({ tick: this.currentTick, text: 'Watchtower spots raiders massing -- wave incoming soon' });
       if (this.milestoneLog.length > 20) this.milestoneLog.shift();

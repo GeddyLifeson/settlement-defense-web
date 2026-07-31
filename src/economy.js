@@ -11,6 +11,9 @@ export const BUILD_COST = {
   garage_recycling: 45,
   garage_garbage: 35,
   watchtower: 20,
+  floodlight: 12,
+  tesla: 40,
+  recycling_center: 55,
 };
 
 export const SCRAP_PER_KILL = 4;

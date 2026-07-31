@@ -9,7 +9,14 @@ export function colonyStrength(world) {
   let structureHealth = 0;
   for (const s of world.structures) if (!s.destroyed && !s.underConstruction) structureHealth += s.health;
 
-  return aliveCitizens * 2 + structureHealth * 3 + world.scrap * 0.1;
+  // Scrap uses sqrt rather than a linear term. Idle citizens auto-harvest resource nodes even in
+  // a completely hands-off colony (jobs.js's idle-fallback), so scrap keeps growing forever with
+  // zero player action or actual defensive investment -- a linear term let banked scrap alone
+  // saturate strengthFactor to its cap within a few thousand ticks (the root cause of a real
+  // regression: hands-off survival time dropping from ~22-36k ticks to ~7-10k ticks, caught in
+  // soak-testing). Sqrt keeps scrap a meaningful wealth signal without letting passive
+  // accumulation alone drive difficulty as hard as actually-built defense/population.
+  return aliveCitizens * 2 + structureHealth * 3 + Math.sqrt(world.scrap) * 1.5;
 }
 
 const AGGRESSION_MULTIPLIER = { Calm: 0.75, Standard: 1, Aggressive: 1.35 };
