@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Settlement Defense</title>
+<style>
+  html, body { margin: 0; background: #1a1a1a; overflow: hidden; height: 100%; }
+  canvas { display: block; image-rendering: pixelated; background: #3a322a; }
+  #hud {
+    position: fixed; top: 8px; left: 8px; color: #eee; font: 13px monospace;
+    background: rgba(0,0,0,0.5); padding: 6px 10px; border-radius: 4px; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud"></div>
+<script type="module" src="./src/main.js"></script>
+</body>
+</html>

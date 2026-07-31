@@ -1,0 +1,163 @@
+// Ported from SD.Headless/SimWorld.cs -- the composition root that owns every store/system
+// and advances them one fixed tick at a time (10 Hz, matching ARCHITECTURE.md section 2).
+import { makeRng, AggressionPreset, StaffRoleKind } from './core.js';
+import { SettlementGrid } from './grid.js';
+import { CitizenStore, tickNeedsAndMood, tickWander, CitizenFlags } from './citizens.js';
+import { StaffRoster, tickStaffDuty } from './security.js';
+import {
+  AttackerStore, Structure, WaveSpawner, tickAttackers, tickTurrets,
+  tickAttackerVsCitizens, tickStaffCombat,
+} from './siege.js';
+import { ZoneGrid, ZoneKind } from './zones.js';
+import { tickJobs, isOnJob } from './jobs.js';
+import { RelationshipWeb } from './relationships.js';
+import { directWaveSpawner } from './director.js';
+
+const STARTER_NAMES = [
+  'Marlon', 'Aisling', 'Niamh', 'Reeli', 'Cascade', 'Orrery', 'Motoko',
+  'Briar', 'Ansel', 'Sable', 'Quinn', 'Vesper', 'Rowan', 'Isolde', 'Callan',
+  'Freya', 'Bram', 'Elowen', 'Tavish', 'Maren', 'Cormac', 'Sorcha', 'Declan', 'Aoife',
+];
+
+export class SimWorld {
+  constructor(width, height, seed, aggression = AggressionPreset.Calm, startingCitizens = 24) {
+    this.width = width;
+    this.height = height;
+    this.seed = seed;
+    this.aggression = aggression;
+    this.rng = makeRng(seed);
+    this.currentTick = 0;
+    this.paused = false;
+    this.gameOver = false;
+    this.milestoneLog = [];
+
+    this.grid = new SettlementGrid(width, height);
+    this.zones = new ZoneGrid(width, height);
+    this.citizens = new CitizenStore(64);
+    this.attackers = new AttackerStore(128);
+    this.roster = new StaffRoster();
+    this.structures = [];
+    this.waveSpawner = new WaveSpawner(this.grid);
+    this.relationships = new RelationshipWeb();
+    this.scrap = 50;
+    this._lastWaveLogged = 0;
+
+    const count = Math.min(startingCitizens, STARTER_NAMES.length);
+    this._citizenIds = [];
+    for (let n = 0; n < count; n++) {
+      const x = 15 + (n % 8) * 2;
+      const y = 15 + Math.floor(n / 8) * 2;
+      const idx = this.citizens.spawn(STARTER_NAMES[n], x, y);
+      this._citizenIds.push(this.citizens.id[idx]);
+    }
+
+    if (count > 3) {
+      this.roster.assign(this._citizenIds[0], StaffRoleKind.Sniper, { x: 13, y: 20 });
+      this.roster.assign(this._citizenIds[1], StaffRoleKind.Sniper, { x: 29, y: 20 });
+      this.roster.assign(this._citizenIds[2], StaffRoleKind.Guard, { x: 21, y: 13 });
+      this.roster.assign(this._citizenIds[3], StaffRoleKind.Guard, { x: 21, y: 27 });
+    }
+
+    for (const [tx, ty] of [[13, 20], [29, 20], [21, 13], [21, 27]]) {
+      this.structures.push(new Structure('turret', tx, ty));
+    }
+
+    // Default zones so the job system has somewhere to send citizens out of the box.
+    for (let x = 18; x <= 20; x++) for (let y = 18; y <= 19; y++) this.zones.set(x, y, ZoneKind.Food);
+    for (let x = 22; x <= 24; x++) for (let y = 18; y <= 19; y++) this.zones.set(x, y, ZoneKind.Bedroom);
+  }
+
+  idOf(i) { return this.citizens.id[i]; }
+  isStaffAt(i) { return this.roster.isStaff(this.citizens.id[i]); }
+
+  addScrap(amount) { this.scrap += amount; }
+
+  build(kind, x, y) {
+    this.structures.push(new Structure(kind, x, y));
+  }
+
+  tick() {
+    if (this.paused || this.gameOver) return;
+    this.currentTick++;
+
+    tickNeedsAndMood(this.citizens, (i) => this.isStaffAt(i), this.rng);
+    tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i));
+    tickStaffDuty(this.citizens, this.roster, (i) => this.idOf(i));
+    tickWander(this.citizens, this.grid, this.rng, 0.04, (i) => this.isStaffAt(i) || isOnJob(this.citizens, i));
+    this.relationships.tick(this.citizens, (i) => this.citizens.name[i], this.currentTick);
+
+    directWaveSpawner(this);
+    this.waveSpawner.tick(this.currentTick, this.attackers, this.rng);
+    tickAttackers(this.attackers, this.structures, this.grid, this.width / 2, this.height / 2, (amt) => this.addScrap(amt));
+    tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt));
+    tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt));
+    tickAttackerVsCitizens(this.attackers, this.citizens);
+
+    if (this.waveSpawner.waveNumber > this._lastWaveLogged) {
+      this._lastWaveLogged = this.waveSpawner.waveNumber;
+      this.milestoneLog.push({ tick: this.currentTick, text: `Wave ${this.waveSpawner.waveNumber} incoming` });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    }
+
+    let aliveCitizens = 0;
+    for (let i = 0; i < this.citizens.count; i++) if (this.citizens.isAliveAt(i)) aliveCitizens++;
+    if (aliveCitizens === 0 && this.citizens.count > 0) {
+      this.gameOver = true;
+      this.milestoneLog.push({ tick: this.currentTick, text: 'GAME OVER -- the settlement has fallen' });
+    }
+  }
+
+  serialize() {
+    return {
+      width: this.width, height: this.height, seed: this.seed, aggression: this.aggression,
+      currentTick: this.currentTick, scrap: this.scrap, gameOver: this.gameOver,
+      waveNumber: this.waveSpawner.waveNumber, nextWaveTick: this.waveSpawner.nextWaveTick,
+      citizens: {
+        count: this.citizens.count,
+        id: Array.from(this.citizens.id.slice(0, this.citizens.count)),
+        name: this.citizens.name.slice(0, this.citizens.count),
+        x: Array.from(this.citizens.x.slice(0, this.citizens.count)),
+        y: Array.from(this.citizens.y.slice(0, this.citizens.count)),
+        hunger: Array.from(this.citizens.hunger.slice(0, this.citizens.count)),
+        rest: Array.from(this.citizens.rest.slice(0, this.citizens.count)),
+        social: Array.from(this.citizens.social.slice(0, this.citizens.count)),
+        mood: Array.from(this.citizens.mood.slice(0, this.citizens.count)),
+        health: Array.from(this.citizens.health.slice(0, this.citizens.count)),
+        alive: Array.from(this.citizens.alive.slice(0, this.citizens.count)),
+        flags: Array.from(this.citizens.flags.slice(0, this.citizens.count)),
+        skillCombat: Array.from(this.citizens.skillCombat.slice(0, this.citizens.count)),
+      },
+      roster: Array.from(this.roster._roleById.entries()).map(([id, kind]) => ({
+        id, kind, post: this.roster._postById.get(id) || null,
+      })),
+      structures: this.structures.map(s => ({ kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed })),
+      zones: Array.from(this.zones.kind),
+    };
+  }
+
+  static deserialize(json) {
+    const w = new SimWorld(json.width, json.height, json.seed, json.aggression, 0);
+    w.currentTick = json.currentTick;
+    w.scrap = json.scrap;
+    w.gameOver = json.gameOver || false;
+    w.waveSpawner.waveNumber = json.waveNumber || 0;
+    w.waveSpawner.nextWaveTick = json.nextWaveTick || 300;
+    const c = json.citizens;
+    w.citizens.count = c.count;
+    for (let i = 0; i < c.count; i++) {
+      w.citizens.id[i] = c.id[i];
+      w.citizens.name[i] = c.name[i];
+      w.citizens.x[i] = c.x[i]; w.citizens.y[i] = c.y[i];
+      w.citizens.targetX[i] = c.x[i]; w.citizens.targetY[i] = c.y[i];
+      w.citizens.hunger[i] = c.hunger[i]; w.citizens.rest[i] = c.rest[i]; w.citizens.social[i] = c.social[i];
+      w.citizens.mood[i] = c.mood[i]; w.citizens.health[i] = c.health[i]; w.citizens.alive[i] = c.alive[i];
+      w.citizens.flags[i] = c.flags ? c.flags[i] : 0;
+      w.citizens.skillCombat[i] = c.skillCombat ? c.skillCombat[i] : 0;
+    }
+    w.roster = new (Object.getPrototypeOf(w.roster).constructor)();
+    for (const r of json.roster) w.roster.assign(r.id, r.kind, r.post);
+    w.structures = json.structures.map(s => Object.assign(new Structure(s.kind, s.x, s.y), s));
+    if (json.zones) w.zones.kind.set(json.zones);
+    return w;
+  }
+}
