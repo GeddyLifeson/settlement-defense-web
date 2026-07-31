@@ -173,17 +173,40 @@ need real rework rather than reskinning (prisoner/warden capture loop, "prison c
 kidnapping-as-raid-goal, per-prisoner income model) -- see FEATURE_RESEARCH.md's synthesis
 section for the full list and a cost-sorted recommendation of what to build next.
 
+## LATEST PASS (this session, after the research commit): DONE
+
+Storyteller personalities, downed-not-dead, pollution economy, room detection (flood-fill,
+with a refill-rate bonus for using an actually-enclosed room), and a watchtower early-warning
+buildable are all implemented, individually verified via `window.__debug`, and committed
+(`f6c0c09`). Read that commit message for exactly what was tested.
+
+**CRITICAL -- unresolved balance regression, top priority to investigate next**: a hands-off
+colony (zero player building beyond the starting 4 instant turrets) now falls in ~7-10k ticks
+(~12-17 min), down from ~22-36k ticks (~35-60 min) at the "Full playable loop" commit. This
+was caught DURING this pass's soak-testing, not introduced by it -- I ruled out the new
+doubleChance and cycleMult storyteller mechanics as the cause (both tested live via
+`STORYTELLERS.Cassandra.doubleChance = 0` etc. in `window.__debug` — the bundle is a flat
+script so these are plain globals, not module-scoped, so you can mutate them straight from the
+console). Prime suspect, not confirmed: the blueprint-construction commit (`25ef1c1`, three
+commits before the storyteller work) made every buildable including fences/traps require
+citizen construction time instead of instant placement -- a hands-off colony never gets
+anything beyond the 4 starting turrets built, so colony strength/defense capability diverged
+from what the original wave-scaling numbers assumed. **Next step**: `git stash` any WIP, check
+out `3f9b1dc` (the last commit before blueprints existed) in a throwaway way (or just diff the
+Structure/build logic), re-run the identical hands-off soak test, confirm whether that commit
+still gets the long survival time. If confirmed, the fix is almost certainly in
+`colonyStrength()` (director.js) or the wave-count/health scaling formula (siege.js
+`WaveSpawner`), not in anything from this latest pass.
+
 ## NOT STARTED -- next major features
 
-1. **Everything in FEATURE_RESEARCH.md's "not yet built" priority list** -- read it first.
-   Top picks by value/cost: room detection (flood-fill + beauty/cleanliness/impressiveness),
-   a real power/water wire-graph (currently the generator buildable is decorative), a day/night
-   duty-roster schedule system, CCTV/watchtower early warning, multiple storyteller
-   personalities (Cassandra/Phoebe/Randy-equivalent, cheap once you see it's just different
-   parameter sets over one scheduler), a pollution/waste second-resource loop feeding wave
-   difficulty (SEA:R's signature mechanic), fire spread, and a downed-not-dead state for
-   citizens/raiders.
-2. **World map / conquest layer** (explicit ask, Helldivers-2-style control meter per region,
+1. **Fix the balance regression above.**
+2. **Remaining FEATURE_RESEARCH.md items**: a real power/water wire-graph (currently the
+   generator buildable produces pollution but doesn't actually power anything -- no consumer
+   side exists yet), a day/night duty-roster schedule system, fire spread, fuel-type tradeoffs
+   for trucks (SEA:R's other big vehicle mechanic, distinct from the driver requirement already
+   built).
+3. **World map / conquest layer** (explicit ask, Helldivers-2-style control meter per region,
    RimWorld-style multi-settlement). No code exists for this yet. My rough plan (not committed
    to, reconsider if a better approach occurs to you): a `worldmap.js` with ~16 regions in a
    simple layout (id, name, neighbors, control 0-100, owned bool), one currently-active
