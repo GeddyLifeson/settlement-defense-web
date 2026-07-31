@@ -79,6 +79,13 @@ export class Renderer {
     // previously no manual camera control at all, and re-snapping under the player mid-drag felt
     // broken.
     this.manualCamera = false;
+    // Accessibility: scoped-down colorblind mode (see main.js's Settings panel). Rather than a
+    // full palette redesign, this adds shape/pattern cues on top of the existing colors -- a
+    // dashed orange ring under every attacker vs. a solid blue ring under every citizen (that
+    // color pair stays distinguishable under the common red-green deficiencies), plus a distinct
+    // dash pattern per zone kind in _drawZones -- so the citizen/attacker and zone-kind
+    // distinctions no longer rely on hue alone. Toggled by main.js, not persisted here.
+    this.highContrast = false;
   }
 
   panByScreenDelta(dxPx, dyPx, world) {
@@ -338,6 +345,16 @@ export class Renderer {
         // outlined region instead of a grid of individually-outlined squares.
         ctx.strokeStyle = ZONE_BORDER[kind];
         ctx.lineWidth = Math.max(1, size * 0.05);
+        // High-contrast mode (main.js Settings panel): a distinct dash pattern per zone kind, so
+        // the three zones stay distinguishable by pattern, not just by hue, for players who can't
+        // easily tell the blue/orange/green fills apart.
+        if (this.highContrast) {
+          ctx.lineWidth = Math.max(2, size * 0.09);
+          const dash = kind === ZoneKind.Bedroom ? [] : kind === ZoneKind.Food ? [size * 0.3, size * 0.15] : [size * 0.08, size * 0.08];
+          ctx.setLineDash(dash);
+        } else {
+          ctx.setLineDash([]);
+        }
         ctx.beginPath();
         if (world.zones.get(x, y - 1) !== kind) { ctx.moveTo(px, py); ctx.lineTo(px + size, py); }
         if (world.zones.get(x, y + 1) !== kind) { ctx.moveTo(px, py + size); ctx.lineTo(px + size, py + size); }
@@ -346,6 +363,7 @@ export class Renderer {
         ctx.stroke();
       }
     }
+    ctx.setLineDash([]); // don't leak the dash pattern into unrelated strokes drawn after this
   }
 
   _drawCursor(world, input) {
@@ -417,10 +435,23 @@ export class Renderer {
     ctx.drawImage(this._groundCache, x0, y0, world.width * size, world.height * size);
   }
 
-  _drawHumanoid(x, y, scale, bodyColor, headColor, healthFrac) {
+  _drawHumanoid(x, y, scale, bodyColor, headColor, healthFrac, isAttacker) {
     const ctx = this.ctx;
     const [sx, sy] = this.worldToScreen(x, y);
     const s = CELL * this.zoom * scale;
+
+    if (this.highContrast && isAttacker !== undefined) {
+      // Shape/pattern cue independent of hue: solid blue ring = citizen, dashed orange ring =
+      // attacker. Drawn under the shadow so it reads as a ground marker, not part of the body.
+      ctx.save();
+      ctx.strokeStyle = isAttacker ? '#ff9500' : '#33bbff';
+      ctx.lineWidth = Math.max(1.5, s * 0.09);
+      ctx.setLineDash(isAttacker ? [s * 0.14, s * 0.1] : []);
+      ctx.beginPath();
+      ctx.ellipse(sx, sy + s * 0.1, s * 0.34, s * 0.42, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
 
     ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath();
@@ -468,7 +499,7 @@ export class Renderer {
       const color = downed ? '#6b6b6b' : onBreak ? desaturate(baseColor, 0.6) : baseColor;
       const headColor = downed ? '#8a8a8a' : onBreak ? desaturate('#e8c9a0', 0.6) : '#e8c9a0';
       const [sx, sy] = this.worldToScreen(world.citizens.x[i], world.citizens.y[i]);
-      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, headColor, world.citizens.health[i]);
+      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, headColor, world.citizens.health[i], false);
       if (onBreak) {
         // Small "zzz" tell above the head so low-mood citizens read clearly at a glance,
         // distinct from the flat-gray Downed silhouette.
@@ -560,7 +591,7 @@ export class Renderer {
       }
 
       this._drawHumanoid(world.attackers.x[i], world.attackers.y[i], style.scale,
-        style.body, style.head, world.attackers.health[i]);
+        style.body, style.head, world.attackers.health[i], true);
 
       if (isBoss) {
         // Spiked crown on top of the head so the boss is distinguishable even in a dense crowd

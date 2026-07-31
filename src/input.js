@@ -242,6 +242,12 @@ export class InputController {
   }
 
   _onKey(e) {
+    // No world means the title screen is up (main.js boots lazily) -- every shortcut below is a
+    // gameplay shortcut, and none of them should fire over a menu. The typing guard is for the
+    // New Game setup form's seed box, where letters like 'b'/'t'/'m' are just text.
+    if (!this.getWorld()) return;
+    const t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT' || t.isContentEditable)) return;
     // Conquest map overlay (worldmap.js). Bound to SHIFT+M, not plain 'm' -- lowercase 'm' is
     // already the Monitor Station buildable's hotkey in TOOLS, so this deliberately only claims
     // the uppercase variant and lets 'm' fall through to the tool table below. main.js supplies
@@ -254,6 +260,10 @@ export class InputController {
     // uppercase-only convention -- lowercase 't' is the Table buildable's hotkey. Note SHIFT+R
     // is NOT available: main.js binds both 'r' and 'R' to restart().
     if (e.key === 'T') { this.onToggleResearch?.(); return; }
+    // Onboarding reference panel (tutorial.js, surfaced in main.js). F1 and '?' are both free --
+    // '?' is Shift+/ and appears in no TOOL_KEYS entry, and F1 collides with nothing here or in
+    // main.js's F5/F9 save/load bindings. F1 needs preventDefault or the browser opens its own help.
+    if (e.key === 'F1' || e.key === '?') { e.preventDefault(); this.onToggleHelp?.(); return; }
     if (e.key === 'Escape' && this.onToggleMap) { this.onCloseMap?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onToggleResearch) { this.onCloseResearch?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onToggleFinance) { this.onCloseFinance?.(); /* falls through to clear tool */ }

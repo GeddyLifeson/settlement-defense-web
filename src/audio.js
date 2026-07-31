@@ -11,6 +11,17 @@ let ctx = null;
 let masterGain = null;
 let muted = false;
 
+// Continuous volume level (0..1), independent of the mute toggle -- the two combine as
+// `muted ? 0 : volume` everywhere the master gain is set. Persisted to localStorage so it
+// survives a reload; mute intentionally is NOT persisted (matches its previous session-only
+// behaviour, and a silently-still-muted reload would be a confusing surprise).
+const VOLUME_KEY = 'settlement-defense-volume';
+let volume = 0.5;
+try {
+  const stored = Number.parseFloat(localStorage.getItem(VOLUME_KEY));
+  if (Number.isFinite(stored)) volume = Math.max(0, Math.min(1, stored));
+} catch { /* localStorage unavailable -- fall back to the 0.5 default */ }
+
 // Browsers refuse to start an AudioContext (or keep it running) until a user gesture has
 // happened on the page -- creating one before that is fine, it just starts 'suspended' and
 // produces no sound until resumed. We lazily create on first play*() call and attempt a
@@ -24,7 +35,7 @@ function getCtx() {
   try {
     ctx = new Ctor();
     masterGain = ctx.createGain();
-    masterGain.gain.value = muted ? 0 : 0.5;
+    masterGain.gain.value = muted ? 0 : volume;
     masterGain.connect(ctx.destination);
   } catch {
     ctx = null;
@@ -45,12 +56,29 @@ export function isMuted() { return muted; }
 
 export function setMuted(value) {
   muted = value;
-  if (masterGain) masterGain.gain.value = muted ? 0 : 0.5;
+  if (masterGain) masterGain.gain.value = muted ? 0 : volume;
 }
 
 export function toggleMute() {
   setMuted(!muted);
   return muted;
+}
+
+export function getVolume() { return volume; }
+
+/** Console/soak-test verification hook: the ACTUAL live GainNode value, not just the stored
+ *  `volume` number -- lets a test confirm the master gain really was scaled, not merely that the
+ *  setter ran. Returns null if no AudioContext exists yet (nothing has played a sound this
+ *  session). */
+export function getMasterGainValue() { return masterGain ? masterGain.gain.value : null; }
+
+/** Set the continuous volume level (0..1, clamped) and persist it. Does not touch `muted` --
+ *  dragging the slider while muted updates the stored level but stays silent until unmuted,
+ *  same as any normal OS volume slider. */
+export function setVolume(value) {
+  volume = Math.max(0, Math.min(1, value));
+  try { localStorage.setItem(VOLUME_KEY, String(volume)); } catch { /* best effort */ }
+  if (masterGain && !muted) masterGain.gain.value = volume;
 }
 
 // ---------------------------------------------------------------- low-level synth helpers

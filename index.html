@@ -12,6 +12,10 @@
     --text-dim: #a89e90;
     --danger: #d9534f;
     --good: #6fbf6f;
+    /* Accessibility: UI text-size multiplier (Settings panel). Applied as a uniform transform on
+       every modal .box rather than rewriting each individual font-size declaration below -- see
+       the ".box" rule further down and main.js's applyUiScale(). 1 = default size. */
+    --ui-scale: 1;
   }
   * { box-sizing: border-box; }
   html, body {
@@ -27,6 +31,14 @@
     border-radius: 8px;
     backdrop-filter: blur(3px);
   }
+
+  /* Accessibility text-size scale (Settings panel, --ui-scale on :root): every full-screen modal's
+     centered .box is uniformly scaled rather than rewriting each individual font-size declaration
+     throughout this stylesheet -- the flex-centered parent means transform:scale keeps it centered
+     at any scale. Deliberately NOT applied to #topbar/#toolbar/#inspector/etc (the always-visible
+     HUD chrome), only to modal .box content, matching what the Settings panel's hint text says
+     ("scales every full-screen panel"). */
+  .box { transform: scale(var(--ui-scale)); }
 
   /* ---- Top status bar ---- */
   #topbar {
@@ -103,6 +115,16 @@
   }
   #toast.show { opacity: 1; }
 
+  /* ---- Autosave indicator ---- */
+  /* Deliberately quieter than #toast (dimmer color, smaller, tucked in the corner) -- this fires
+     every ~2 minutes during normal play and would be obnoxious at #toast's visual weight. */
+  #autosave-indicator {
+    position: fixed; right: 14px; bottom: 10px;
+    padding: 3px 10px; font-size: 10.5px; color: var(--text-dim);
+    opacity: 0; transition: opacity 0.6s; pointer-events: none;
+  }
+  #autosave-indicator.show { opacity: 0.85; }
+
   /* ---- Game over modal ---- */
   #gameover {
     position: fixed; inset: 0; background: rgba(0,0,0,0.7);
@@ -118,6 +140,62 @@
     background: var(--accent); color: #201a10; border: none; border-radius: 6px;
     padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
   }
+
+  /* ---- Pause menu ---- Same full-screen dimmed-backdrop .box.panel convention as #gameover.
+     Sits below #confirm-dialog's z-index:50 (quit-to-title's confirm step needs to render on top
+     of this), but doesn't need its own z-index otherwise -- nothing else is open while paused
+     except possibly the map/finance/research overlays behind it, which is fine, pausing doesn't
+     force those closed. */
+  #pausemenu {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center; z-index: 30;
+  }
+  #pausemenu.hidden { display: none; }
+  #pausemenu .box {
+    padding: 28px 36px; text-align: center; min-width: 260px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  #pausemenu h2 { margin: 0 0 10px 0; color: var(--accent); }
+  #pausemenu button {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 11px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  #pausemenu button:hover { background: #3a342f; }
+  #pausemenu button.primary {
+    background: var(--accent); color: #201a10; border-color: var(--accent);
+  }
+  #pausemenu button.primary:hover { filter: brightness(1.1); }
+  #pausemenu button.danger {
+    background: var(--danger); color: #fff; border: none;
+  }
+  #pausemenu button.danger:hover { filter: brightness(1.1); }
+  #pausemenu button:disabled { opacity: 0.4; cursor: not-allowed; }
+
+  /* ---- Generic confirm dialog (New/restart, quit-to-title, load-over-running-game, ...) ----
+     Same modal convention as #gameover, but sits above everything else (including the conquest/
+     finance/research overlays at z-index:20 and any future pause menu) since it can be triggered
+     from on top of those. */
+  #confirm-dialog {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center; z-index: 50;
+  }
+  #confirm-dialog.hidden { display: none; }
+  #confirm-dialog .box {
+    padding: 28px 36px; text-align: center; min-width: 280px; max-width: 420px;
+  }
+  #confirm-dialog p { margin: 0 0 20px 0; color: var(--text); font-size: 14px; line-height: 1.4; }
+  #confirm-dialog .confirm-actions { display: flex; gap: 10px; justify-content: center; }
+  #confirm-dialog button {
+    border-radius: 6px; padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  #confirm-dialog #btn-confirm-cancel {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+  }
+  #confirm-dialog #btn-confirm-cancel:hover { background: #3a342f; }
+  #confirm-dialog #btn-confirm-ok {
+    background: var(--danger); color: #fff; border: none;
+  }
+  #confirm-dialog #btn-confirm-ok:hover { filter: brightness(1.1); }
 
   /* ---- World map / conquest overlay ---- */
   #worldmap {
@@ -261,7 +339,304 @@
      read as unavailable and don't respond to hover. */
   #toolbar .tool-btn.locked { opacity: 0.42; cursor: not-allowed; }
   #toolbar .tool-btn.locked:hover { background: #2c2825; }
+
+  /* ---- Settings overlay ---- Reachable from BOTH the title screen's main menu (no SimWorld yet)
+     and in-game via the pause menu's Settings button -- so like #saveload it is deliberately NOT
+     in the body.pregame hide-list below and NOT torn down by showTitleScreen()'s overlay-cleanup
+     loop. z-index sits above #saveload (46) since it can be opened on top of the pause menu, but
+     below #confirm-dialog (50) (not that Settings itself confirms anything, just consistent). */
+  #settings {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 47;
+  }
+  #settings.hidden { display: none; }
+  #settings .box { padding: 20px 24px; width: min(640px, 94vw); max-height: 92vh; overflow: auto; }
+  #settings .set-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  #settings h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #settings .set-head .spacer { flex: 1; }
+  #settings h3 { margin: 0 0 8px 0; font-size: 13px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--accent); }
+  #settings .set-section { margin-bottom: 20px; }
+  #settings .set-section:last-child { margin-bottom: 0; }
+  #settings .field { margin-bottom: 12px; }
+  #settings .field:last-child { margin-bottom: 0; }
+  #settings .field > .label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+    margin-bottom: 5px;
+  }
+  #settings .field > .label .val { color: var(--accent); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 12.5px; }
+  #settings .field .hint { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; margin-top: 4px; }
+  #settings input[type=range] { width: 100%; accent-color: var(--accent); }
+  #settings select {
+    width: 100%; background: #23201d; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 7px 9px; font-size: 13px; font-family: inherit;
+  }
+  #settings .set-check {
+    display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--text);
+    cursor: pointer; margin-bottom: 10px;
+  }
+  #settings .set-note {
+    font-size: 11px; color: var(--text-dim); background: #23201d; border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 8px 10px; margin-top: 8px; line-height: 1.4;
+  }
+  #settings .key-groups { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; }
+  #settings .key-group h4 { margin: 0 0 6px 0; font-size: 11.5px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+  #settings .key-row {
+    display: flex; justify-content: space-between; gap: 10px; font-size: 12px;
+    padding: 3px 0; border-bottom: 1px solid rgba(255,255,255,0.04);
+  }
+  #settings .key-row .k {
+    background: #2c2825; border: 1px solid var(--panel-border); border-radius: 4px;
+    padding: 1px 6px; font-size: 11px; color: var(--accent); white-space: nowrap; flex-shrink: 0;
+  }
+  #settings .close-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+
+  /* ---- Save / Load slots overlay ---- */
+  /* Same full-screen-overlay convention as #worldmap/#finance/#research, but reachable from BOTH
+     the title screen (no world yet) and in-game (via the pause menu's Save button) -- so unlike
+     those three it is deliberately NOT in the body.pregame hide-list below and NOT torn down by
+     showTitleScreen()'s overlay-cleanup loop as "in-game only". z-index sits above #titlescreen
+     (40) and #credits (45) since it must be reachable from the title screen, but below
+     #confirm-dialog (50) since loading over a running game reuses that shared confirm step. */
+  #saveload {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 46;
+  }
+  #saveload.hidden { display: none; }
+  #saveload .box { padding: 20px 24px; width: min(640px, 94vw); max-height: 92vh; overflow: auto; }
+  #saveload .sl-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  #saveload h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #saveload .sl-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
+  #saveload .sl-head .spacer { flex: 1; }
+  #saveload .rows { display: flex; flex-direction: column; gap: 8px; }
+  #saveload .slot-row {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 10px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  #saveload .slot-row.empty { opacity: 0.6; }
+  #saveload .slot-name { font-weight: 600; font-size: 13px; }
+  #saveload .slot-meta { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+  #saveload .slot-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  #saveload .slot-actions button {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 10px; font-size: 12px; cursor: pointer;
+  }
+  #saveload .slot-actions button:hover:not(:disabled) { background: #3a342f; }
+  #saveload .slot-actions button:disabled { opacity: 0.35; cursor: not-allowed; }
+  #saveload .slot-actions button.danger { border-color: var(--danger); color: var(--danger); }
+  #saveload .close-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
   #toolbar .tool-btn.locked .cost::before { content: '🔒 '; }
+
+  /* ---- Credits / About overlay ---- Same full-screen dimmed .box.panel convention as #gameover/
+     #pausemenu; reachable from the title screen so it needs to render above #titlescreen's
+     z-index:40. */
+  #credits {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 45;
+  }
+  #credits.hidden { display: none; }
+  #credits .box { padding: 26px 30px; width: min(460px, 92vw); text-align: center; }
+  #credits h2 { margin: 0 0 6px 0; font-size: 22px; color: var(--accent); }
+  #credits .credits-desc { color: var(--text-dim); font-size: 12.5px; line-height: 1.5; margin: 0 0 18px 0; }
+  #credits .credits-list { list-style: none; margin: 0 0 22px 0; padding: 0; text-align: left; }
+  #credits .credits-list li {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 8px 12px; font-size: 12.5px; margin-bottom: 6px;
+  }
+  #credits .credits-list li b { color: var(--accent); }
+  #credits button {
+    background: var(--accent); color: #201a10; border: none; border-radius: 6px;
+    padding: 9px 22px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  #credits button:hover { filter: brightness(1.1); }
+
+  /* ---- Title screen / New Game setup ----
+     Same full-screen-modal convention as #worldmap / #finance / #research above (fixed inset:0,
+     dimmed backdrop, a .box.panel centred inside), just at a higher z-index since it sits over
+     everything and, unlike those, exists BEFORE any SimWorld does. Two sibling boxes live inside
+     it -- #title-main and #title-setup -- and exactly one is visible at a time. ---- */
+  #titlescreen {
+    position: fixed; inset: 0; background: #14120f;
+    display: flex; align-items: center; justify-content: center; z-index: 40;
+  }
+  #titlescreen.hidden { display: none; }
+  #titlescreen .box { padding: 26px 30px; width: min(560px, 94vw); max-height: 94vh; overflow: auto; }
+  #titlescreen .box.hidden { display: none; }
+  #titlescreen h1 {
+    margin: 0; font-size: 34px; letter-spacing: 0.04em; color: var(--accent); line-height: 1.1;
+  }
+  #titlescreen h2 { margin: 0 0 4px 0; font-size: 20px; color: var(--accent); }
+  #titlescreen .tagline { color: var(--text-dim); font-size: 12.5px; line-height: 1.5; margin: 8px 0 22px 0; }
+  #titlescreen .menu { display: flex; flex-direction: column; gap: 8px; }
+  #titlescreen .menu button {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 11px 16px; font-size: 15px; cursor: pointer; text-align: left;
+  }
+  #titlescreen .menu button:hover:not(:disabled) { background: #3a342f; }
+  #titlescreen .menu button.primary { background: var(--accent); color: #201a10; border-color: var(--accent); font-weight: 600; }
+  #titlescreen .menu button.primary:hover { filter: brightness(1.1); }
+  #titlescreen .menu button:disabled { opacity: 0.35; cursor: not-allowed; }
+  #titlescreen .savenote { margin-top: 16px; font-size: 11px; color: var(--text-dim); }
+
+  /* setup form */
+  #titlescreen .setup-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 16px; }
+  #titlescreen .field { margin-bottom: 14px; }
+  #titlescreen .field > .label {
+    display: flex; justify-content: space-between; align-items: baseline;
+    font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+    margin-bottom: 5px;
+  }
+  #titlescreen .field > .label .val { color: var(--accent); font-weight: 600; letter-spacing: 0; text-transform: none; font-size: 12.5px; }
+  #titlescreen .field .hint { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; margin-top: 4px; }
+  #titlescreen input[type=range] { width: 100%; accent-color: var(--accent); }
+  #titlescreen input[type=text], #titlescreen select {
+    width: 100%; background: #23201d; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 7px 9px; font-size: 13px; font-family: inherit;
+  }
+  #titlescreen .seed-row { display: flex; gap: 8px; }
+  #titlescreen .seed-row button {
+    flex-shrink: 0; background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 6px 12px; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  #titlescreen .seed-row button:hover { background: #3a342f; }
+  #titlescreen .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #titlescreen .card {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; cursor: pointer; display: flex; flex-direction: column; gap: 4px;
+  }
+  #titlescreen .card:hover { background: #2b2723; }
+  #titlescreen .card.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  #titlescreen .card .cname { font-weight: 600; font-size: 12.5px; }
+  #titlescreen .card.selected .cname { color: var(--accent); }
+  #titlescreen .card .cdesc { font-size: 10.5px; color: var(--text-dim); line-height: 1.35; }
+  #titlescreen .setup-actions { display: flex; gap: 8px; margin-top: 20px; }
+  #titlescreen .setup-actions .spacer { flex: 1; }
+  #titlescreen .setup-actions button {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 9px 18px; font-size: 14px; cursor: pointer;
+  }
+  #titlescreen .setup-actions button:hover { background: #3a342f; }
+  #titlescreen .setup-actions button.primary {
+    background: var(--accent); color: #201a10; border-color: var(--accent); font-weight: 600;
+  }
+  #titlescreen .setup-actions button.primary:hover { filter: brightness(1.1); }
+
+  /* Single point of control for "no game is running yet": every piece of in-game UI is hidden
+     while <body> carries .pregame, so nothing has to be individually toggled at handoff time. */
+  body.pregame #game,
+  body.pregame #topbar,
+  body.pregame #toolbar,
+  body.pregame #inspector,
+  body.pregame #eventlog,
+  body.pregame #minimap-wrap,
+  body.pregame #help-hint,
+  body.pregame #grading-popover,
+  body.pregame #toast,
+  body.pregame #autosave-indicator,
+  body.pregame #gameover,
+  body.pregame #worldmap,
+  body.pregame #finance,
+  body.pregame #research,
+  body.pregame #pausemenu,
+  body.pregame #tutorial,
+  body.pregame #help-panel,
+  body.pregame #confirm-dialog { display: none !important; }
+
+  /* ---- Onboarding: first-run guided tour ----
+     Deliberately NOT a modal. Each step anchors a small floating callout next to the real control
+     it describes (positions computed live from getBoundingClientRect in tutorial.js), so the UI
+     being explained stays visible and usable underneath. #tutorial is a zero-size, pointer-events:
+     none wrapper purely so both children can be hidden/shown as a unit; the callout re-enables
+     pointer events for its own buttons. */
+  /* z-index 25 puts the callout above the map/finance/research/help overlays (20) -- the tour
+     actively points at those buttons -- but below the pause menu (30), title screen (40) and the
+     confirm dialog (50), all of which are genuinely modal and should win. */
+  #tutorial { position: fixed; inset: 0; pointer-events: none; z-index: 25; }
+  #tutorial.hidden { display: none; }
+  #tutorial-ring {
+    position: fixed; border: 2px solid var(--accent); border-radius: 7px;
+    box-shadow: 0 0 0 3px rgba(224,163,54,0.18), 0 0 14px rgba(224,163,54,0.35);
+    pointer-events: none; transition: left 0.18s, top 0.18s, width 0.18s, height 0.18s;
+  }
+  #tutorial-ring.hidden { display: none; }
+  #tutorial-box {
+    position: fixed; width: min(340px, 90vw); padding: 14px 16px; pointer-events: auto;
+    border-color: var(--accent);
+    box-shadow: 0 8px 28px rgba(0,0,0,0.55);
+  }
+  #tutorial-box .tut-step {
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent);
+  }
+  #tutorial-box h3 { margin: 4px 0 7px 0; font-size: 15.5px; line-height: 1.25; }
+  #tutorial-box .tut-body { font-size: 12.5px; line-height: 1.5; color: var(--text-dim); }
+  #tutorial-box .tut-pips { display: flex; gap: 4px; margin: 12px 0 10px 0; }
+  #tutorial-box .pip { width: 100%; height: 3px; border-radius: 2px; background: #3a342f; }
+  #tutorial-box .pip.done { background: #7a6a44; }
+  #tutorial-box .pip.on { background: var(--accent); }
+  #tutorial-box .tut-actions { display: flex; align-items: center; gap: 8px; }
+  #tutorial-box .tut-actions .spacer { flex: 1; }
+  #tutorial-box button {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 6px 12px; font-size: 12.5px; cursor: pointer;
+  }
+  #tutorial-box button:hover:not(:disabled) { background: #3a342f; }
+  #tutorial-box button:disabled { opacity: 0.35; cursor: not-allowed; }
+  #tutorial-box button.primary {
+    background: var(--accent); color: #201a10; border-color: var(--accent); font-weight: 600;
+  }
+  #tutorial-box button.primary:hover { filter: brightness(1.1); }
+  /* Skip is always present at every step, deliberately de-emphasised but never hidden. */
+  #tutorial-box #btn-tutorial-skip {
+    background: none; border: none; color: var(--text-dim); text-decoration: underline;
+    padding: 6px 2px; font-size: 11.5px;
+  }
+  #tutorial-box #btn-tutorial-skip:hover { color: var(--text); background: none; }
+
+  /* ---- Onboarding: persistent reference panel ----
+     Full-screen .panel modal, same convention as #research / #worldmap / #finance. */
+  #help-panel {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
+  }
+  #help-panel.hidden { display: none; }
+  #help-panel .box { padding: 20px 24px; width: min(820px, 94vw); max-height: 92vh; overflow: auto; }
+  #help-panel .help-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  #help-panel h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #help-panel .help-head .spacer { flex: 1; }
+  #help-panel .help-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 16px; }
+  #help-panel .help-sec { margin-bottom: 18px; }
+  #help-panel .help-sec:last-child { margin-bottom: 0; }
+  #help-panel .help-sec h3 {
+    margin: 0 0 6px 0; font-size: 13px; color: var(--accent);
+    letter-spacing: 0.04em; text-transform: uppercase;
+    border-bottom: 1px solid var(--panel-border); padding-bottom: 5px;
+  }
+  #help-panel .help-intro, #help-panel .help-outro {
+    font-size: 11.5px; line-height: 1.5; color: var(--text-dim); margin: 0 0 8px 0;
+  }
+  #help-panel .help-outro { margin: 8px 0 0 0; }
+  #help-panel dl { margin: 0; display: flex; flex-direction: column; gap: 4px; }
+  #help-panel .help-row {
+    display: grid; grid-template-columns: 150px 1fr; gap: 10px;
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 5px;
+    padding: 6px 10px;
+  }
+  #help-panel dt { font-weight: 600; font-size: 12px; }
+  #help-panel dd { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text-dim); }
+  #help-panel .close-btn, #help-panel .replay-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  #help-panel .close-btn:hover, #help-panel .replay-btn:hover { background: #3a342f; }
+  @media (max-width: 620px) {
+    #help-panel .help-row { grid-template-columns: 1fr; gap: 2px; }
+  }
 
   /* ---- Help hint ---- */
   #help-hint {
@@ -277,7 +652,9 @@
   #minimap { display: block; cursor: pointer; image-rendering: pixelated; background: #241f1a; }
 </style>
 </head>
-<body>
+<!-- .pregame is set in the markup, not by script, so the in-game UI never flashes on load before
+     main.js gets a chance to run. startGame() removes it; showTitleScreen() puts it back. -->
+<body class="pregame">
 <canvas id="game"></canvas>
 
 <div id="topbar" class="panel">
@@ -307,6 +684,8 @@
   <button id="btn-worldmap" title="Conquest map -- per-region control meters and expansion [Shift+M]">🗺 Map</button>
   <button id="btn-finance" title="Budget report -- scrap income/expense breakdown and trend [Shift+B]">💰 Budget</button>
   <button id="btn-research" title="Research -- tech tree unlocking advanced buildables [Shift+T]">🔬 Research</button>
+  <button id="btn-help" title="Reference -- job priorities, building, waves, resources and every building category [F1 or ?]">❓ Help</button>
+  <button id="btn-fullscreen" title="Toggle fullscreen">⛶ Fullscreen</button>
   <button id="btn-mute" title="Mute/unmute procedurally-synthesized sound effects">🔊 Sound</button>
   <button id="btn-save">💾 Save</button>
   <button id="btn-load">📂 Load</button>
@@ -339,12 +718,39 @@
 <div id="eventlog" class="panel"></div>
 
 <div id="toast"></div>
+<div id="autosave-indicator"></div>
 
 <div id="gameover" class="hidden">
   <div class="box panel">
     <h2>The Settlement Has Fallen</h2>
     <p id="gameover-detail"></p>
     <button id="btn-restart-modal">Start a New Settlement</button>
+  </div>
+</div>
+
+<!-- Pause menu. Opened whenever world.paused goes true (topbar Pause button or Space, see
+     main.js's syncPauseMenu) -- the primary, obvious UI for "paused", not just a button label
+     change. Same full-screen dimmed .box.panel convention as #gameover. -->
+<div id="pausemenu" class="hidden">
+  <div class="box panel">
+    <h2>Paused</h2>
+    <button id="btn-pause-resume" class="primary">Resume</button>
+    <button id="btn-pause-save">Save</button>
+    <button id="btn-pause-settings">Settings</button>
+    <button id="btn-pause-quit" class="danger">Quit to Title</button>
+  </div>
+</div>
+
+<!-- Generic confirm-before-destructive-action dialog. Reusable across multiple call sites (New/
+     restart, quit-to-title, load-over-a-running-game, ...) via main.js's confirmAction(message, onConfirm)
+     helper (exposed on window.__debug) rather than one bespoke modal per action. -->
+<div id="confirm-dialog" class="hidden">
+  <div class="box panel">
+    <p id="confirm-message"></p>
+    <div class="confirm-actions">
+      <button id="btn-confirm-cancel">Cancel</button>
+      <button id="btn-confirm-ok" class="danger">Confirm</button>
+    </div>
   </div>
 </div>
 
@@ -399,9 +805,202 @@
   </div>
 </div>
 
+<!-- Save/Load slots. Reachable from the title screen's menu (Save/Load Slots button) AND from
+     in-game via the pause menu's Save button (main.js repoints btn-pause-save here instead of a
+     quick single-slot save). main.js's renderSaveLoad() rebuilds #saveload-rows from
+     localStorage every time this is opened or a slot changes. -->
+<div id="saveload" class="hidden">
+  <div class="box panel">
+    <div class="sl-head">
+      <h2>Save / Load</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-saveload-close">Close</button>
+    </div>
+    <div class="sl-sub" id="saveload-sub">Save the current settlement to a slot, or load one to continue it.</div>
+    <div class="rows" id="saveload-rows"></div>
+  </div>
+</div>
+
+<!-- Settings / Options panel. Reachable from the title screen's main menu (no SimWorld yet -- the
+     Audio/Accessibility sections still work, the Difficulty section just explains there's nothing
+     live to change yet) AND in-game via the pause menu's existing Settings button (main.js exposes
+     window.__debug.openSettings/toggleSettings, which that button already looks for). main.js's
+     renderSettings() fills in the volume slider's current value, the aggression/storyteller
+     dropdowns (only meaningful with a live SimWorld), and the keybinding reference from input.js's
+     TOOLS table + the documented hotkeys below -- nothing here is hand-typed twice. -->
+<div id="settings" class="hidden">
+  <div class="box panel">
+    <div class="set-head">
+      <h2>Settings</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-settings-close">Close</button>
+    </div>
+
+    <div class="set-section">
+      <h3>Audio</h3>
+      <div class="field">
+        <div class="label"><span>Volume</span><span class="val" id="settings-volume-val">50%</span></div>
+        <input type="range" id="settings-volume" min="0" max="100" step="1" value="50">
+        <div class="hint">Scales the procedurally-synthesized sound effects' master gain. Independent of the topbar's Mute toggle -- muting silences regardless of this level, and this level is remembered for next time you unmute.</div>
+      </div>
+    </div>
+
+    <div class="set-section">
+      <h3>Difficulty</h3>
+      <div class="field">
+        <div class="label"><span>Attacker aggression</span></div>
+        <select id="settings-aggression"></select>
+      </div>
+      <div class="field">
+        <div class="label"><span>Storyteller</span></div>
+        <select id="settings-storyteller"></select>
+      </div>
+      <div class="set-note" id="settings-difficulty-note"></div>
+    </div>
+
+    <div class="set-section">
+      <h3>Accessibility</h3>
+      <label class="set-check"><input type="checkbox" id="settings-highcontrast"> High-contrast mode (shape/pattern cues for attackers vs. citizens and zone kinds, not just color)</label>
+      <div class="field">
+        <div class="label"><span>UI size</span><span class="val" id="settings-textsize-val">100%</span></div>
+        <input type="range" id="settings-textsize" min="85" max="150" step="5" value="100">
+        <div class="hint">Scales every full-screen panel (this one included) up or down.</div>
+      </div>
+    </div>
+
+    <div class="set-section">
+      <h3>Keybindings (reference only -- not rebindable)</h3>
+      <div class="key-groups" id="settings-keybinds"></div>
+    </div>
+  </div>
+</div>
+
 <div id="help-hint" class="panel">Click a citizen to inspect &middot; drag to paint zones/walls &middot; right-drag/scroll to pan/zoom &middot; Space pause &middot; F5/F9 save/load</div>
 
 <div id="minimap-wrap" class="panel"><canvas id="minimap" width="160" height="160"></canvas></div>
+
+<!-- First-run guided tour (src/tutorial.js). Auto-fires once, on the first NEW game ever started
+     on this machine (localStorage 'settlement-defense-tutorial-seen'); never on Continue/Load.
+     The ring and the callout are both positioned at runtime from the real target element's
+     getBoundingClientRect() -- nothing here has fixed coordinates. -->
+<div id="tutorial" class="hidden">
+  <div id="tutorial-ring" class="hidden"></div>
+  <div id="tutorial-box" class="panel">
+    <div class="tut-step" id="tutorial-step"></div>
+    <h3 id="tutorial-title"></h3>
+    <div class="tut-body" id="tutorial-body"></div>
+    <div class="tut-pips" id="tutorial-pips"></div>
+    <div class="tut-actions">
+      <button id="btn-tutorial-skip" type="button">Skip Tutorial</button>
+      <div class="spacer"></div>
+      <button id="btn-tutorial-back" type="button">← Back</button>
+      <button id="btn-tutorial-next" class="primary" type="button">Next →</button>
+    </div>
+  </div>
+</div>
+
+<!-- Persistent reference panel (src/tutorial.js builds #help-body from HELP_SECTIONS). Same
+     full-screen .box.panel convention as #research / #worldmap / #finance. -->
+<div id="help-panel" class="hidden">
+  <div class="box panel">
+    <div class="help-head">
+      <h2>Settlement Handbook</h2>
+      <div class="spacer"></div>
+      <button class="replay-btn" id="btn-help-replay" type="button">↻ Replay tour</button>
+      <button class="close-btn" id="btn-help-close" type="button">Close [Esc]</button>
+    </div>
+    <div class="help-sub">Everything the settlement runs on, in one place. Open any time with F1 or ?.</div>
+    <div id="help-body"></div>
+  </div>
+</div>
+
+<!-- Title screen + New Game setup. Shown on load, before any SimWorld exists (main.js's boot is
+     lazy: it constructs nothing until startGame() runs). #title-main and #title-setup are two
+     views of one overlay; main.js swaps between them. -->
+<div id="titlescreen">
+  <div class="box panel" id="title-main">
+    <h1>Settlement Defense</h1>
+    <div class="tagline">
+      A settlement on hostile ground. Your people build, haul, eat, sleep and fall out with each
+      other on their own -- you decide what gets built and where the walls go, and hope that's
+      enough when the next wave arrives.
+    </div>
+    <div class="menu">
+      <button id="btn-title-new" class="primary">New Game</button>
+      <button id="btn-title-continue">Continue</button>
+      <button id="btn-title-load">Load Game</button>
+      <button id="btn-title-saveload">Save / Load Slots</button>
+      <button id="btn-title-resume-autosave">Resume Autosave</button>
+      <button id="btn-title-settings">Settings</button>
+      <button id="btn-title-credits">Credits</button>
+    </div>
+    <div class="savenote" id="title-savenote"></div>
+  </div>
+
+  <div class="box panel hidden" id="title-setup">
+    <h2>New Settlement</h2>
+    <div class="setup-sub">Everything here is fixed for the life of the settlement -- choose carefully.</div>
+
+    <div class="field">
+      <div class="label"><span>Map width</span><span class="val" id="setup-width-val">64</span></div>
+      <input type="range" id="setup-width" min="48" max="96" step="4" value="64">
+    </div>
+    <div class="field">
+      <div class="label"><span>Map height</span><span class="val" id="setup-height-val">64</span></div>
+      <input type="range" id="setup-height" min="48" max="96" step="4" value="64">
+      <div class="hint">Bigger maps mean more room to sprawl and more ground to defend.</div>
+    </div>
+
+    <div class="field">
+      <div class="label"><span>Starting citizens</span><span class="val" id="setup-citizens-val">24</span></div>
+      <input type="range" id="setup-citizens" min="12" max="32" step="1" value="24">
+      <div class="hint">More hands early, but a bigger settlement draws bigger waves.</div>
+    </div>
+
+    <div class="field">
+      <div class="label"><span>Seed</span></div>
+      <div class="seed-row">
+        <input type="text" id="setup-seed" inputmode="numeric" autocomplete="off">
+        <button id="btn-setup-randomize" type="button">🎲 Randomize</button>
+      </div>
+      <div class="hint">Terrain, names, traits and every roll in the run come from this number.</div>
+    </div>
+
+    <div class="field">
+      <div class="label"><span>Attacker aggression</span></div>
+      <div class="cards" id="setup-aggression"></div>
+    </div>
+
+    <div class="field">
+      <div class="label"><span>Storyteller</span></div>
+      <div class="cards" id="setup-storyteller"></div>
+    </div>
+
+    <div class="setup-actions">
+      <button id="btn-setup-back" type="button">Back</button>
+      <div class="spacer"></div>
+      <button id="btn-begin" class="primary" type="button">Begin Settlement</button>
+    </div>
+  </div>
+</div>
+
+<!-- Credits / About overlay -- reachable from the title screen's "Credits" button. Same
+     full-screen-modal convention as the other overlays; sits above #titlescreen (z-index 45). -->
+<div id="credits" class="hidden">
+  <div class="box panel">
+    <h2>Settlement Defense</h2>
+    <p class="credits-desc">
+      A RimWorld / Prison Architect / Super Energy Apocalypse: Recycled mashup -- defend your
+      settlement, manage its needs, and expand your reach.
+    </p>
+    <ul class="credits-list">
+      <li><b>RimWorld</b> -- colonist needs, moods, traits, backstories, resource harvesting</li>
+      <li><b>Prison Architect</b> -- grading/reporting systems, reframed for a non-carceral settlement</li>
+      <li><b>Super Energy Apocalypse: Recycled</b> -- wave-based siege defense</li>
+    </ul>
+    <button id="btn-credits-close">Close</button>
+  </div>
+</div>
 
 <script src="./game.bundle.js"></script>
 </body>

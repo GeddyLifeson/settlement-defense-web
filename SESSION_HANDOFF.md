@@ -218,6 +218,61 @@ still gets the long survival time. If confirmed, the fix is almost certainly in
    (the "settlements giving each other resources" part of the ask). UI: a topbar button or `M`
    key opens a full-screen map overlay in the same DOM-panel style as the rest of the UI.
 
+## MENUS/UX WAVE (this session, via 8 more parallel subagents): DONE
+
+User asked what was missing for "menus, setup, things like that" — the meta-game wrapper around
+the sim, distinct from gameplay systems. The game previously booted directly into a running
+colony with zero menu of any kind. All 8 landed; the first (title screen) ran alone first since
+it's the architectural foundation everything else needed, the remaining 7 ran in parallel against
+the shared tree once its interface existed.
+
+**Title screen + lazy boot** (`src/main.js` restructured — `SimWorld` is no longer constructed
+at module load) is the load-bearing piece. It exposes a clean interface on `window.__debug` that
+every other agent this round hooked into: `startGame(world)` (the one gameplay-handoff point),
+`showTitleScreen()` (quit-to-title), `isInGame()`, `newGame(opts)`, `hasSave()`,
+`save()`/`load()`/`restart()`. New Game setup exposes map size, seed, starting citizen count,
+`AggressionPreset`, and storyteller personality — all real backend parameters that existed since
+early in the project but were hardcoded and never player-facing until now.
+
+**Everything else, built against that interface:**
+- Confirm-before-destructive dialogs (New/Restart/Load-while-in-game) — `confirmAction()` helper
+  reused by the pause menu's Quit-to-Title.
+- Pause menu (Resume/Save/Settings/Quit to Title), correctly wired to poll `world.paused` so it
+  also opens via the Space hotkey, not just the topbar button.
+- Multi-slot save management (5 slots + legacy-save auto-migration), fully independent of and
+  verified non-conflicting with the separately-built autosave key.
+- Autosave (dedicated key, ~1200-tick interval, quiet fade indicator) + a resume-on-load prompt
+  that compares manual-save vs. autosave timestamps and offers whichever's relevant.
+- Options/Settings — a REAL volume slider (verified against the actual WebAudio `GainNode`
+  value, not just a UI number), a keybinding reference, and **live** mid-campaign
+  aggression/storyteller changes (verified: switching storyteller mid-run actually changes
+  `waveSpawner.cycleMult`/`doubleChance` on the very next wave-timing decision, confirming
+  `directWaveSpawner` reads those fields fresh every tick rather than caching them at
+  construction), plus a scoped-down accessibility pass (shape-coded rings/dash-patterns for
+  colorblind-friendliness, a UI-scale slider).
+- Tutorial/onboarding — an 8-step non-modal guided tour anchored to real UI elements via live
+  `getBoundingClientRect()` (verified 14px anchor precision on every step, edge-clamping, live
+  repositioning if the anchored element moves), triggered once on a player's first-ever New Game
+  only, plus a persistent 40-row Help reference panel (`F1`/`?`) covering the job-priority
+  system, the blueprint pipeline, storytellers, enemy archetypes/damage types, the resource loop,
+  and a one-liner per building category.
+- Credits/about screen + a fullscreen toggle (graceful failure if the browser's autoplay/gesture
+  policy blocks it).
+
+**Verification note on balance**: a post-integration soak test at first showed survival times
+~40% below the established baseline (13-14k vs. 21-23k ticks) — investigated before assuming a
+regression, and it wasn't one: the new `newGame()` helper defaults to `Standard` aggression
+(a reasonable default for a new player) where the old direct-`SimWorld`-construction soak tests
+this whole session had all implicitly used `Calm`. Holding aggression constant at `Calm`
+reproduced the exact prior baseline numbers (22568/21241/21344 — identical to the pre-menu-wave
+soak). No balance code was touched or needed fixing this round.
+
+**Verification**: full rebuild, zero console errors through the whole title→setup→tutorial→
+pause→settings→quit-to-title chain (driven live via the Claude in Chrome extension, not just
+`window.__debug` state checks), `tests/run.html` still 85/85 passing, real screenshots of the
+title screen, New Game setup, tutorial step anchoring, pause menu, and Settings panel all
+confirming clean visual integration with no overlap despite 8 concurrently-landed panels.
+
 ## SECOND BACKLOG WAVE (this session, via 13 more parallel subagents): DONE
 
 User asked "what else are we missing from each of the games", got a fresh gap analysis against
