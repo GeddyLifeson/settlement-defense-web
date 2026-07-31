@@ -1,4 +1,9 @@
 // Ported/condensed from SD.Security (StaffRoster, guard/sniper/K9 AI + alert-level FSM).
+// StaffRoleKind.Monitor (added for the CCTV feature, see world.js's wave-warning logic and
+// FEATURE_RESEARCH.md's Prison Architect section) reuses this same roster/post plumbing --
+// tickStaffDuty below already walks any assigned staff to their post regardless of role, so a
+// Monitor just needs an assign(citizenId, StaffRoleKind.Monitor, {x, y}) at a Monitor Station's
+// location; no combat behavior of its own, it's read passively by world.js's staffed-check.
 import { StaffRoleKind } from './core.js';
 
 export const AlertLevel = Object.freeze({

@@ -6,6 +6,7 @@
 import { ZoneKind } from './zones.js';
 import { findUndrivenVehicle, boardVehicle } from './vehicles.js';
 import { roomContaining } from './rooms.js';
+import { getScheduleBlock, ScheduleBlock } from './schedule.js';
 
 const ROOM_REFILL_BONUS = 1.3; // RimWorld/PA-style: an actually-enclosed room works better than open ground
 
@@ -29,7 +30,20 @@ const SEEK_SOCIAL_THRESHOLD = 0.35;
 const SEEK_HUNGER_THRESHOLD = 0.45;
 const SEEK_REST_THRESHOLD = 0.4;
 const SATISFIED_THRESHOLD = 0.85;
+
+// Duty Roster scheduling (see schedule.js) biases which need-thresholds apply this tick --
+// it never removes the fallback, it just widens/narrows the window before a citizen breaks off
+// to handle a need. CRITICAL_* floors guarantee a citizen always eats/rests before the need
+// actually bottoms out, even deep in a Work block (PA's Regime can starve inmates who skip
+// mealtime; this deliberately can't).
+const CRITICAL_HUNGER_OVERRIDE = 0.18;
+const CRITICAL_REST_OVERRIDE = 0.12;
+const SCHEDULE_SLEEP_REST_SEEK = 0.75; // during the Sleep block, head to bed well before exhausted
+const SCHEDULE_RECREATION_SOCIAL_SEEK = 0.7; // during the Recreation block, socialize proactively
+const SCHEDULE_WORK_THRESHOLD_MULT = 0.4; // during the Work block, only break for a need that's fairly urgent
+const NIGHT_INTERRUPT_REST_THRESHOLD = 0.6; // Sleep block will pull a not-yet-exhausted citizen off a work task
 const REFILL_RATE = 0.05; // per tick while occupying the zone
+const ETHANOL_FOOD_REFILL_MULT = 0.5; // Food zone refill halved while world.ethanolPenaltyTimer counts down, see vehicles.js
 const ARRIVE_DIST = 0.35;
 const JOB_SPEED = 0.09; // citizens hustle to zones -- travel time was the dominant cost in the needs loop
 
@@ -37,6 +51,7 @@ const BUILD_RATE = 0.012; // per tick, scaled by construction skill below
 const BUILD_SKILL_GAIN = 0.02;
 const HARVEST_RATE = 3; // scrap per tick pulled from a node
 const HARVEST_SKILL_GAIN = 0.01;
+const ON_BREAK_RATE_MULT = 0.5; // low-mood citizens work/harvest/build/travel at half speed
 
 export function isOnJob(store, i) {
   return store.jobState[i] !== JobState.Idle;
@@ -69,18 +84,59 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
     if (store.isDownedAt(i)) continue; // incapacitated, can't work until recovered
     if (staffOnDuty(i)) continue; // guards/snipers hold their post, no eat/sleep/work jobs
 
+    // Duty Roster: a citizen deep in a work/harvest task at scheduled sleep-time gets pulled off
+    // it to go find a bed, same as PA staff clearing a Regime block -- but only if they aren't
+    // already close to exhausted (that path is handled below via the normal Idle/SeekingBed
+    // branch regardless of schedule) and only for interruptible states; Driving and the
+    // short Eating/Sleeping/Recreating fulfillment states are left to finish.
+    const scheduleBlock = world ? getScheduleBlock(world.timeOfDay) : ScheduleBlock.Work;
+    if (scheduleBlock === ScheduleBlock.Sleep && store.rest[i] < NIGHT_INTERRUPT_REST_THRESHOLD) {
+      const interruptible = store.jobState[i];
+      if (interruptible === JobState.Building || interruptible === JobState.SeekingBuild) {
+        const bp = store._jobRef?.[i];
+        if (bp) bp.claimedBy = null;
+        store.jobState[i] = JobState.Idle;
+      } else if (interruptible === JobState.Harvesting || interruptible === JobState.SeekingScrap
+        || interruptible === JobState.SeekingVehicle) {
+        store.jobState[i] = JobState.Idle;
+      }
+    }
+
     const state = store.jobState[i];
 
     if (state === JobState.Idle) {
-      if (store.rest[i] < SEEK_REST_THRESHOLD) {
-        const bed = zones.nearestOfKind(ZoneKind.Bedroom, store.x[i], store.y[i]);
-        if (bed) { store.jobState[i] = JobState.SeekingBed; store.targetX[i] = bed.x; store.targetY[i] = bed.y; continue; }
+      // Schedule-biased thresholds -- Sleep block seeks a bed well before rest bottoms out,
+      // Recreation block seeks company proactively, Work block narrows all three so a citizen
+      // doesn't wander off mid-shift for anything short of a real need, and the CRITICAL_*
+      // floors below stop that narrowing from ever becoming "never eats/sleeps at all".
+      let restThreshold = SEEK_REST_THRESHOLD;
+      let hungerThreshold = SEEK_HUNGER_THRESHOLD;
+      let socialThreshold = SEEK_SOCIAL_THRESHOLD;
+      if (scheduleBlock === ScheduleBlock.Sleep) {
+        restThreshold = SCHEDULE_SLEEP_REST_SEEK;
+      } else if (scheduleBlock === ScheduleBlock.Recreation) {
+        socialThreshold = SCHEDULE_RECREATION_SOCIAL_SEEK;
+      } else if (scheduleBlock === ScheduleBlock.Work) {
+        restThreshold = Math.max(CRITICAL_REST_OVERRIDE, SEEK_REST_THRESHOLD * SCHEDULE_WORK_THRESHOLD_MULT);
+        hungerThreshold = Math.max(CRITICAL_HUNGER_OVERRIDE, SEEK_HUNGER_THRESHOLD * SCHEDULE_WORK_THRESHOLD_MULT);
+        socialThreshold = SEEK_SOCIAL_THRESHOLD * SCHEDULE_WORK_THRESHOLD_MULT;
       }
-      if (store.hunger[i] < SEEK_HUNGER_THRESHOLD) {
+
+      // Starvation always wins the tie against a Sleep-block bed trip, regardless of check
+      // order below -- a citizen shouldn't be walked past food to a bed because it's night.
+      if (store.hunger[i] < CRITICAL_HUNGER_OVERRIDE) {
         const food = zones.nearestOfKind(ZoneKind.Food, store.x[i], store.y[i]);
         if (food) { store.jobState[i] = JobState.SeekingFood; store.targetX[i] = food.x; store.targetY[i] = food.y; continue; }
       }
-      if (store.social[i] < SEEK_SOCIAL_THRESHOLD) {
+      if (store.rest[i] < restThreshold) {
+        const bed = zones.nearestOfKind(ZoneKind.Bedroom, store.x[i], store.y[i]);
+        if (bed) { store.jobState[i] = JobState.SeekingBed; store.targetX[i] = bed.x; store.targetY[i] = bed.y; continue; }
+      }
+      if (store.hunger[i] < hungerThreshold) {
+        const food = zones.nearestOfKind(ZoneKind.Food, store.x[i], store.y[i]);
+        if (food) { store.jobState[i] = JobState.SeekingFood; store.targetX[i] = food.x; store.targetY[i] = food.y; continue; }
+      }
+      if (store.social[i] < socialThreshold) {
         const rec = zones.nearestOfKind(ZoneKind.Recreation, store.x[i], store.y[i]);
         if (rec) { store.jobState[i] = JobState.SeekingRec; store.targetX[i] = rec.x; store.targetY[i] = rec.y; continue; }
       }
@@ -136,7 +192,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
           : state === JobState.SeekingBuild ? JobState.Building
           : JobState.Harvesting;
       } else {
-        const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1);
+        const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1) * (store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1);
         store.x[i] += (dx / dist) * speed;
         store.y[i] += (dy / dist) * speed;
       }
@@ -145,7 +201,12 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
 
     if (state === JobState.Eating) {
       const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
-      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus);
+      // Ethanol-fuel trucks (vehicles.js FUEL_TYPES.ethanol) brew clean fuel out of the
+      // settlement's food surplus -- there's no bulk food-stockpile resource in this codebase
+      // to drain directly, so the honest portable stand-in is a temporary hit to how fast the
+      // Food zone actually refills hunger after each ethanol haul completes.
+      const ethanolMult = world.ethanolPenaltyTimer > 0 ? ETHANOL_FOOD_REFILL_MULT : 1;
+      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus * ethanolMult);
       if (store.hunger[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
@@ -167,7 +228,8 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
     if (state === JobState.Building) {
       const bp = store._jobRef?.[i];
       if (!bp || bp.destroyed || !bp.underConstruction) { store.jobState[i] = JobState.Idle; continue; }
-      bp.buildProgress = Math.min(1, (bp.buildProgress || 0) + BUILD_RATE * (1 + store.skillConstruction[i]));
+      const buildRateMult = store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1;
+      bp.buildProgress = Math.min(1, (bp.buildProgress || 0) + BUILD_RATE * (1 + store.skillConstruction[i]) * buildRateMult);
       if (bp.buildProgress >= 1) {
         bp.underConstruction = false;
         bp.claimedBy = null;
@@ -180,7 +242,8 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
     if (state === JobState.Harvesting) {
       const node = store._jobRef?.[i];
       if (!node || node.depleted) { store.jobState[i] = JobState.Idle; continue; }
-      const take = Math.min(HARVEST_RATE, node.amount);
+      const harvestRateMult = store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1;
+      const take = Math.min(HARVEST_RATE * harvestRateMult, node.amount);
       node.amount -= take;
       onScrapGain?.(take);
       store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2;

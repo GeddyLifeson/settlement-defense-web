@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Settlement Defense -- Automated Test Suite</title>
+<style>
+  body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 1.5rem; }
+  h1 { font-size: 1.2rem; }
+  h2 { font-size: 1.1rem; }
+  ul { list-style: none; padding-left: 0; }
+  li { padding: 1px 0; font-size: 0.85rem; }
+  #note { color: #888; font-size: 0.8rem; margin-bottom: 1rem; }
+</style>
+</head>
+<body>
+<h1>Settlement Defense -- In-Browser Test Suite</h1>
+<div id="note">
+  Real ES module imports of src/*.js -- run this page over http:// (e.g.
+  <code>python -m http.server</code> from the repo root, then open
+  <code>/tests/run.html</code>), NOT via file:// (ES module imports are blocked by CORS under
+  file://, same reason game.bundle.js exists for the actual game). This page intentionally does
+  NOT go through game.bundle.js -- it imports src/*.js directly so tests exercise the real
+  unbundled source.
+</div>
+<div id="results">Running...</div>
+
+<script type="module">
+  import { renderSummary } from './harness.js';
+
+  // Each import below runs its section()/assert() calls as a side effect at module-evaluation
+  // time, pushing into the shared `results` array in harness.js. Importing them in sequence
+  // (via top-level await on the dynamic import) guarantees they've all finished before we render.
+  await import('./citizens.test.js');
+  await import('./rooms.test.js');
+  await import('./siege.test.js');
+  await import('./vehicles.test.js');
+
+  document.getElementById('results').textContent = '';
+  renderSummary('results');
+</script>
+</body>
+</html>

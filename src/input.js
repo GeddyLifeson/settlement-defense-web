@@ -16,12 +16,28 @@ export const TOOLS = [
   { key: 't', tool: 'table', label: 'Table', cost: BUILD_COST.table },
   { key: 'y', tool: 'door', label: 'Door', cost: BUILD_COST.door },
   { key: 'g', tool: 'generator', label: 'Generator', cost: BUILD_COST.generator },
-  { key: 'v', tool: 'garage_recycling', label: 'Recycling Garage', cost: BUILD_COST.garage_recycling },
-  { key: 'n', tool: 'garage_garbage', label: 'Garbage Garage', cost: BUILD_COST.garage_garbage },
+  { key: 'w', tool: 'wire', label: 'Wire', cost: BUILD_COST.wire },
+  // SEA:R truck fuel-type tradeoff (vehicles.js FUEL_TYPES): each garage now comes in 4 fuel
+  // variants instead of one -- fossil (cheap/dirty), gas (best all-around), ethanol (clean,
+  // temporarily saps Food zone refill per haul), electric (cleanest, needs the garage powered
+  // or hauls crawl). The bare 'garage_recycling'/'garage_garbage' kinds still exist in
+  // economy.js/vehicles.js for save-compat but are no longer offered directly in the toolbar.
+  { key: 'v', tool: 'garage_recycling_fossil', label: 'Recycling Garage (Fossil)', cost: BUILD_COST.garage_recycling_fossil },
+  { key: 'i', tool: 'garage_recycling_gas', label: 'Recycling Garage (Gas)', cost: BUILD_COST.garage_recycling_gas },
+  { key: 'e', tool: 'garage_recycling_ethanol', label: 'Recycling Garage (Ethanol)', cost: BUILD_COST.garage_recycling_ethanol },
+  { key: 'l', tool: 'garage_recycling_electric', label: 'Recycling Garage (Electric)', cost: BUILD_COST.garage_recycling_electric },
+  { key: 'n', tool: 'garage_garbage_fossil', label: 'Garbage Garage (Fossil)', cost: BUILD_COST.garage_garbage_fossil },
+  { key: 'h', tool: 'garage_garbage_gas', label: 'Garbage Garage (Gas)', cost: BUILD_COST.garage_garbage_gas },
+  { key: 'o', tool: 'garage_garbage_ethanol', label: 'Garbage Garage (Ethanol)', cost: BUILD_COST.garage_garbage_ethanol },
+  { key: 'p', tool: 'garage_garbage_electric', label: 'Garbage Garage (Electric)', cost: BUILD_COST.garage_garbage_electric },
   { key: 'c', tool: 'watchtower', label: 'Watchtower', cost: BUILD_COST.watchtower },
   { key: 'f', tool: 'floodlight', label: 'Floodlight', cost: BUILD_COST.floodlight },
   { key: 'x', tool: 'tesla', label: 'Tesla Coil', cost: BUILD_COST.tesla },
   { key: 'r', tool: 'recycling_center', label: 'Recycling Center', cost: BUILD_COST.recycling_center },
+  { key: 'k', tool: 'camera', label: 'CCTV Camera', cost: BUILD_COST.camera },
+  { key: 'm', tool: 'monitor_station', label: 'Monitor Station', cost: BUILD_COST.monitor_station },
+  { key: 'u', tool: 'generator_nuclear', label: 'Nuclear Generator', cost: BUILD_COST.generator_nuclear },
+  { key: 'j', tool: 'waste_storage', label: 'Waste Storage', cost: BUILD_COST.waste_storage },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -41,11 +57,17 @@ export class InputController {
     this.SPEEDS = [0, 1, 2, 4];
     this._painting = false;
     this.selectedCitizen = -1;
+    // Multi-select via marquee drag (Select tool only, see _onDown/_onUp): a plain click still
+    // goes through selectedCitizen above and is untouched by any of this.
+    this.selectedCitizens = [];
+    this.marqueeActive = false;
+    this.marqueeStartWorldX = 0; this.marqueeStartWorldY = 0;
+    this.marqueeEndWorldX = 0; this.marqueeEndWorldY = 0;
 
     canvas.addEventListener('mousemove', (e) => this._onMove(e));
     canvas.addEventListener('mousedown', (e) => this._onDown(e));
     canvas.addEventListener('mouseup', (e) => this._onUp(e));
-    canvas.addEventListener('mouseleave', () => { this.hoverGridX = null; this.hoverGridY = null; this._painting = false; this._panning = false; });
+    canvas.addEventListener('mouseleave', () => { this.hoverGridX = null; this.hoverGridY = null; this._painting = false; this._panning = false; this.marqueeActive = false; });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // right-drag is pan, not a context menu
     canvas.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
     window.addEventListener('keydown', (e) => this._onKey(e));
@@ -65,18 +87,24 @@ export class InputController {
     this.onSpeedChange?.(this.SPEEDS[this.speedIndex]);
   }
 
+  _updateHover(e) {
+    const rect = this.canvas.getBoundingClientRect();
+    const [wx, wy] = this.renderer.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+    this.hoverWorldX = wx; this.hoverWorldY = wy;
+    this.hoverGridX = Math.floor(wx);
+    this.hoverGridY = Math.floor(wy);
+  }
+
   _onMove(e) {
     if (this._panning) {
       this.renderer.panByScreenDelta(e.clientX - this._panLastX, e.clientY - this._panLastY, this.getWorld());
       this._panLastX = e.clientX; this._panLastY = e.clientY;
       return;
     }
-    const rect = this.canvas.getBoundingClientRect();
-    const [wx, wy] = this.renderer.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
-    this.hoverWorldX = wx; this.hoverWorldY = wy;
-    this.hoverGridX = Math.floor(wx);
-    this.hoverGridY = Math.floor(wy);
+    this._updateHover(e);
     if (this._painting) this._place();
+    // Marquee only ever runs with the Select tool (see _onDown) and never overlaps painting.
+    if (this.marqueeActive) { this.marqueeEndWorldX = this.hoverWorldX; this.marqueeEndWorldY = this.hoverWorldY; }
   }
 
   _onDown(e) {
@@ -89,6 +117,24 @@ export class InputController {
       return;
     }
     if (e.button !== 0) return;
+
+    if (this.tool === null) {
+      // Select tool: try an immediate single pick first (this is the existing plain-click path,
+      // completely unchanged). Only if that pick lands on empty ground do we arm a possible
+      // marquee drag -- if the mouseup never moves it stays a no-op deselect-click, exactly as
+      // before this feature existed.
+      this._updateHover(e);
+      const world = this.getWorld();
+      if (world) this._pickCitizen(world);
+      this.selectedCitizens = [];
+      if (this.selectedCitizen === -1 && world) {
+        this.marqueeActive = true;
+        this.marqueeStartWorldX = this.hoverWorldX; this.marqueeStartWorldY = this.hoverWorldY;
+        this.marqueeEndWorldX = this.hoverWorldX; this.marqueeEndWorldY = this.hoverWorldY;
+      }
+      return;
+    }
+
     this._painting = true;
     this._place();
   }
@@ -96,6 +142,27 @@ export class InputController {
   _onUp(e) {
     if (e.button === 2 || e.button === 1) { this._panning = false; return; }
     this._painting = false;
+    if (this.marqueeActive) {
+      this.marqueeActive = false;
+      const world = this.getWorld();
+      const dx = this.marqueeEndWorldX - this.marqueeStartWorldX;
+      const dy = this.marqueeEndWorldY - this.marqueeStartWorldY;
+      // Below this distance it's a click, not a drag -- the single-pick from _onDown already
+      // handled it (selected a citizen, or deselected on empty ground), so leave it alone.
+      if (world && Math.hypot(dx, dy) > 0.5) {
+        const x0 = Math.min(this.marqueeStartWorldX, this.marqueeEndWorldX);
+        const x1 = Math.max(this.marqueeStartWorldX, this.marqueeEndWorldX);
+        const y0 = Math.min(this.marqueeStartWorldY, this.marqueeEndWorldY);
+        const y1 = Math.max(this.marqueeStartWorldY, this.marqueeEndWorldY);
+        const picked = [];
+        for (let i = 0; i < world.citizens.count; i++) {
+          if (!world.citizens.isAliveAt(i)) continue;
+          const cx = world.citizens.x[i], cy = world.citizens.y[i];
+          if (cx >= x0 && cx <= x1 && cy >= y0 && cy <= y1) picked.push(i);
+        }
+        this.selectedCitizens = picked;
+      }
+    }
   }
 
   _onWheel(e) {
@@ -151,6 +218,12 @@ export class InputController {
   }
 
   _onKey(e) {
+    // Conquest map overlay (worldmap.js). Bound to SHIFT+M, not plain 'm' -- lowercase 'm' is
+    // already the Monitor Station buildable's hotkey in TOOLS, so this deliberately only claims
+    // the uppercase variant and lets 'm' fall through to the tool table below. main.js supplies
+    // onToggleMap.
+    if (e.key === 'M') { this.onToggleMap?.(); return; }
+    if (e.key === 'Escape' && this.onToggleMap) { this.onCloseMap?.(); /* falls through to clear tool */ }
     if (e.key in TOOL_KEYS) { this.setTool(TOOL_KEYS[e.key]); return; }
     if (e.key === ' ') { e.preventDefault(); this.togglePause(); return; }
     if (e.key === '+' || e.key === '=') { this.setSpeedIndex(this.speedIndex + 1); return; }

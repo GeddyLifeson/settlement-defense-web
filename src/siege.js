@@ -2,6 +2,7 @@
 // combat resolution, scrap rewards).
 import { SCRAP_PER_KILL } from './economy.js';
 import { CitizenFlags } from './citizens.js';
+import { isPoweredAt } from './power.js';
 
 export class AttackerStore {
   constructor(capacity) {
@@ -36,7 +37,8 @@ export class AttackerStore {
 
 export class Structure {
   constructor(kind, x, y, opts = {}) {
-    this.kind = kind; // 'turret' | 'fence' | 'trap' | 'bed' | 'table' | 'door' | 'generator' | 'wall'
+    this.kind = kind; // 'turret' | 'fence' | 'trap' | 'bed' | 'table' | 'door' | 'generator' | 'wire' | 'wall' |
+                      // 'generator_nuclear' | 'waste_storage'
     this.x = x; this.y = y;
     this.health = kind === 'fence' ? 0.6 : 1;
     this.destroyed = false;
@@ -48,6 +50,11 @@ export class Structure {
     this.underConstruction = !opts.instant;
     this.buildProgress = opts.instant ? 1 : 0;
     this.claimedBy = null;
+    // Audio hook bookkeeping (world.js's structure-filter pass): tracks whether the
+    // build-complete cue has already fired for this structure, so an instant/starter structure
+    // (never actually "under construction") doesn't trigger it, and a real blueprint only
+    // triggers it once, right when underConstruction flips false.
+    this._builtNotified = !this.underConstruction;
   }
 }
 
@@ -88,16 +95,14 @@ export class WaveSpawner {
 const TURRET_RANGE = 8;
 const TURRET_COOLDOWN_TICKS = 8;
 const TURRET_DAMAGE = 0.35;
-const POWER_RANGE = 10; // generators were previously decorative (pollution cost, no consumer side)
 const POWERED_DAMAGE_MULT = 1.5;
 const POWERED_RANGE_MULT = 1.25;
 
+// Real connected-graph power (power.js): a consumer is powered only if it touches a generator
+// or a wire run that leads back to one. This replaced a radius stub where mere proximity to a
+// generator was enough and wires didn't exist.
 export function isPowered(structures, x, y) {
-  for (const s of structures) {
-    if (s.kind !== 'generator' || s.destroyed || s.underConstruction) continue;
-    if (Math.hypot(s.x - x, s.y - y) <= POWER_RANGE) return true;
-  }
-  return false;
+  return isPoweredAt(structures, x, y);
 }
 const ATTACKER_SPEED = 0.03;
 const ATTACKER_CITIZEN_DAMAGE = 0.008;
@@ -118,6 +123,58 @@ const TESLA_RANGE = 4.5; const TESLA_DAMAGE = 0.12; const TESLA_COOLDOWN_TICKS =
 export const FLOODLIGHT_RANGE = 3.5;
 export const FLOODLIGHT_SLOW_MULT = 0.35; // attacker speed multiplier while inside the radius
 
+// Nuclear generator (SEA:R): the high-risk/high-reward power tier. Its reward is a wireless
+// power-delivery radius -- consumers standing near it get powered without needing a wire run at
+// all, unlike a plain generator which only reaches through the wire graph (power.js). Its risk is
+// nuclear waste: a hazard resource distinct from world.pollution that, left uncontained, turns
+// the ground around the generator into a damage-dealing zone (not just a visual tint like the
+// smog haze). Building a `waste_storage` structure within NUCLEAR_CONTAINMENT_RADIUS neutralizes
+// the hazard entirely -- no staffing requirement, per FEATURE_RESEARCH.md's simpler fallback.
+export const NUCLEAR_HAZARD_RADIUS = 4;
+export const NUCLEAR_CONTAINMENT_RADIUS = 5;
+export const NUCLEAR_WASTE_RATE = 0.06; // world.nuclearWaste gained per uncontained nuclear generator per tick
+const NUCLEAR_HAZARD_CITIZEN_DAMAGE = 0.02; // per tick while standing in an uncontained hazard zone
+const NUCLEAR_HAZARD_STRUCTURE_DAMAGE = 0.01;
+
+export function isNuclearContained(structures, gen) {
+  return structures.some(s => s.kind === 'waste_storage' && !s.destroyed && !s.underConstruction &&
+    Math.hypot(s.x - gen.x, s.y - gen.y) <= NUCLEAR_CONTAINMENT_RADIUS);
+}
+
+// Periodic hazard damage around any nuclear generator that isn't guarded by a nearby waste
+// storage -- mirrors tickAttackerVsCitizens's downed-then-dead pattern for citizens, and the
+// fence-damage/destroyed pattern (tickAttackers) for structures, so an unguarded reactor reads as
+// a real threat rather than a stat debuff.
+export function tickNuclearHazard(structures, citizens) {
+  for (const gen of structures) {
+    if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction) continue;
+    if (isNuclearContained(structures, gen)) continue;
+
+    for (let c = 0; c < citizens.count; c++) {
+      if (!citizens.isAliveAt(c)) continue;
+      if (Math.hypot(citizens.x[c] - gen.x, citizens.y[c] - gen.y) > NUCLEAR_HAZARD_RADIUS) continue;
+      if (citizens.isDownedAt(c)) {
+        citizens.flags[c] |= CitizenFlags.Dead;
+        citizens.alive[c] = 0;
+        continue;
+      }
+      const healthMult = citizens.trait[c]?.healthMult ?? 1;
+      citizens.health[c] -= NUCLEAR_HAZARD_CITIZEN_DAMAGE / healthMult;
+      if (citizens.health[c] <= 0) {
+        citizens.health[c] = 0.05;
+        citizens.flags[c] |= CitizenFlags.Downed;
+      }
+    }
+
+    for (const s of structures) {
+      if (s === gen || s.kind === 'waste_storage' || s.destroyed || s.underConstruction) continue;
+      if (Math.hypot(s.x - gen.x, s.y - gen.y) > NUCLEAR_HAZARD_RADIUS) continue;
+      s.health -= NUCLEAR_HAZARD_STRUCTURE_DAMAGE;
+      if (s.health <= 0) s.destroyed = true;
+    }
+  }
+}
+
 function nearestLivingCitizen(citizens, x, y) {
   let bestI = -1, bestDist = Infinity;
   for (let c = 0; c < citizens.count; c++) {
@@ -131,7 +188,7 @@ function nearestLivingCitizen(citizens, x, y) {
 // Attackers hunt the nearest living citizen (falling back to the settlement center if the
 // colony is somehow empty) and are blocked by un-destroyed fences/walls in their way; they
 // chip away at the blocking structure instead of walking through it.
-export function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, onScrap) {
+export function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, onScrap, onKill) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
 
@@ -161,7 +218,7 @@ export function tickAttackers(attackers, structures, grid, centerX, centerY, cit
       if (Math.hypot(attackers.x[i] - t.x, attackers.y[i] - t.y) < TRAP_TRIGGER_RANGE) {
         attackers.health[i] -= TRAP_DAMAGE;
         t.triggered = true; t.destroyed = true;
-        if (attackers.health[i] <= 0) { attackers.alive[i] = 0; onScrap?.(SCRAP_PER_KILL); }
+        if (attackers.health[i] <= 0) { attackers.alive[i] = 0; onScrap?.(SCRAP_PER_KILL); onKill?.(); }
       }
     }
   }
@@ -175,7 +232,7 @@ function findBlockingFence(structures, x, y) {
   return null;
 }
 
-export function tickTurrets(structures, attackers, onScrap) {
+export function tickTurrets(structures, attackers, onScrap, onFire, onKill) {
   for (const s of structures) {
     if (s.kind !== 'turret' && s.kind !== 'tesla') continue;
     if (s.destroyed || s.underConstruction) continue;
@@ -195,17 +252,18 @@ export function tickTurrets(structures, attackers, onScrap) {
         if (Math.hypot(attackers.x[i] - s.x, attackers.y[i] - s.y) > range) continue;
         hitAny = true;
         attackers.health[i] -= damage;
-        if (attackers.health[i] <= 0) { attackers.alive[i] = 0; onScrap?.(SCRAP_PER_KILL); }
+        if (attackers.health[i] <= 0) { attackers.alive[i] = 0; onScrap?.(SCRAP_PER_KILL); onKill?.(); }
       }
-      if (hitAny) s.cooldown = TESLA_COOLDOWN_TICKS;
+      if (hitAny) { s.cooldown = TESLA_COOLDOWN_TICKS; onFire?.(s); }
       continue;
     }
 
     const bestI = nearestAliveAttacker(attackers, s.x, s.y, range);
     if (bestI >= 0) {
       attackers.health[bestI] -= damage;
-      if (attackers.health[bestI] <= 0) { attackers.alive[bestI] = 0; onScrap?.(SCRAP_PER_KILL); }
+      if (attackers.health[bestI] <= 0) { attackers.alive[bestI] = 0; onScrap?.(SCRAP_PER_KILL); onKill?.(); }
       s.cooldown = TURRET_COOLDOWN_TICKS;
+      onFire?.(s);
     }
   }
 }
@@ -226,7 +284,7 @@ function nearestAliveAttacker(attackers, x, y, maxRange) {
 // health hits 0 they go down but survive; if an attacker lands another hit on them while
 // already down, that's when they actually die. Gives a real reprieve instead of instant
 // permadeath on the first unlucky contact tick.
-export function tickAttackerVsCitizens(attackers, citizens) {
+export function tickAttackerVsCitizens(attackers, citizens, onDowned) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
     for (let c = 0; c < citizens.count; c++) {
@@ -236,6 +294,7 @@ export function tickAttackerVsCitizens(attackers, citizens) {
       if (citizens.isDownedAt(c)) {
         citizens.flags[c] |= CitizenFlags.Dead;
         citizens.alive[c] = 0;
+        onDowned?.();
         continue;
       }
 
@@ -244,6 +303,7 @@ export function tickAttackerVsCitizens(attackers, citizens) {
       if (citizens.health[c] <= 0) {
         citizens.health[c] = 0.05;
         citizens.flags[c] |= CitizenFlags.Downed;
+        onDowned?.();
       }
     }
   }
@@ -251,7 +311,7 @@ export function tickAttackerVsCitizens(attackers, citizens) {
 
 // Guards/snipers fight back with their personal weapon (short/long range respectively),
 // separate from turret coverage. Gains combat skill on a confirmed kill.
-export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap) {
+export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKill) {
   for (let i = 0; i < citizens.count; i++) {
     if (!citizens.isAliveAt(i)) continue;
     if (citizens.isDownedAt(i)) continue; // downed guards/snipers can't fight back
@@ -272,6 +332,7 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap) {
         attackers.alive[targetI] = 0;
         citizens.skillCombat[i] += 0.05;
         onScrap?.(SCRAP_PER_KILL);
+        onKill?.();
       }
     }
   }

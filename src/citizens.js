@@ -12,9 +12,9 @@ export const CitizenFlags = Object.freeze({
 const DOWNED_RECOVERY_RATE = 0.0015; // per tick, passive -- no dedicated first-aid job yet
 const DOWNED_RECOVER_THRESHOLD = 0.3;
 
-const HUNGER_DECAY = 0.006;   // per tick (10 Hz), matches ARCHITECTURE.md "100ms/tick"
-const REST_DECAY = 0.0035;
-const SOCIAL_DECAY = 0.0025;
+const HUNGER_DECAY = 0.0005;   // per tick (10 Hz), matches ARCHITECTURE.md "100ms/tick"
+const REST_DECAY = 0.0003;
+const SOCIAL_DECAY = 0.0002;
 const ON_DUTY_SOCIAL_FULFILLMENT = 0.6; // guards/snipers get partial social fulfillment on duty
 const BREAK_MOOD_THRESHOLD = 0.12;
 
@@ -65,6 +65,10 @@ export class CitizenStore {
 
   isDownedAt(i) {
     return (this.flags[i] & CitizenFlags.Downed) !== 0;
+  }
+
+  isOnBreakAt(i) {
+    return (this.flags[i] & CitizenFlags.OnBreak) !== 0;
   }
 }
 

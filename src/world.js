@@ -6,7 +6,8 @@ import { CitizenStore, tickNeedsAndMood, tickWander, CitizenFlags } from './citi
 import { StaffRoster, tickStaffDuty, tickDogs } from './security.js';
 import {
   AttackerStore, Structure, WaveSpawner, tickAttackers, tickTurrets,
-  tickAttackerVsCitizens, tickStaffCombat, isPowered,
+  tickAttackerVsCitizens, tickStaffCombat, isPowered, tickNuclearHazard, isNuclearContained,
+  NUCLEAR_WASTE_RATE,
 } from './siege.js';
 import { ZoneGrid, ZoneKind } from './zones.js';
 import { tickJobs, isOnJob } from './jobs.js';
@@ -14,8 +15,11 @@ import { RelationshipWeb } from './relationships.js';
 import { directWaveSpawner } from './director.js';
 import { TRAITS } from './traits.js';
 import { scatterNodes, maybeSpawnNode, ResourceNode } from './resources.js';
-import { tickVehicles, spawnParkedVehicle } from './vehicles.js';
+import { tickVehicles, spawnParkedVehicle, parseGarageKind } from './vehicles.js';
 import { detectRooms, roomContaining } from './rooms.js';
+import { tickFireIgnition, tickFire } from './fire.js';
+import { DAY_NIGHT_CYCLE_TICKS } from './schedule.js';
+import { tickWorldMap } from './worldmap.js';
 
 const STARTER_NAMES = [
   'Marlon', 'Aisling', 'Niamh', 'Reeli', 'Cascade', 'Orrery', 'Motoko',
@@ -31,10 +35,13 @@ export class SimWorld {
     this.aggression = aggression;
     this.rng = makeRng(seed);
     this.currentTick = 0;
+    this.timeOfDay = 0.3; // Duty Roster day/night cycle, 0-1 fraction; start mid-morning (Work block)
     this.paused = false;
     this.gameOver = false;
     this.milestoneLog = [];
     this.pollution = 0; // SEA:R's signature mechanic -- unmanaged waste makes waves worse, see director.js
+    this.nuclearWaste = 0; // separate hazard resource from a nuclear generator, see siege.js's NUCLEAR_* comment
+    this.ethanolPenaltyTimer = 0; // ethanol-fuel truck tradeoff (vehicles.js) -- counts down after a haul, halving Food zone refill meanwhile
     this.storyteller = 'Cassandra'; // Cassandra | Phoebe | Randy, see director.js STORYTELLERS
     this.rooms = []; // enclosed-room flood-fill, see rooms.js -- recomputed only when walls change
     this._roomsWallSignature = null;
@@ -49,6 +56,15 @@ export class SimWorld {
     this.relationships = new RelationshipWeb();
     this.scrap = 50;
     this._lastWaveLogged = 0;
+
+    // Presentation-layer audio hooks (see audio.js) -- optional callbacks the host app (main.js)
+    // can assign after construction. Left null by default so world.js/siege.js never need to
+    // know audio.js exists; called via optional chaining everywhere below.
+    this.onBuildComplete = null; // (structure) => void, fires once when a blueprint finishes
+    this.onWaveIncoming = null;  // () => void, fires when a new wave's "incoming" milestone posts
+    this.onTurretFire = null;    // (structure) => void, fires when a turret/tesla actually shoots
+    this.onKill = null;          // () => void, fires whenever an attacker is killed
+    this.onCitizenDowned = null; // () => void, fires when a citizen goes down or dies to an attacker
 
     const count = Math.min(startingCitizens, STARTER_NAMES.length);
     this._citizenIds = [];
@@ -88,6 +104,20 @@ export class SimWorld {
   idOf(i) { return this.citizens.id[i]; }
   isStaffAt(i) { return this.roster.isStaff(this.citizens.id[i]); }
 
+  // "Manned" means a live, non-downed citizen with StaffRoleKind.Monitor is actually standing at
+  // the Monitor Station post, not just assigned on paper -- same physical-presence requirement
+  // as Guard/Sniper posts (tickStaffDuty walks them there each tick).
+  _isMonitorStaffed(monitorStation) {
+    for (let i = 0; i < this.citizens.count; i++) {
+      if (!this.citizens.isAliveAt(i) || this.citizens.isDownedAt(i)) continue;
+      if (this.roster.kindOf(this.idOf(i)) !== StaffRoleKind.Monitor) continue;
+      const dx = this.citizens.x[i] - monitorStation.x;
+      const dy = this.citizens.y[i] - monitorStation.y;
+      if (Math.hypot(dx, dy) <= 1.5) return true;
+    }
+    return false;
+  }
+
   addScrap(amount) { this.scrap += amount; }
 
   build(kind, x, y) {
@@ -97,6 +127,7 @@ export class SimWorld {
   tick() {
     if (this.paused || this.gameOver) return;
     this.currentTick++;
+    this.timeOfDay = (this.timeOfDay + 1 / DAY_NIGHT_CYCLE_TICKS) % 1; // Duty Roster clock, see schedule.js
 
     tickNeedsAndMood(this.citizens, (i) => this.isStaffAt(i), this.rng);
     tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i), this.structures, this.resourceNodes,
@@ -108,16 +139,19 @@ export class SimWorld {
 
     maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
     tickVehicles(this);
+    if (this.ethanolPenaltyTimer > 0) this.ethanolPenaltyTimer--; // see vehicles.js FUEL_TYPES.ethanol
 
     // Pollution: generators produce power at the cost of waste (SEA:R's core tradeoff, see
     // FEATURE_RESEARCH.md); it decays slowly on its own but climbs faster than that decay once
     // you have more than a couple of generators running, so a garbage-truck haul run matters.
     let activeGenerators = 0;
     let activeRecyclingCenters = 0;
+    let activeUncontainedNuclear = 0;
     for (const s of this.structures) {
       if (s.destroyed || s.underConstruction) continue;
       if (s.kind === 'generator') activeGenerators++;
       else if (s.kind === 'recycling_center') activeRecyclingCenters++;
+      else if (s.kind === 'generator_nuclear' && !isNuclearContained(this.structures, s)) activeUncontainedNuclear++;
     }
     // Recycling Center (SEA:R): a passive waste->resource sink distinct from garbage trucks --
     // trucks do one big haul-cycle drop, this trickles constantly in exchange for scrap, so both
@@ -129,12 +163,30 @@ export class SimWorld {
     }
     this.pollution = Math.max(0, this.pollution + activeGenerators * 0.03 - 0.01);
 
+    // Nuclear waste (SEA:R): distinct from pollution above -- it only accrues while a nuclear
+    // generator is uncontained, and it's not something a recycling center processes; the only
+    // fix is a nearby waste_storage. tickNuclearHazard (siege.js) is what actually damages
+    // citizens/structures in the meantime; this counter is the visible "how bad is it" readout.
+    this.nuclearWaste = Math.max(0, this.nuclearWaste + activeUncontainedNuclear * NUCLEAR_WASTE_RATE - 0.02);
+    tickNuclearHazard(this.structures, this.citizens);
+
+    // Fire (Prison Architect/SEA:R crisis event, see FEATURE_RESEARCH.md and fire.js): active
+    // generators can spark nearby flammable structures, which then burn and spread on their own.
+    tickFireIgnition(this.structures, this.rng);
+    tickFire(this.structures, this.rng);
+
+    // Conquest layer (worldmap.js): advances THIS region's control meter based on how the
+    // settlement is doing, and trickles scrap in from every other region you already hold.
+    // Strictly additive on top of the scrap economy above -- it adds income, never gates it.
+    tickWorldMap(this);
+
     directWaveSpawner(this);
     this.waveSpawner.tick(this.currentTick, this.attackers, this.rng);
-    tickAttackers(this.attackers, this.structures, this.grid, this.width / 2, this.height / 2, this.citizens, (amt) => this.addScrap(amt));
-    tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt));
-    tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt));
-    tickAttackerVsCitizens(this.attackers, this.citizens);
+    tickAttackers(this.attackers, this.structures, this.grid, this.width / 2, this.height / 2, this.citizens,
+      (amt) => this.addScrap(amt), () => this.onKill?.());
+    tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt), (s) => this.onTurretFire?.(s), () => this.onKill?.());
+    tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt), () => this.onKill?.());
+    tickAttackerVsCitizens(this.attackers, this.citizens, () => this.onCitizenDowned?.());
 
     // Wall blueprints live in this.structures like everything else (for the ghost render +
     // construction progress), but the actual passability/terrain effect lives on the grid --
@@ -142,12 +194,20 @@ export class SimWorld {
     // blueprints similarly hand off to a parked Vehicle the moment they finish, rather than
     // acting as a structure themselves once complete.
     this.structures = this.structures.filter(s => {
+      // Build-complete audio cue: fires exactly once per structure, the tick underConstruction
+      // flips false (instant/starter structures are pre-marked _builtNotified in the Structure
+      // constructor so they never trigger this).
+      if (!s.underConstruction && !s._builtNotified) {
+        s._builtNotified = true;
+        this.onBuildComplete?.(s);
+      }
       if (s.kind === 'wall' && !s.underConstruction) {
         this.grid.setWall(Math.floor(s.x), Math.floor(s.y), 1);
         return false;
       }
-      if ((s.kind === 'garage_recycling' || s.kind === 'garage_garbage') && !s.underConstruction && !s._vehicleSpawned) {
-        spawnParkedVehicle(this, s.kind === 'garage_recycling' ? 'recycling' : 'garbage', s.x, s.y);
+      const garageKind = parseGarageKind(s.kind);
+      if (garageKind && !s.underConstruction && !s._vehicleSpawned) {
+        spawnParkedVehicle(this, garageKind.truckKind, s.x, s.y, garageKind.fuelType);
         s._vehicleSpawned = true;
       }
       return true;
@@ -164,19 +224,43 @@ export class SimWorld {
       this._lastWaveLogged = this.waveSpawner.waveNumber;
       this.milestoneLog.push({ tick: this.currentTick, text: `Wave ${this.waveSpawner.waveNumber} incoming` });
       if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+      this.onWaveIncoming?.();
     }
 
     // Watchtowers (CCTV/early-warning analog, see FEATURE_RESEARCH.md) give advance notice of
     // an incoming wave before it actually spawns, rather than only finding out at spawn time.
     const watchtower = this.structures.find(s => s.kind === 'watchtower' && !s.destroyed && !s.underConstruction);
+    // CCTV cameras (Prison Architect's "CCTV + manned-monitor bonus", see FEATURE_RESEARCH.md's
+    // Prison Architect section) are a cheaper, shorter-range complement to the watchtower: an
+    // unmanned camera sees less far ahead than even an unpowered watchtower, but a camera backed
+    // by a staffed Monitor Station -- a citizen actually assigned to StaffRoleKind.Monitor and
+    // physically holding that post, same "hold position" pattern tickStaffDuty already gives
+    // Guard/Sniper -- closes most of that gap. That staffed-vs-unstaffed swing is the "manned
+    // monitor bonus" the source material calls out specifically.
+    const camera = this.structures.find(s => s.kind === 'camera' && !s.destroyed && !s.underConstruction);
+    const monitorStation = this.structures.find(s => s.kind === 'monitor_station' && !s.destroyed && !s.underConstruction);
+    const monitorStaffed = !!monitorStation && this._isMonitorStaffed(monitorStation);
+    if (monitorStation) monitorStation._staffed = monitorStaffed; // render.js reads this for screen brightness
+
     // A powered watchtower (generator in range) sees further out in time, same pattern as the
     // powered-turret damage/range boost -- generators are now a real consumer-side upgrade
     // wherever they're built near, not just a pollution-producing decoration.
-    const warningWindow = watchtower ? (isPowered(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
-    if (watchtower && !this._warnedForWave &&
+    let warningWindow = watchtower ? (isPowered(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
+    let warningSource = watchtower ? 'watchtower' : null;
+    if (camera) {
+      const cameraWindow = monitorStaffed ? 70 : 30;
+      if (cameraWindow > warningWindow) { warningWindow = cameraWindow; warningSource = monitorStaffed ? 'monitor' : 'camera'; }
+    }
+
+    if (warningSource && !this._warnedForWave &&
       this.waveSpawner.nextWaveTick - this.currentTick <= warningWindow && this.waveSpawner.nextWaveTick > this.currentTick) {
       this._warnedForWave = this.waveSpawner.waveNumber + 1;
-      this.milestoneLog.push({ tick: this.currentTick, text: 'Watchtower spots raiders massing -- wave incoming soon' });
+      const text = warningSource === 'monitor'
+        ? 'Manned monitor station spots raiders massing on CCTV -- wave incoming soon'
+        : warningSource === 'camera'
+          ? 'CCTV camera spots raiders massing -- wave incoming soon'
+          : 'Watchtower spots raiders massing -- wave incoming soon';
+      this.milestoneLog.push({ tick: this.currentTick, text });
       if (this.milestoneLog.length > 20) this.milestoneLog.shift();
     }
     if (this._warnedForWave && this._warnedForWave <= this.waveSpawner.waveNumber) this._warnedForWave = null;
@@ -193,7 +277,8 @@ export class SimWorld {
     return {
       width: this.width, height: this.height, seed: this.seed, aggression: this.aggression,
       currentTick: this.currentTick, scrap: this.scrap, gameOver: this.gameOver,
-      pollution: this.pollution, storyteller: this.storyteller,
+      pollution: this.pollution, nuclearWaste: this.nuclearWaste, ethanolPenaltyTimer: this.ethanolPenaltyTimer,
+      storyteller: this.storyteller, timeOfDay: this.timeOfDay,
       waveNumber: this.waveSpawner.waveNumber, nextWaveTick: this.waveSpawner.nextWaveTick,
       citizens: {
         count: this.citizens.count,
@@ -219,6 +304,7 @@ export class SimWorld {
         kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed,
         underConstruction: s.underConstruction, buildProgress: s.buildProgress,
         _vehicleSpawned: s._vehicleSpawned || false,
+        onFire: s.onFire || false, fireTicks: s.fireTicks || 0,
       })),
       zones: Array.from(this.zones.kind),
       dogs: this.dogs.map(d => ({ ownerId: d.ownerId, x: d.x, y: d.y })),
@@ -228,7 +314,7 @@ export class SimWorld {
       // few seconds of game time, not a correctness bug like the duplicate-vehicle-on-load one
       // this was written alongside (garages need _vehicleSpawned persisted, see above).
       vehicles: this.vehicles.map(v => ({
-        kind: v.kind, garageX: v.garageX, garageY: v.garageY, x: v.x, y: v.y,
+        kind: v.kind, fuelType: v.fuelType, garageX: v.garageX, garageY: v.garageY, x: v.x, y: v.y,
         driverId: v.driverId, phase: v.driverId == null ? 'parked' : 'inbound', workTimer: 0,
       })),
     };
@@ -240,7 +326,10 @@ export class SimWorld {
     w.scrap = json.scrap;
     w.gameOver = json.gameOver || false;
     w.pollution = json.pollution || 0;
+    w.nuclearWaste = json.nuclearWaste || 0;
+    w.ethanolPenaltyTimer = json.ethanolPenaltyTimer || 0;
     w.storyteller = json.storyteller || 'Cassandra';
+    w.timeOfDay = json.timeOfDay != null ? json.timeOfDay : 0.3;
     w.waveSpawner.waveNumber = json.waveNumber || 0;
     w.waveSpawner.nextWaveTick = json.nextWaveTick || 300;
     const c = json.citizens;
@@ -259,7 +348,14 @@ export class SimWorld {
     }
     w.roster = new (Object.getPrototypeOf(w.roster).constructor)();
     for (const r of json.roster) w.roster.assign(r.id, r.kind, r.post);
-    w.structures = json.structures.map(s => Object.assign(new Structure(s.kind, s.x, s.y, { instant: true }), s));
+    w.structures = json.structures.map(s => {
+      const built = Object.assign(new Structure(s.kind, s.x, s.y, { instant: true }), s);
+      // The constructor's instant:true default marks _builtNotified true regardless of the real
+      // (restored) underConstruction value -- recompute it here so a structure that was still
+      // mid-build at save time can still fire its build-complete cue once it actually finishes.
+      built._builtNotified = !built.underConstruction;
+      return built;
+    });
     if (json.zones) w.zones.kind.set(json.zones);
     if (json.dogs) w.dogs = json.dogs.map(d => ({ ...d, cooldown: 0 }));
     if (json.vehicles) {
@@ -267,7 +363,7 @@ export class SimWorld {
       // above), so a vehicle can't come back mid-haul with a valid driver -- every vehicle
       // loads parked; whoever was driving just needs to be reassigned by the job system.
       w.vehicles = json.vehicles.map(v => ({
-        kind: v.kind, garageX: v.garageX, garageY: v.garageY, x: v.garageX, y: v.garageY,
+        kind: v.kind, fuelType: v.fuelType || 'gas', garageX: v.garageX, garageY: v.garageY, x: v.garageX, y: v.garageY,
         driverId: null, phase: 'parked', workTimer: 0, targetNode: null,
       }));
     }

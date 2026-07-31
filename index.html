@@ -49,9 +49,10 @@
 
   /* ---- Build toolbar ---- */
   #toolbar {
-    position: fixed; left: 10px; bottom: 10px;
+    position: fixed; left: 10px; bottom: 10px; top: 60px;
     display: flex; flex-direction: column; gap: 4px;
     padding: 8px; font-size: 13px;
+    overflow-y: auto; scrollbar-width: thin;
   }
   #toolbar .tool-btn {
     display: flex; justify-content: space-between; gap: 14px;
@@ -116,11 +117,64 @@
     padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
   }
 
+  /* ---- World map / conquest overlay ---- */
+  #worldmap {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
+  }
+  #worldmap.hidden { display: none; }
+  #worldmap .box {
+    padding: 20px 24px; width: min(880px, 94vw); max-height: 92vh; overflow: auto;
+  }
+  #worldmap .map-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  #worldmap h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #worldmap .map-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
+  #worldmap .map-head .spacer { flex: 1; }
+  #worldmap .grid {
+    display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
+  }
+  #worldmap .region {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 5px;
+    min-height: 118px;
+  }
+  #worldmap .region.active { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  #worldmap .region.owned { border-color: var(--good); }
+  #worldmap .region.expandable { border-style: dashed; border-color: #8a7a52; }
+  #worldmap .region.locked { opacity: 0.45; }
+  #worldmap .region .rname { font-weight: 600; font-size: 12.5px; line-height: 1.2; }
+  #worldmap .region .badge {
+    font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+  }
+  #worldmap .region.active .badge { color: var(--accent); }
+  #worldmap .region.owned .badge { color: var(--good); }
+  #worldmap .region .bar { height: 8px; background: #332e2a; border-radius: 4px; overflow: hidden; }
+  #worldmap .region .bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+  #worldmap .region.owned .bar-fill { background: var(--good); }
+  #worldmap .region .pct { display: flex; justify-content: space-between; font-size: 10px; color: var(--text-dim); }
+  #worldmap .region .snap { font-size: 10px; color: var(--text-dim); line-height: 1.35; margin-top: auto; }
+  #worldmap .region button {
+    background: var(--accent); color: #201a10; border: none; border-radius: 4px;
+    padding: 4px 6px; font-size: 11px; font-weight: 600; cursor: pointer; width: 100%;
+  }
+  #worldmap .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
+  #worldmap .close-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+
   /* ---- Help hint ---- */
   #help-hint {
     position: fixed; right: 10px; bottom: 10px;
     padding: 6px 10px; font-size: 11px; color: var(--text-dim);
   }
+
+  /* ---- Minimap ---- */
+  #minimap-wrap {
+    position: fixed; right: 10px; bottom: 46px;
+    padding: 4px; line-height: 0;
+  }
+  #minimap { display: block; cursor: pointer; image-rendering: pixelated; background: #241f1a; }
 </style>
 </head>
 <body>
@@ -132,12 +186,17 @@
   <div class="stat"><span class="icon">☠</span><span class="val" id="stat-attackers">0</span></div>
   <div class="stat"><span class="icon">🌊</span>Wave <span class="val" id="stat-wave">0</span></div>
   <div class="stat"><span class="icon">☣</span><span class="val" id="stat-pollution">0</span></div>
+  <div class="stat" title="Duty Roster clock -- day/night cycle driving citizen sleep/work/recreation schedule">
+    <span class="icon" id="stat-daynight-icon">☀</span><span class="val" id="stat-daynight">Day</span>
+  </div>
   <div class="spacer"></div>
   <button id="btn-pause">⏸ Pause</button>
   <button id="btn-speed-down">−</button>
   <span id="speed-label">1x</span>
   <button id="btn-speed-up">+</button>
   <button id="btn-recenter" title="Snap the camera back to auto-follow the settlement">⛶ Recenter</button>
+  <button id="btn-worldmap" title="Conquest map -- per-region control meters and expansion [Shift+M]">🗺 Map</button>
+  <button id="btn-mute" title="Mute/unmute procedurally-synthesized sound effects">🔊 Sound</button>
   <button id="btn-save">💾 Save</button>
   <button id="btn-load">📂 Load</button>
   <button id="btn-restart">🔄 New</button>
@@ -148,6 +207,7 @@
 <div id="inspector" class="panel hidden">
   <h3 id="insp-name"></h3>
   <div class="subtitle" id="insp-role"></div>
+  <div class="subtitle" id="insp-status"></div>
   <div class="stat-row"><div class="label"><span>Health</span><span id="insp-hp-pct"></span></div><div class="bar"><div class="bar-fill hp" id="insp-hp"></div></div></div>
   <div class="stat-row"><div class="label"><span>Hunger</span><span id="insp-hunger-pct"></span></div><div class="bar"><div class="bar-fill hunger" id="insp-hunger"></div></div></div>
   <div class="stat-row"><div class="label"><span>Rest</span><span id="insp-rest-pct"></span></div><div class="bar"><div class="bar-fill rest" id="insp-rest"></div></div></div>
@@ -168,7 +228,27 @@
   </div>
 </div>
 
+<div id="worldmap" class="hidden">
+  <div class="box panel">
+    <div class="map-head">
+      <h2>Conquest Map</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-worldmap-close">Close [Shift+M]</button>
+    </div>
+    <div class="map-sub" id="worldmap-sub"></div>
+    <div class="grid" id="worldmap-grid"></div>
+    <div class="legend">
+      Control rises while your settlement holds ground -- surviving waves, keeping citizens alive and
+      banking scrap all push the meter. At 100% a region is yours for good and starts shipping scrap
+      to whichever settlement you're currently running. Expanding moves your operation to a fresh
+      settlement in the chosen region; the one you leave keeps its progress.
+    </div>
+  </div>
+</div>
+
 <div id="help-hint" class="panel">Click a citizen to inspect &middot; drag to paint zones/walls &middot; right-drag/scroll to pan/zoom &middot; Space pause &middot; F5/F9 save/load</div>
+
+<div id="minimap-wrap" class="panel"><canvas id="minimap" width="160" height="160"></canvas></div>
 
 <script src="./game.bundle.js"></script>
 </body>

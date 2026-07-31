@@ -38,6 +38,7 @@ export const StaffRoleKind = Object.freeze({
   Guard: 'Guard',
   Sniper: 'Sniper',
   K9Handler: 'K9Handler',
+  Monitor: 'Monitor', // staffs a CCTV Monitor Station, see security.js / world.js wave-warning logic
 });
 
 export const TerrainKind = Object.freeze({

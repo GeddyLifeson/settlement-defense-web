@@ -5,6 +5,8 @@
 import { StaffRoleKind, TerrainKind } from './core.js';
 import { ZONE_COLOR, ZoneKind } from './zones.js';
 import { JobState } from './jobs.js';
+import { isTileEnergized } from './power.js';
+import { isNuclearContained, NUCLEAR_HAZARD_RADIUS } from './siege.js';
 
 const CELL = 24; // px per grid cell at zoom 1
 const OUTLINE = 'rgba(20,16,12,0.75)';
@@ -13,6 +15,7 @@ const ROLE_COLOR = {
   [StaffRoleKind.Guard]: '#f2c026',
   [StaffRoleKind.Sniper]: '#bf59d9',
   [StaffRoleKind.K9Handler]: '#f2c026',
+  [StaffRoleKind.Monitor]: '#59a6d9',
   [StaffRoleKind.None]: '#d3cdbf',
 };
 
@@ -21,6 +24,25 @@ const ZONE_BORDER = {
   [ZoneKind.Food]: '#c98a2e',
   [ZoneKind.Recreation]: '#4a9e5f',
 };
+
+// SEA:R truck fuel-type tradeoff (see vehicles.js FUEL_TYPES) -- a stripe color per fuel so the
+// dirty/clean tradeoff reads at a glance in _drawVehicles below.
+const FUEL_COLOR = {
+  fossil: '#6b5334',
+  gas: '#3d6fa8',
+  ethanol: '#5fa83d',
+  electric: '#3dd0d0',
+};
+
+// Blend a hex color toward gray -- used to give OnBreak citizens a visibly washed-out look
+// distinct from the flat gray used for Downed citizens (see _drawCitizens).
+function desaturate(hex, amount) {
+  const n = parseInt(hex.slice(1), 16);
+  const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  const gray = (r + g + b) / 3;
+  const mix = (c) => Math.round(c + (gray - c) * amount);
+  return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+}
 
 // Deterministic per-cell noise so the ground doesn't need an image asset to avoid looking flat.
 function cellNoise(x, y) {
@@ -145,13 +167,33 @@ export class Renderer {
     ];
   }
 
+  // World-space bounds of what's currently visible in the main viewport -- used by the minimap
+  // to draw the "you are here" rectangle without duplicating the worldToScreen/screenToWorld math.
+  getViewBounds() {
+    const [x0, y0] = this.screenToWorld(0, 0);
+    const [x1, y1] = this.screenToWorld(this.canvas.width, this.canvas.height);
+    return { x0, y0, x1, y1 };
+  }
+
+  // Public entry point for jumping the camera to an arbitrary world point (e.g. a minimap
+  // click) -- goes through the same manual-camera + clamp path as pan/zoom so it doesn't fight
+  // the auto-reframe or walk the camera off the map edge.
+  jumpTo(x, y, world) {
+    this.camX = x;
+    this.camY = y;
+    this.manualCamera = true;
+    this._clampCamToWorld(world);
+  }
+
   draw(world, input) {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this._drawGround(world);
     this._drawZones(world);
     this._drawResourceNodes(world);
+    this._drawNuclearHazards(world);
     this._drawStructures(world);
+    this._drawFire(world);
     this._drawCitizens(world);
     this._drawDogs(world);
     this._drawAttackers(world);
@@ -160,6 +202,35 @@ export class Renderer {
     if (input) {
       this._drawCursor(world, input);
       this._drawSelection(world, input);
+    }
+  }
+
+  // Fire crisis event (Prison Architect/SEA:R, see fire.js): burning structures get an animated
+  // flame glyph -- a radial-gradient teardrop that flickers based on world.currentTick (fixed-
+  // tick-driven, not wall-clock time, so it stays deterministic/pausable like everything else).
+  _drawFire(world) {
+    const ctx = this.ctx;
+    for (const s of world.structures) {
+      if (!s.onFire || s.destroyed) continue;
+      const [sx, sy] = this.worldToScreen(s.x, s.y);
+      const size = CELL * this.zoom * 0.85;
+      const flicker = 0.7 + 0.3 * Math.sin(world.currentTick * 0.5 + s.x * 3 + s.y * 7);
+      const h = size * (0.55 + 0.25 * flicker);
+
+      ctx.save();
+      ctx.globalAlpha = 0.88;
+      const grad = ctx.createRadialGradient(sx, sy - h * 0.3, 1, sx, sy - h * 0.3, h * 0.65);
+      grad.addColorStop(0, 'rgba(255,240,180,0.95)');
+      grad.addColorStop(0.5, 'rgba(255,140,40,0.85)');
+      grad.addColorStop(1, 'rgba(200,40,20,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - h);
+      ctx.quadraticCurveTo(sx + size * 0.28 * flicker, sy - h * 0.5, sx, sy + size * 0.1);
+      ctx.quadraticCurveTo(sx - size * 0.28 * flicker, sy - h * 0.5, sx, sy - h);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
     }
   }
 
@@ -174,17 +245,77 @@ export class Renderer {
     ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
   }
 
-  _drawSelection(world, input) {
-    const sel = input.selectedCitizen;
-    if (sel == null || sel < 0 || sel >= world.citizens.count || !world.citizens.isAliveAt(sel)) return;
+  // Nuclear waste hazard (SEA:R): unlike the global smog haze above, this is a literal
+  // damage-dealing area around any nuclear generator that isn't guarded by a nearby
+  // waste_storage (see siege.js's tickNuclearHazard, which is what actually applies the damage
+  // this is only the visual for). Sickly green/yellow warning tint, distinct from the smog's
+  // duller olive so a player can tell "background pollution" from "stand here and take damage"
+  // at a glance. Pulses subtly so it doesn't just look like a locked deep decal.
+  _drawNuclearHazards(world) {
     const ctx = this.ctx;
-    const [sx, sy] = this.worldToScreen(world.citizens.x[sel], world.citizens.y[sel]);
+    for (const s of world.structures) {
+      if (s.kind !== 'generator_nuclear' || s.destroyed || s.underConstruction) continue;
+      if (isNuclearContained(world.structures, s)) continue;
+      const [sx, sy] = this.worldToScreen(s.x, s.y);
+      const r = NUCLEAR_HAZARD_RADIUS * CELL * this.zoom;
+      const pulse = 0.75 + 0.25 * Math.sin(world.currentTick * 0.15);
+      const grad = ctx.createRadialGradient(sx, sy, r * 0.15, sx, sy, r);
+      grad.addColorStop(0, `rgba(200,230,60,${0.28 * pulse})`);
+      grad.addColorStop(0.7, `rgba(170,210,40,${0.16 * pulse})`);
+      grad.addColorStop(1, 'rgba(170,210,40,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = `rgba(210,235,90,${0.5 * pulse})`;
+      ctx.lineWidth = Math.max(1, CELL * this.zoom * 0.04);
+      ctx.setLineDash([CELL * this.zoom * 0.15, CELL * this.zoom * 0.1]);
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+
+  _drawSelection(world, input) {
+    const ctx = this.ctx;
     const r = CELL * this.zoom * 0.5;
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(sx, sy, r, 0, Math.PI * 2);
-    ctx.stroke();
+    const ids = new Set();
+    if (input.selectedCitizen != null && input.selectedCitizen >= 0) ids.add(input.selectedCitizen);
+    if (input.selectedCitizens) for (const i of input.selectedCitizens) ids.add(i);
+    for (const sel of ids) {
+      if (sel < 0 || sel >= world.citizens.count || !world.citizens.isAliveAt(sel)) continue;
+      const [sx, sy] = this.worldToScreen(world.citizens.x[sel], world.citizens.y[sel]);
+      ctx.strokeStyle = '#ffffff';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(sx, sy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    this._drawMarquee(input);
+  }
+
+  // RimWorld/Prison Architect-style rubber-band select: only ever active with the Select tool
+  // (armed in InputController._onDown, see input.js), a dashed rectangle from drag-start to the
+  // live cursor position so the player can see what they're about to sweep up.
+  _drawMarquee(input) {
+    if (!input.marqueeActive) return;
+    const dx = input.marqueeEndWorldX - input.marqueeStartWorldX;
+    const dy = input.marqueeEndWorldY - input.marqueeStartWorldY;
+    if (Math.hypot(dx, dy) < 0.15) return; // below this it's still just a click settling, not a drag
+    const ctx = this.ctx;
+    const [x0, y0] = this.worldToScreen(input.marqueeStartWorldX, input.marqueeStartWorldY);
+    const [x1, y1] = this.worldToScreen(input.marqueeEndWorldX, input.marqueeEndWorldY);
+    const x = Math.min(x0, x1), y = Math.min(y0, y1);
+    const w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
+    ctx.save();
+    ctx.fillStyle = 'rgba(127,215,255,0.12)';
+    ctx.strokeStyle = '#7fd7ff';
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash([5, 4]);
+    ctx.fillRect(x, y, w, h);
+    ctx.strokeRect(x, y, w, h);
+    ctx.restore();
   }
 
   // Rooms/zones read as painted floor material (Prison Architect's zone-tint-with-border
@@ -329,9 +460,24 @@ export class Renderer {
       if (world.citizens.jobState[i] === JobState.Driving) continue; // riding inside a vehicle, drawn as part of it
       const id = world.citizens.id[i];
       const downed = world.citizens.isDownedAt(i);
+      const onBreak = !downed && world.citizens.isOnBreakAt(i);
       const role = world.roster.isStaff(id) ? world.roster.kindOf(id) : StaffRoleKind.None;
-      const color = downed ? '#6b6b6b' : (ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None]);
-      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, downed ? '#8a8a8a' : '#e8c9a0', world.citizens.health[i]);
+      const baseColor = ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None];
+      const color = downed ? '#6b6b6b' : onBreak ? desaturate(baseColor, 0.6) : baseColor;
+      const headColor = downed ? '#8a8a8a' : onBreak ? desaturate('#e8c9a0', 0.6) : '#e8c9a0';
+      const [sx, sy] = this.worldToScreen(world.citizens.x[i], world.citizens.y[i]);
+      this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, headColor, world.citizens.health[i]);
+      if (onBreak) {
+        // Small "zzz" tell above the head so low-mood citizens read clearly at a glance,
+        // distinct from the flat-gray Downed silhouette.
+        const s = CELL * this.zoom * 0.7;
+        this.ctx.save();
+        this.ctx.font = `${Math.max(8, s * 0.32)}px sans-serif`;
+        this.ctx.fillStyle = 'rgba(140,150,200,0.9)';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('z', sx + s * 0.32, sy - s * 0.62);
+        this.ctx.restore();
+      }
     }
   }
 
@@ -363,12 +509,13 @@ export class Renderer {
 
   _drawStructures(world) {
     const ctx = this.ctx;
+    this._structuresForPower = world.structures; // read back by the 'wire' shape for its lit/dark tint
     for (const s of world.structures) {
       if (s.destroyed && s.kind === 'trap') continue; // traps vanish once triggered
       const [sx, sy] = this.worldToScreen(s.x, s.y);
       const size = CELL * this.zoom * 0.85;
 
-      if (s.kind !== 'fence') {
+      if (s.kind !== 'fence' && s.kind !== 'wire') {
         ctx.fillStyle = 'rgba(0,0,0,0.25)';
         ctx.beginPath();
         ctx.ellipse(sx, sy + size * 0.4, size * 0.35, size * 0.12, 0, 0, Math.PI * 2);
@@ -453,14 +600,102 @@ export class Renderer {
       ctx.strokeRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35);
       return;
     }
+    if (s.kind === 'camera') {
+      // Cheap CCTV camera: a mounting post + a small angled lens housing with a "lit lens" dot,
+      // deliberately smaller/plainer than the watchtower platform (cheaper, shorter-range).
+      ctx.fillStyle = '#4a4a4a';
+      ctx.fillRect(sx - size * 0.06, sy - size * 0.05, size * 0.12, size * 0.4); // mounting post
+      ctx.save();
+      ctx.translate(sx, sy - size * 0.32);
+      ctx.rotate(-0.4);
+      ctx.fillStyle = '#2b2b2b';
+      ctx.fillRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
+      ctx.strokeRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
+      ctx.fillStyle = s.destroyed ? '#5a1a1a' : '#59a6d9';
+      ctx.beginPath();
+      ctx.arc(size * 0.22, -size * 0.02, size * 0.07, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+      return;
+    }
+    if (s.kind === 'monitor_station') {
+      // A desk with a bank of CCTV screens -- staffed/unstaffed reads via screen brightness so
+      // the "manned monitor bonus" is visible on the map, not just in the milestone log.
+      ctx.fillStyle = '#5a4630';
+      ctx.fillRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4); // desk
+      ctx.strokeRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4);
+      ctx.fillStyle = '#2b2b2b';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4); // monitor bank
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4);
+      ctx.fillStyle = s.destroyed ? '#3a3a3a' : (s._staffed ? '#7ad9a0' : '#3a5a6a');
+      ctx.fillRect(sx - size * 0.34, sy - size * 0.42, size * 0.3, size * 0.28);
+      ctx.fillRect(sx + size * 0.04, sy - size * 0.42, size * 0.3, size * 0.28);
+      return;
+    }
+    if (s.kind === 'wire') {
+      // Thin conduit run rather than a box (same visual logic as 'fence'), drawn as a cross so
+      // a chain of them reads as continuous cable in any direction. Lit amber only when the
+      // segment is actually carrying power back to a generator; dead segments stay dull grey.
+      const live = !s.destroyed && !s.underConstruction && isTileEnergized(this._structuresForPower || [], s.x, s.y);
+      ctx.strokeStyle = live ? '#e0a336' : 'rgba(110,105,95,0.75)';
+      ctx.lineWidth = Math.max(1.5, size * 0.1);
+      ctx.beginPath();
+      ctx.moveTo(sx - size / 2, sy); ctx.lineTo(sx + size / 2, sy);
+      ctx.moveTo(sx, sy - size / 2); ctx.lineTo(sx, sy + size / 2);
+      ctx.stroke();
+      ctx.fillStyle = live ? '#f5cf80' : '#57534b';
+      ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
     if (s.kind === 'generator') {
-      ctx.fillStyle = '#4a4a52';
+      const running = !s.destroyed && !s.underConstruction;
+      ctx.fillStyle = running ? '#4a4a52' : 'rgba(60,60,64,0.6)';
       ctx.fillRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
       ctx.strokeRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
-      ctx.fillStyle = '#e0a336';
+      ctx.fillStyle = running ? '#e0a336' : '#6a6250'; // core light goes dark when it isn't running
       ctx.beginPath();
       ctx.arc(sx, sy, size * 0.18, 0, Math.PI * 2);
       ctx.fill();
+      return;
+    }
+    if (s.kind === 'generator_nuclear') {
+      // Deliberately reads as heavier/more industrial than the plain generator (dark cooling-
+      // tower silhouette) with a glowing sickly-green core instead of the plain generator's warm
+      // amber -- the same green family as the hazard radius so the two visually associate.
+      const running = !s.destroyed && !s.underConstruction;
+      ctx.fillStyle = running ? '#2e3230' : 'rgba(40,44,42,0.6)';
+      ctx.fillRect(sx - size * 0.46, sy - size * 0.46, size * 0.92, size * 0.92);
+      ctx.strokeRect(sx - size * 0.46, sy - size * 0.46, size * 0.92, size * 0.92);
+      // trefoil-ish radiation glyph: three wedges around a hot core
+      ctx.fillStyle = running ? '#161816' : '#3a3e3c';
+      ctx.beginPath(); ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = running ? '#c8e63c' : '#5a6650';
+      for (let k = 0; k < 3; k++) {
+        const a = (k / 3) * Math.PI * 2 - Math.PI / 2;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.arc(sx, sy, size * 0.26, a - 0.35, a + 0.35);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.fillStyle = running ? '#e8ffb0' : '#7a8570';
+      ctx.beginPath(); ctx.arc(sx, sy, size * 0.08, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
+    if (s.kind === 'waste_storage') {
+      // Squat drum cluster, hazard-striped so it reads as "the thing that fixes the green zone"
+      // at a glance, distinct from the recycling center's green triangle icon (that's a different
+      // resource loop -- pollution, not nuclear waste).
+      ctx.fillStyle = s.destroyed ? 'rgba(70,64,30,0.5)' : '#4a4626';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.38, size * 0.8, size * 0.76);
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.38, size * 0.8, size * 0.76);
+      ctx.fillStyle = s.destroyed ? 'rgba(160,150,40,0.4)' : '#d9c93a';
+      for (const dx of [-0.22, 0.22]) {
+        ctx.beginPath();
+        ctx.arc(sx + size * dx, sy, size * 0.16, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
       return;
     }
     if (s.kind === 'recycling_center') {
@@ -540,6 +775,12 @@ export class Renderer {
       ctx.fillStyle = v.kind === 'recycling' ? '#3d7a4a' : '#7a6a3d';
       ctx.fillRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
       ctx.strokeRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
+      // SEA:R fuel-type tradeoff (vehicles.js FUEL_TYPES): a colored fuel-tank stripe makes the
+      // dirty/clean tradeoff visible at a glance without needing to inspect the truck --
+      // fossil=sooty brown, gas=blue (the "best all-around" default), ethanol=green (clean but
+      // food-cost), electric=cyan (cleanest, power-hungry).
+      ctx.fillStyle = FUEL_COLOR[v.fuelType] || FUEL_COLOR.gas;
+      ctx.fillRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.12);
       ctx.fillStyle = '#222';
       ctx.beginPath(); ctx.arc(sx - s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
       ctx.beginPath(); ctx.arc(sx + s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
@@ -555,5 +796,50 @@ export class Renderer {
         ctx.fillText('?', sx, sy - s * 0.5);
       }
     }
+  }
+
+  // Low-detail top-down overview into a separate small canvas (see index.html #minimap) --
+  // deliberately skips _buildGroundCache/_drawGround's noise shading (way more detail than a
+  // handful of on-screen pixels can show) in favor of a flat fill plus dots/rects, so it stays
+  // cheap to redraw every frame at a totally different scale than the main viewport.
+  drawMinimap(world, mmCanvas) {
+    const ctx = mmCanvas.getContext('2d');
+    const W = mmCanvas.width, H = mmCanvas.height;
+    const sx = W / world.width, sy = H / world.height;
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#3a322a'; // flat ground tone, matches the canvas background elsewhere
+    ctx.fillRect(0, 0, W, H);
+
+    // structures -- small neutral squares, not trying to distinguish kind at this scale
+    ctx.fillStyle = '#c9bfa8';
+    for (const s of world.structures) {
+      if (s.destroyed && s.kind === 'trap') continue;
+      ctx.fillRect(s.x * sx - 1, s.y * sy - 1, 2, 2);
+    }
+
+    // citizens
+    ctx.fillStyle = '#e8c9a0';
+    for (let i = 0; i < world.citizens.count; i++) {
+      if (!world.citizens.isAliveAt(i)) continue;
+      ctx.fillRect(world.citizens.x[i] * sx - 1, world.citizens.y[i] * sy - 1, 2, 2);
+    }
+
+    // attackers -- the single most useful thing a minimap tells you during a siege is "where is
+    // the wave coming from," so these get the loudest, most distinct color and a bigger dot.
+    ctx.fillStyle = '#ff3b30';
+    for (let i = 0; i < world.attackers.count; i++) {
+      if (!world.attackers.isAliveAt(i)) continue;
+      ctx.fillRect(world.attackers.x[i] * sx - 1.5, world.attackers.y[i] * sy - 1.5, 3, 3);
+    }
+
+    // viewport rectangle -- what the main camera currently frames
+    const { x0, y0, x1, y1 } = this.getViewBounds();
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(
+      Math.round(x0 * sx) + 0.5, Math.round(y0 * sy) + 0.5,
+      Math.max(1, (x1 - x0) * sx), Math.max(1, (y1 - y0) * sy),
+    );
   }
 }

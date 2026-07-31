@@ -218,6 +218,102 @@ still gets the long survival time. If confirmed, the fix is almost certainly in
    (the "settlements giving each other resources" part of the ask). UI: a topbar button or `M`
    key opens a full-screen map overlay in the same DOM-panel style as the rest of the UI.
 
+## FULL BACKLOG CLEAR (this session, via 11 parallel subagents): DONE
+
+User: "DO EVERYTHING" + "RUN AGENTS FOR EACH THING THAT'S ON BACKLOG" -- every remaining backlog
+item from the previous pass, plus a fresh NPC-need-rate bug report, was farmed out to a real
+Agent-tool subagent (model/effort picked per task: opus for the two largest -- power graph,
+world map -- sonnet for everything else), running concurrently against this shared working
+directory. **Worktree isolation was NOT available** (the session's cwd, `C:\`, isn't itself a
+git repo, and the Agent tool's worktree feature requires that) -- agents edited the live tree
+directly, in parallel, with instructions to re-read files before editing and expect occasional
+retries. This worked better than expected; only a couple of real collisions occurred (see below),
+both self-resolved by the agents themselves before I even had to intervene.
+
+**NPC rate-diminishment bug (user-reported, both halves confirmed and fixed):**
+- `HUNGER_DECAY`/`REST_DECAY`/`SOCIAL_DECAY` (`citizens.js`) were ~12x too fast relative to
+  `REFILL_RATE`/travel time -- a citizen could deplete a need to zero before finishing the walk
+  to a zone. Retuned so full-to-zero takes ~2000 ticks instead of ~170-400.
+- `CitizenFlags.OnBreak` was set/cleared based on mood but **read nowhere else in the entire
+  codebase** -- mood crashing had zero gameplay effect. Fixed: on-break citizens now work/build/
+  harvest at 0.5x speed (`jobs.js`), render visibly desaturated with a status glyph
+  (`render.js`), and show in the inspector (`main.js`).
+
+**New systems (all verified via `window.__debug` soak-tests by their own agent, then
+re-verified together in the final integration pass below):**
+- **Real power/water wire-graph** (`power.js`, new) -- replaced the earlier radius-based
+  `isPowered` stub with an actual flood-fill conductor network over `generator`/`wire` tiles.
+  Cut/repair a wire and downstream consumers correctly lose/regain power.
+- **Day/night Duty Roster** (`schedule.js`, new) -- `world.timeOfDay` cycles every 2400 ticks;
+  `jobs.js` biases citizens toward sleep/rec/work by time-of-day without overriding a genuine
+  starvation/exhaustion emergency. Topbar sun/moon indicator.
+- **Fire spread** (`fire.js`, new) -- generators can rarely spark nearby flammable furniture
+  (bed/table/door), which burns and can cascade to neighbors, self-extinguishes once out of
+  fuel. Walls are deliberately NOT flammable -- they fold into permanent grid terrain the tick
+  after construction finishes and can't hold fire state.
+- **Truck fuel-type tradeoffs** -- 4 fuel variants per garage kind (fossil/gas/ethanol/electric),
+  each with a real, measured tradeoff: pollution-per-haul, a temporary Food-zone refill penalty
+  for ethanol, a power-graph dependency for electric (2.5x slower if its garage isn't wired).
+- **CCTV camera + manned Monitor Station** -- cheaper/shorter-range early-warning complement to
+  Watchtower; a staffed Monitor Station (new `StaffRoleKind.Monitor`) roughly doubles the warning
+  window versus an unmanned camera.
+- **Nuclear generator + waste storage** -- high-power/high-risk generator tier with a wireless
+  power radius, but accrues `world.nuclearWaste` and deals real hazard damage to anything nearby
+  until a Waste Storage building is placed within containment radius.
+- **World map / Conquest layer** (`worldmap.js`, new) -- the user's long-standing RimWorld-style
+  ask. 16 regions, one live `SimWorld` at a time, control% driven by how the active settlement is
+  doing, owned regions passively trickle scrap to the active one, "Expand here" banks the current
+  region and starts a fresh settlement in an adjacent one. Full-screen overlay, `Shift+M` to
+  toggle (`M`/`m` was already claimed by Monitor Station's hotkey).
+- **Minimap** -- always-on corner overview, attacker dots, click-to-jump camera.
+- **Drag-select multiple citizens** -- marquee-select (Select tool only, doesn't interfere with
+  build-painting or camera pan); since there's no per-citizen command system to hook into yet,
+  multi-select shows aggregate need/mood info rather than pretending to enable orders that don't
+  exist.
+- **Procedural WebAudio sound** -- 5 synthesized cues (build-complete, turret-fire, kill,
+  wave-incoming, citizen-downed), throttled where needed, mute button in the topbar, gated behind
+  the browser's user-gesture autoplay unlock.
+- **Automated test suite** (`tests/`, new) -- 85 real assertions against `CitizenStore`,
+  `tickNeedsAndMood`, `detectRooms`, `WaveSpawner`/`colonyStrength`, the blueprint-construction
+  lifecycle, and the full vehicle garage->driver->haul-cycle. Runs over `http://` (imports
+  `src/*.js` directly as real ES modules, bypassing `game.bundle.js` entirely) -- open
+  `tests/run.html` via the existing `python -m http.server 8123`. Never added to `build.py`'s
+  `ORDER`, so it can never leak into the shipped bundle.
+
+**Real cross-agent collisions that happened, and how they resolved:**
+- Three different agents (world-map, CCTV, audio) independently hit the exact same latent
+  bundler gap: `main.js`'s `import * as audio from './audio.js'` doesn't survive `build.py`'s
+  strip-imports-to-globals concatenation (only named imports do). The audio and CCTV agents both
+  fixed it by switching `main.js` to named imports; the truck-fuel-type agent additionally made
+  `build.py` itself understand namespace imports generically (synthesizes a `const audio = {...}`
+  alias object). Both fixes are compatible -- `main.js` uses named imports, `build.py`'s new
+  generic support is just unused-but-harmless extra capability. Verified no conflict.
+- The nuclear-hazard agent caught and fixed a real bug in `power.js`: `computeEnergized` special-
+  cased the literal string `'generator'` as a power source even after `isSource()` had already
+  been genericized to accept any `generator_*` prefix -- meaning the nuclear generator (or any
+  future generator variant) would never have counted as a power source. Fixed to use `isSource()`
+  consistently.
+- `build.py`'s `ORDER` array needed `schedule.js`/`fire.js`/`power.js`/`worldmap.js`/`audio.js`
+  added by whichever agent's work depended on them; by the time all 11 landed, every new module
+  was present and in a working dependency order (verified via a clean full rebuild + zero console
+  errors).
+
+**Fixed during final integration (not any single agent's fault, a consequence of merging 11
+agents' UI additions into one toolbar):** `#toolbar` grew to 26 items across all the new
+buildables and had no `max-height`/`overflow-y`, so it silently overflowed off the bottom of the
+viewport with no way to reach the later entries. Fixed by bounding it between the topbar and the
+bottom edge (`top: 60px`) with `overflow-y: auto`.
+
+**Final integration verification** (fresh browser tab, full rebuild via `build.py`):
+- Zero console errors on load.
+- Full soak test to game-over: 32,842 ticks -- still squarely in the healthy 22-36k baseline,
+  with every new system's state (`timeOfDay`, `nuclearWaste`, `worldMap`, etc.) present and sane
+  throughout.
+- `tests/run.html` re-run against the fully-merged tree: still 85/85 passing.
+- Real screenshot verification (Claude in Chrome extension, not the still-broken Claude_Browser
+  screenshot tool) of the base game, the fixed toolbar, and the Conquest Map overlay -- all render
+  correctly with no overlap.
+
 ## LAUNDRY-LIST PASS (this session): comprehensive audit + implementation, DONE
 
 User asked for a full audit "at every level from code to UI" and to implement improvements, not
