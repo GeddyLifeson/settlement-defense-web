@@ -4,17 +4,170 @@
 <meta charset="utf-8">
 <title>Settlement Defense</title>
 <style>
-  html, body { margin: 0; background: #1a1a1a; overflow: hidden; height: 100%; }
+  :root {
+    --panel-bg: rgba(24, 22, 20, 0.88);
+    --panel-border: #4a4340;
+    --accent: #e0a336;
+    --text: #eee6d8;
+    --text-dim: #a89e90;
+    --danger: #d9534f;
+    --good: #6fbf6f;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden; background: #1a1a1a;
+    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+    color: var(--text);
+  }
   canvas { display: block; image-rendering: pixelated; background: #3a322a; }
-  #hud {
-    position: fixed; top: 8px; left: 8px; color: #eee; font: 13px monospace;
-    background: rgba(0,0,0,0.5); padding: 6px 10px; border-radius: 4px; pointer-events: none;
+
+  .panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--panel-border);
+    border-radius: 8px;
+    backdrop-filter: blur(3px);
+  }
+
+  /* ---- Top status bar ---- */
+  #topbar {
+    position: fixed; top: 10px; left: 10px; right: 10px;
+    display: flex; align-items: center; gap: 14px;
+    padding: 8px 14px; font-size: 14px;
+  }
+  #topbar .stat { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+  #topbar .stat .icon { font-size: 15px; }
+  #topbar .stat .val { font-weight: 600; }
+  #topbar .stat .val.danger { color: var(--danger); }
+  #topbar .spacer { flex: 1; }
+  #topbar button {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 10px; font-size: 13px; cursor: pointer;
+  }
+  #topbar button:hover { background: #3a342f; }
+  #topbar button.active { background: var(--accent); color: #201a10; border-color: var(--accent); }
+  #speed-label { min-width: 28px; text-align: center; font-size: 13px; color: var(--text-dim); }
+
+  /* ---- Build toolbar ---- */
+  #toolbar {
+    position: fixed; left: 10px; bottom: 10px;
+    display: flex; flex-direction: column; gap: 4px;
+    padding: 8px; font-size: 13px;
+  }
+  #toolbar .tool-btn {
+    display: flex; justify-content: space-between; gap: 14px;
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 6px 10px; cursor: pointer; min-width: 150px;
+  }
+  #toolbar .tool-btn:hover { background: #3a342f; }
+  #toolbar .tool-btn.active { background: var(--accent); color: #201a10; border-color: var(--accent); }
+  #toolbar .tool-btn .cost { color: var(--text-dim); }
+  #toolbar .tool-btn.active .cost { color: #4a3c1f; }
+  #toolbar .key { opacity: 0.6; margin-right: 6px; }
+
+  /* ---- Citizen inspector ---- */
+  #inspector {
+    position: fixed; right: 10px; top: 60px; width: 240px;
+    padding: 12px 14px; font-size: 13px;
+  }
+  #inspector.hidden { display: none; }
+  #inspector h3 { margin: 0 0 2px 0; font-size: 16px; }
+  #inspector .subtitle { color: var(--accent); font-size: 12px; margin-bottom: 10px; }
+  #inspector .stat-row { margin-bottom: 6px; }
+  #inspector .stat-row .label { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 2px; }
+  #inspector .bar { height: 7px; background: #332e2a; border-radius: 4px; overflow: hidden; }
+  #inspector .bar-fill { height: 100%; border-radius: 4px; transition: width 0.2s; }
+  #inspector .bar-fill.hp { background: var(--danger); }
+  #inspector .bar-fill.hunger { background: #d9944f; }
+  #inspector .bar-fill.rest { background: #5a8fd9; }
+  #inspector .bar-fill.social { background: #b565d9; }
+  #inspector .bar-fill.mood { background: var(--good); }
+  #inspector .skill-line { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
+
+  /* ---- Event log ---- */
+  #eventlog {
+    position: fixed; left: 180px; bottom: 10px; width: 320px;
+    padding: 8px 12px; font-size: 12px; color: var(--text-dim);
+    max-height: 90px; overflow: hidden;
+  }
+  #eventlog .entry { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #eventlog .entry:last-child { color: var(--text); }
+
+  /* ---- Toast ---- */
+  #toast {
+    position: fixed; left: 50%; top: 70px; transform: translateX(-50%);
+    padding: 6px 16px; font-size: 13px; color: var(--danger);
+    opacity: 0; transition: opacity 0.3s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+
+  /* ---- Game over modal ---- */
+  #gameover {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    display: flex; align-items: center; justify-content: center;
+  }
+  #gameover.hidden { display: none; }
+  #gameover .box {
+    padding: 28px 36px; text-align: center; min-width: 280px;
+  }
+  #gameover h2 { margin: 0 0 8px 0; color: var(--danger); }
+  #gameover p { margin: 0 0 18px 0; color: var(--text-dim); }
+  #gameover button {
+    background: var(--accent); color: #201a10; border: none; border-radius: 6px;
+    padding: 10px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+
+  /* ---- Help hint ---- */
+  #help-hint {
+    position: fixed; right: 10px; bottom: 10px;
+    padding: 6px 10px; font-size: 11px; color: var(--text-dim);
   }
 </style>
 </head>
 <body>
 <canvas id="game"></canvas>
-<div id="hud"></div>
-<script type="module" src="./src/main.js"></script>
+
+<div id="topbar" class="panel">
+  <div class="stat"><span class="icon">🔩</span><span class="val" id="stat-scrap">0</span></div>
+  <div class="stat"><span class="icon">👥</span><span class="val" id="stat-citizens">0</span></div>
+  <div class="stat"><span class="icon">☠</span><span class="val" id="stat-attackers">0</span></div>
+  <div class="stat"><span class="icon">🌊</span>Wave <span class="val" id="stat-wave">0</span></div>
+  <div class="spacer"></div>
+  <button id="btn-pause">⏸ Pause</button>
+  <button id="btn-speed-down">−</button>
+  <span id="speed-label">1x</span>
+  <button id="btn-speed-up">+</button>
+  <button id="btn-save">💾 Save</button>
+  <button id="btn-load">📂 Load</button>
+  <button id="btn-restart">🔄 New</button>
+</div>
+
+<div id="toolbar" class="panel"></div>
+
+<div id="inspector" class="panel hidden">
+  <h3 id="insp-name"></h3>
+  <div class="subtitle" id="insp-role"></div>
+  <div class="stat-row"><div class="label"><span>Health</span><span id="insp-hp-pct"></span></div><div class="bar"><div class="bar-fill hp" id="insp-hp"></div></div></div>
+  <div class="stat-row"><div class="label"><span>Hunger</span><span id="insp-hunger-pct"></span></div><div class="bar"><div class="bar-fill hunger" id="insp-hunger"></div></div></div>
+  <div class="stat-row"><div class="label"><span>Rest</span><span id="insp-rest-pct"></span></div><div class="bar"><div class="bar-fill rest" id="insp-rest"></div></div></div>
+  <div class="stat-row"><div class="label"><span>Social</span><span id="insp-social-pct"></span></div><div class="bar"><div class="bar-fill social" id="insp-social"></div></div></div>
+  <div class="stat-row"><div class="label"><span>Mood</span><span id="insp-mood-pct"></span></div><div class="bar"><div class="bar-fill mood" id="insp-mood"></div></div></div>
+  <div class="skill-line" id="insp-skill"></div>
+</div>
+
+<div id="eventlog" class="panel"></div>
+
+<div id="toast"></div>
+
+<div id="gameover" class="hidden">
+  <div class="box panel">
+    <h2>The Settlement Has Fallen</h2>
+    <p id="gameover-detail"></p>
+    <button id="btn-restart-modal">Start a New Settlement</button>
+  </div>
+</div>
+
+<div id="help-hint" class="panel">Click a citizen to inspect &middot; drag to paint zones/walls &middot; Space pause &middot; F5/F9 save/load</div>
+
+<script src="./game.bundle.js"></script>
 </body>
 </html>

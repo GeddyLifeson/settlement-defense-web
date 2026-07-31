@@ -3,25 +3,33 @@
 import { ZoneKind } from './zones.js';
 import { BUILD_COST, spend, canAfford } from './economy.js';
 
-const TOOL_KEYS = {
-  '1': 'wall', '2': 'turret', '3': 'fence', '4': 'trap',
-  '5': 'zone-food', '6': 'zone-bedroom', '7': 'zone-recreation',
-  '0': null, 'Escape': null,
-};
+export const TOOLS = [
+  { key: '0', tool: null, label: 'Select', cost: null },
+  { key: '1', tool: 'wall', label: 'Wall', cost: BUILD_COST.wall },
+  { key: '2', tool: 'turret', label: 'Turret', cost: BUILD_COST.turret },
+  { key: '3', tool: 'fence', label: 'Fence', cost: BUILD_COST.fence },
+  { key: '4', tool: 'trap', label: 'Trap', cost: BUILD_COST.trap },
+  { key: '5', tool: 'zone-food', label: 'Food Zone', cost: null },
+  { key: '6', tool: 'zone-bedroom', label: 'Bedroom Zone', cost: null },
+  { key: '7', tool: 'zone-recreation', label: 'Recreation Zone', cost: null },
+];
+
+const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
+TOOL_KEYS['Escape'] = null;
 
 export class InputController {
-  constructor(canvas, renderer, getWorld, onSpeedChange) {
+  constructor(canvas, renderer, getWorld, onSpeedChange, onToast) {
     this.canvas = canvas;
     this.renderer = renderer;
     this.getWorld = getWorld;
     this.onSpeedChange = onSpeedChange;
+    this.onToast = onToast;
     this.tool = null;
     this.hoverGridX = null;
     this.hoverGridY = null;
     this.speedIndex = 1; // index into SPEEDS
     this.SPEEDS = [0, 1, 2, 4];
     this._painting = false;
-    this.lastMessage = '';
     this.selectedCitizen = -1;
 
     canvas.addEventListener('mousemove', (e) => this._onMove(e));
@@ -29,6 +37,20 @@ export class InputController {
     canvas.addEventListener('mouseup', () => { this._painting = false; });
     canvas.addEventListener('mouseleave', () => { this.hoverGridX = null; this.hoverGridY = null; this._painting = false; });
     window.addEventListener('keydown', (e) => this._onKey(e));
+  }
+
+  setTool(tool) {
+    this.tool = tool;
+  }
+
+  togglePause() {
+    const w = this.getWorld();
+    if (w) w.paused = !w.paused;
+  }
+
+  setSpeedIndex(i) {
+    this.speedIndex = Math.max(0, Math.min(this.SPEEDS.length - 1, i));
+    this.onSpeedChange?.(this.SPEEDS[this.speedIndex]);
   }
 
   _onMove(e) {
@@ -64,19 +86,18 @@ export class InputController {
       return;
     }
 
-    if (world.grid.wallThingId[world.grid.index(x, y)] !== 0) { this.lastMessage = 'occupied'; return; }
+    if (world.grid.wallThingId[world.grid.index(x, y)] !== 0) { this.onToast?.('Already occupied'); return; }
     for (const s of world.structures) {
-      if (!s.destroyed && Math.floor(s.x) === x && Math.floor(s.y) === y) { this.lastMessage = 'occupied'; return; }
+      if (!s.destroyed && Math.floor(s.x) === x && Math.floor(s.y) === y) { this.onToast?.('Already occupied'); return; }
     }
 
-    if (!canAfford(world, this.tool)) { this.lastMessage = 'not enough scrap'; return; }
+    if (!canAfford(world, this.tool)) { this.onToast?.('Not enough scrap'); return; }
     spend(world, this.tool);
     if (this.tool === 'wall') {
       world.grid.setWall(x, y, 1);
     } else {
       world.build(this.tool, x + 0.5, y + 0.5);
     }
-    this.lastMessage = '';
   }
 
   _pickCitizen(world) {
@@ -90,15 +111,9 @@ export class InputController {
   }
 
   _onKey(e) {
-    if (e.key in TOOL_KEYS) { this.tool = TOOL_KEYS[e.key]; return; }
-    if (e.key === ' ') { e.preventDefault(); const w = this.getWorld(); if (w) w.paused = !w.paused; return; }
-    if (e.key === '+' || e.key === '=') { this.speedIndex = Math.min(this.SPEEDS.length - 1, this.speedIndex + 1); this.onSpeedChange?.(this.SPEEDS[this.speedIndex]); return; }
-    if (e.key === '-') { this.speedIndex = Math.max(0, this.speedIndex - 1); this.onSpeedChange?.(this.SPEEDS[this.speedIndex]); return; }
-  }
-
-  paletteText() {
-    const lines = ['[1]Wall $' + BUILD_COST.wall, '[2]Turret $' + BUILD_COST.turret, '[3]Fence $' + BUILD_COST.fence,
-      '[4]Trap $' + BUILD_COST.trap, '[5]FoodZone', '[6]BedZone', '[7]RecZone', '[0]Select'];
-    return lines.map(l => this.tool && l.includes(`[${Object.keys(TOOL_KEYS).find(k => TOOL_KEYS[k] === this.tool)}]`) ? `*${l}*` : l).join('  ');
+    if (e.key in TOOL_KEYS) { this.setTool(TOOL_KEYS[e.key]); return; }
+    if (e.key === ' ') { e.preventDefault(); this.togglePause(); return; }
+    if (e.key === '+' || e.key === '=') { this.setSpeedIndex(this.speedIndex + 1); return; }
+    if (e.key === '-') { this.setSpeedIndex(this.speedIndex - 1); return; }
   }
 }

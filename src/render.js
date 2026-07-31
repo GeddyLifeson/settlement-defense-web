@@ -26,8 +26,14 @@ export class Renderer {
   }
 
   resize() {
-    this.canvas.width = window.innerWidth;
-    this.canvas.height = window.innerHeight;
+    // window.innerWidth/Height can briefly report 0 before layout settles in some embedding
+    // contexts; falling back to a sane default avoids getting stuck with a 0x0 canvas forever
+    // (nothing else would ever retry since main.js only calls this on the 'resize' event).
+    const w = window.innerWidth || 1280;
+    const h = window.innerHeight || 720;
+    if (this.canvas.width === w && this.canvas.height === h) return;
+    this.canvas.width = w;
+    this.canvas.height = h;
   }
 
   frameOnContent(world) {
