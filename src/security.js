@@ -59,3 +59,41 @@ export function deriveAlertLevel(attackerAliveCount) {
   if (attackerAliveCount === 0) return AlertLevel.Calm;
   return AlertLevel.Combat;
 }
+
+const DOG_RANGE = 2.5; const DOG_DAMAGE = 0.08; const DOG_COOLDOWN = 3; const DOG_SPEED = 0.07;
+
+// K9 units: each dog follows its handler loosely and bites the nearest attacker in range,
+// fast and cheap per-hit compared to a guard's sidearm -- matches the GDD's non-carceral
+// civil-protection-force framing ("guards/snipers/K9/CCTV", never inmates).
+export function tickDogs(dogs, citizens, roster, attackers, onScrap) {
+  for (const dog of dogs) {
+    const ownerIdx = findCitizenIndexById(citizens, dog.ownerId);
+    if (ownerIdx < 0 || !citizens.isAliveAt(ownerIdx)) continue;
+
+    const dx = citizens.x[ownerIdx] - dog.x;
+    const dy = citizens.y[ownerIdx] - dog.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist > 1.2) {
+      dog.x += (dx / dist) * DOG_SPEED;
+      dog.y += (dy / dist) * DOG_SPEED;
+    }
+
+    if (dog.cooldown > 0) { dog.cooldown--; continue; }
+    let bestI = -1, bestDist = DOG_RANGE;
+    for (let i = 0; i < attackers.count; i++) {
+      if (!attackers.isAliveAt(i)) continue;
+      const d = Math.hypot(attackers.x[i] - dog.x, attackers.y[i] - dog.y);
+      if (d < bestDist) { bestDist = d; bestI = i; }
+    }
+    if (bestI >= 0) {
+      attackers.health[bestI] -= DOG_DAMAGE;
+      dog.cooldown = DOG_COOLDOWN;
+      if (attackers.health[bestI] <= 0) { attackers.alive[bestI] = 0; onScrap?.(4); }
+    }
+  }
+}
+
+function findCitizenIndexById(citizens, id) {
+  for (let i = 0; i < citizens.count; i++) if (citizens.id[i] === id) return i;
+  return -1;
+}

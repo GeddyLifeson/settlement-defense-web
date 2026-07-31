@@ -1,5 +1,6 @@
 // Ported/condensed from SD.Sim (CitizenStore, NeedsDecaySystem, NeedsMoodBreakTickGroup,
 // SocialInteractionSystem). Struct-of-arrays store, same shape as the C# CitizenStore.
+import { randomTrait } from './traits.js';
 
 export const CitizenFlags = Object.freeze({
   None: 0,
@@ -34,10 +35,11 @@ export class CitizenStore {
     this.skillCombat = new Float32Array(capacity);
     this.skillConstruction = new Float32Array(capacity);
     this._staffCooldown = new Float32Array(capacity); // used by siege.js tickStaffCombat
+    this.trait = new Array(capacity).fill(null);
     this._nextId = 1;
   }
 
-  spawn(name, x, y) {
+  spawn(name, x, y, rng = Math.random) {
     if (this.count >= this.capacity) return -1;
     const i = this.count++;
     const id = this._nextId++;
@@ -48,6 +50,7 @@ export class CitizenStore {
     this.hunger[i] = 1; this.rest[i] = 1; this.social[i] = 1; this.mood[i] = 1; this.health[i] = 1;
     this.flags[i] = CitizenFlags.None;
     this.alive[i] = 1;
+    this.trait[i] = randomTrait(rng);
     return i;
   }
 
@@ -63,9 +66,10 @@ export function tickNeedsAndMood(store, isStaffAt, rng) {
     if (!store.isAliveAt(i)) continue;
 
     const staffFulfillment = isStaffAt(i) ? ON_DUTY_SOCIAL_FULFILLMENT : 0;
+    const trait = store.trait[i];
 
-    store.hunger[i] = Math.max(0, store.hunger[i] - HUNGER_DECAY);
-    store.rest[i] = Math.max(0, store.rest[i] - REST_DECAY);
+    store.hunger[i] = Math.max(0, store.hunger[i] - HUNGER_DECAY * (trait?.hungerMult ?? 1));
+    store.rest[i] = Math.max(0, store.rest[i] - REST_DECAY * (trait?.restMult ?? 1));
     store.social[i] = Math.max(0, store.social[i] - SOCIAL_DECAY * (1 - staffFulfillment));
 
     const avgNeed = (store.hunger[i] + store.rest[i] + store.social[i]) / 3;

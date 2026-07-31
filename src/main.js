@@ -69,7 +69,7 @@ function frame() {
   if (sel >= 0 && sel < world.citizens.count && world.citizens.isAliveAt(sel)) {
     const c = world.citizens;
     const role = world.roster.isStaff(c.id[sel]) ? world.roster.kindOf(c.id[sel]) : 'Citizen';
-    selectedInfo = `\n${c.name[sel]} (${role}) | HP ${(c.health[sel] * 100).toFixed(0)}% | ` +
+    selectedInfo = `\n${c.name[sel]} (${role}) [${c.trait[sel]?.name ?? '?'}] | HP ${(c.health[sel] * 100).toFixed(0)}% | ` +
       `Hunger ${(c.hunger[sel] * 100).toFixed(0)}% Rest ${(c.rest[sel] * 100).toFixed(0)}% ` +
       `Social ${(c.social[sel] * 100).toFixed(0)}% Mood ${(c.mood[sel] * 100).toFixed(0)}% | ` +
       `CombatSkill ${c.skillCombat[sel].toFixed(2)}`;

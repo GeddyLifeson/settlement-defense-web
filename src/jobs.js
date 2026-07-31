@@ -57,8 +57,9 @@ export function tickJobs(store, zones, staffOnDuty) {
           : state === JobState.SeekingBed ? JobState.Sleeping
           : JobState.Recreating;
       } else {
-        store.x[i] += (dx / dist) * JOB_SPEED;
-        store.y[i] += (dy / dist) * JOB_SPEED;
+        const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1);
+        store.x[i] += (dx / dist) * speed;
+        store.y[i] += (dy / dist) * speed;
       }
       continue;
     }
@@ -76,7 +77,7 @@ export function tickJobs(store, zones, staffOnDuty) {
     }
 
     if (state === JobState.Recreating) {
-      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE);
+      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * (store.trait[i]?.socialGainMult ?? 1));
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }

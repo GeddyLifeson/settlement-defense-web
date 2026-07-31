@@ -73,6 +73,7 @@ export class Renderer {
     this._drawZones(world);
     this._drawStructures(world);
     this._drawCitizens(world);
+    this._drawDogs(world);
     this._drawAttackers(world);
     if (input) {
       this._drawCursor(world, input);
@@ -182,6 +183,21 @@ export class Renderer {
       const role = world.roster.isStaff(id) ? world.roster.kindOf(id) : StaffRoleKind.None;
       const color = ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None];
       this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], 0.7, color, '#e8c9a0', world.citizens.health[i]);
+    }
+  }
+
+  _drawDogs(world) {
+    const ctx = this.ctx;
+    for (const dog of world.dogs || []) {
+      const [sx, sy] = this.worldToScreen(dog.x, dog.y);
+      const s = CELL * this.zoom * 0.4;
+      ctx.fillStyle = '#7a5230';
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, s * 0.32, s * 0.2, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.beginPath();
+      ctx.arc(sx + s * 0.28, sy - s * 0.05, s * 0.14, 0, Math.PI * 2);
+      ctx.fill();
     }
   }
 

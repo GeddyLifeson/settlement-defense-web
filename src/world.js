@@ -3,7 +3,7 @@
 import { makeRng, AggressionPreset, StaffRoleKind } from './core.js';
 import { SettlementGrid } from './grid.js';
 import { CitizenStore, tickNeedsAndMood, tickWander, CitizenFlags } from './citizens.js';
-import { StaffRoster, tickStaffDuty } from './security.js';
+import { StaffRoster, tickStaffDuty, tickDogs } from './security.js';
 import {
   AttackerStore, Structure, WaveSpawner, tickAttackers, tickTurrets,
   tickAttackerVsCitizens, tickStaffCombat,
@@ -12,6 +12,7 @@ import { ZoneGrid, ZoneKind } from './zones.js';
 import { tickJobs, isOnJob } from './jobs.js';
 import { RelationshipWeb } from './relationships.js';
 import { directWaveSpawner } from './director.js';
+import { TRAITS } from './traits.js';
 
 const STARTER_NAMES = [
   'Marlon', 'Aisling', 'Niamh', 'Reeli', 'Cascade', 'Orrery', 'Motoko',
@@ -47,15 +48,20 @@ export class SimWorld {
     for (let n = 0; n < count; n++) {
       const x = 15 + (n % 8) * 2;
       const y = 15 + Math.floor(n / 8) * 2;
-      const idx = this.citizens.spawn(STARTER_NAMES[n], x, y);
+      const idx = this.citizens.spawn(STARTER_NAMES[n], x, y, this.rng);
       this._citizenIds.push(this.citizens.id[idx]);
     }
 
+    this.dogs = [];
     if (count > 3) {
       this.roster.assign(this._citizenIds[0], StaffRoleKind.Sniper, { x: 13, y: 20 });
       this.roster.assign(this._citizenIds[1], StaffRoleKind.Sniper, { x: 29, y: 20 });
       this.roster.assign(this._citizenIds[2], StaffRoleKind.Guard, { x: 21, y: 13 });
       this.roster.assign(this._citizenIds[3], StaffRoleKind.Guard, { x: 21, y: 27 });
+    }
+    if (count > 4) {
+      this.roster.assign(this._citizenIds[4], StaffRoleKind.K9Handler, { x: 21, y: 20 });
+      this.dogs.push({ ownerId: this._citizenIds[4], x: 21, y: 20, cooldown: 0 });
     }
 
     for (const [tx, ty] of [[13, 20], [29, 20], [21, 13], [21, 27]]) {
@@ -85,6 +91,7 @@ export class SimWorld {
     tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i));
     tickStaffDuty(this.citizens, this.roster, (i) => this.idOf(i));
     tickWander(this.citizens, this.grid, this.rng, 0.04, (i) => this.isStaffAt(i) || isOnJob(this.citizens, i));
+    tickDogs(this.dogs, this.citizens, this.roster, this.attackers, (amt) => this.addScrap(amt));
     this.relationships.tick(this.citizens, (i) => this.citizens.name[i], this.currentTick);
 
     directWaveSpawner(this);
@@ -127,12 +134,14 @@ export class SimWorld {
         alive: Array.from(this.citizens.alive.slice(0, this.citizens.count)),
         flags: Array.from(this.citizens.flags.slice(0, this.citizens.count)),
         skillCombat: Array.from(this.citizens.skillCombat.slice(0, this.citizens.count)),
+        trait: this.citizens.trait.slice(0, this.citizens.count).map(t => t?.name ?? null),
       },
       roster: Array.from(this.roster._roleById.entries()).map(([id, kind]) => ({
         id, kind, post: this.roster._postById.get(id) || null,
       })),
       structures: this.structures.map(s => ({ kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed })),
       zones: Array.from(this.zones.kind),
+      dogs: this.dogs.map(d => ({ ownerId: d.ownerId, x: d.x, y: d.y })),
     };
   }
 
@@ -154,11 +163,13 @@ export class SimWorld {
       w.citizens.mood[i] = c.mood[i]; w.citizens.health[i] = c.health[i]; w.citizens.alive[i] = c.alive[i];
       w.citizens.flags[i] = c.flags ? c.flags[i] : 0;
       w.citizens.skillCombat[i] = c.skillCombat ? c.skillCombat[i] : 0;
+      w.citizens.trait[i] = c.trait && c.trait[i] ? TRAITS.find(t => t.name === c.trait[i]) : null;
     }
     w.roster = new (Object.getPrototypeOf(w.roster).constructor)();
     for (const r of json.roster) w.roster.assign(r.id, r.kind, r.post);
     w.structures = json.structures.map(s => Object.assign(new Structure(s.kind, s.x, s.y), s));
     if (json.zones) w.zones.kind.set(json.zones);
+    if (json.dogs) w.dogs = json.dogs.map(d => ({ ...d, cooldown: 0 }));
     return w;
   }
 }

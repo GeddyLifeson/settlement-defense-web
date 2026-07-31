@@ -170,7 +170,8 @@ export function tickAttackerVsCitizens(attackers, citizens) {
     for (let c = 0; c < citizens.count; c++) {
       if (!citizens.isAliveAt(c)) continue;
       if (Math.hypot(attackers.x[i] - citizens.x[c], attackers.y[i] - citizens.y[c]) > ATTACKER_CONTACT_RANGE) continue;
-      citizens.health[c] -= ATTACKER_CITIZEN_DAMAGE;
+      const healthMult = citizens.trait[c]?.healthMult ?? 1;
+      citizens.health[c] -= ATTACKER_CITIZEN_DAMAGE / healthMult;
       if (citizens.health[c] <= 0) {
         citizens.flags[c] |= CitizenFlags.Dead;
         citizens.alive[c] = 0;
