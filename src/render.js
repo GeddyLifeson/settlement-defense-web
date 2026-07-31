@@ -1,15 +1,24 @@
 // Procedural renderer -- draws every sprite with Canvas 2D shape primitives instead of AI-
-// generated images, per the "generate assets in-house" decision (no external art pipeline).
+// generated images. Visual language borrows from RimWorld/Prison Architect: flat top-down
+// grid, a visible floor grid, outlined silhouettes so units read clearly against the ground,
+// and zone/room tints rather than photographic texture.
 import { StaffRoleKind, TerrainKind } from './core.js';
 import { ZONE_COLOR, ZoneKind } from './zones.js';
 
 const CELL = 24; // px per grid cell at zoom 1
+const OUTLINE = 'rgba(20,16,12,0.75)';
 
 const ROLE_COLOR = {
   [StaffRoleKind.Guard]: '#f2c026',
   [StaffRoleKind.Sniper]: '#bf59d9',
   [StaffRoleKind.K9Handler]: '#f2c026',
-  [StaffRoleKind.None]: '#d9d9de',
+  [StaffRoleKind.None]: '#d3cdbf',
+};
+
+const ZONE_BORDER = {
+  [ZoneKind.Bedroom]: '#5a6fb0',
+  [ZoneKind.Food]: '#c98a2e',
+  [ZoneKind.Recreation]: '#4a9e5f',
 };
 
 // Deterministic per-cell noise so the ground doesn't need an image asset to avoid looking flat.
@@ -102,6 +111,9 @@ export class Renderer {
     ctx.stroke();
   }
 
+  // Rooms/zones read as painted floor material (Prison Architect's zone-tint-with-border
+  // look) rather than a flat translucent wash -- a visible border is what actually reads as
+  // "this is a designated area" at a glance, the fill alone didn't.
   _drawZones(world) {
     const ctx = this.ctx;
     const size = CELL * this.zoom;
@@ -112,6 +124,17 @@ export class Renderer {
         const [px, py] = this.worldToScreen(x, y);
         ctx.fillStyle = ZONE_COLOR[kind];
         ctx.fillRect(px, py, size + 1, size + 1);
+
+        // Border only on edges touching a non-matching cell, so a solid zone reads as one
+        // outlined region instead of a grid of individually-outlined squares.
+        ctx.strokeStyle = ZONE_BORDER[kind];
+        ctx.lineWidth = Math.max(1, size * 0.05);
+        ctx.beginPath();
+        if (world.zones.get(x, y - 1) !== kind) { ctx.moveTo(px, py); ctx.lineTo(px + size, py); }
+        if (world.zones.get(x, y + 1) !== kind) { ctx.moveTo(px, py + size); ctx.lineTo(px + size, py + size); }
+        if (world.zones.get(x - 1, y) !== kind) { ctx.moveTo(px, py); ctx.lineTo(px, py + size); }
+        if (world.zones.get(x + 1, y) !== kind) { ctx.moveTo(px + size, py); ctx.lineTo(px + size, py + size); }
+        ctx.stroke();
       }
     }
   }
@@ -141,13 +164,13 @@ export class Renderer {
         const kind = world.grid.terrain[idx];
         const hasWall = world.grid.wallThingId[idx] !== 0;
         const n = cellNoise(gx, gy);
-        let base = [0.55, 0.42, 0.28]; // dirt brown, matches the GDD's scavenged-settlement palette
-        if (kind === TerrainKind.Soil) base = [0.42, 0.32, 0.20];
-        else if (kind === TerrainKind.Rock) base = [0.5, 0.5, 0.52];
+        let base = [0.5, 0.4, 0.28]; // dirt brown, matches the GDD's scavenged-settlement palette
+        if (kind === TerrainKind.Soil) base = [0.4, 0.31, 0.20];
+        else if (kind === TerrainKind.Rock) base = [0.47, 0.47, 0.49];
         else if (kind === TerrainKind.Water) base = [0.18, 0.35, 0.55];
-        if (hasWall) base = [0.17, 0.16, 0.19];
+        if (hasWall) base = [0.15, 0.14, 0.16];
 
-        const shade = 0.85 + n * 0.3;
+        const shade = 0.88 + n * 0.24;
         const r = Math.round(base[0] * 255 * shade);
         const g = Math.round(base[1] * 255 * shade);
         const b = Math.round(base[2] * 255 * shade);
@@ -156,27 +179,59 @@ export class Renderer {
         ctx.fillRect(px, py, size + 1, size + 1);
       }
     }
+
+    // Faint grid lines -- the single biggest thing missing for a Prison-Architect-ish read;
+    // a flat noise texture with no grid doesn't feel like a designable floor plan.
+    if (size > 6) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.12)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (let gx = startCol; gx <= endCol; gx++) {
+        const px = Math.round(x0 + gx * size) + 0.5;
+        ctx.moveTo(px, y0 + startRow * size);
+        ctx.lineTo(px, y0 + endRow * size);
+      }
+      for (let gy = startRow; gy <= endRow; gy++) {
+        const py = Math.round(y0 + gy * size) + 0.5;
+        ctx.moveTo(x0 + startCol * size, py);
+        ctx.lineTo(x0 + endCol * size, py);
+      }
+      ctx.stroke();
+    }
   }
 
   _drawHumanoid(x, y, scale, bodyColor, headColor, healthFrac) {
     const ctx = this.ctx;
     const [sx, sy] = this.worldToScreen(x, y);
     const s = CELL * this.zoom * scale;
-    ctx.fillStyle = 'rgba(0,0,0,0.35)';
+
+    ctx.fillStyle = 'rgba(0,0,0,0.3)';
     ctx.beginPath();
-    ctx.ellipse(sx, sy + s * 0.42, s * 0.28, s * 0.12, 0, 0, Math.PI * 2);
+    ctx.ellipse(sx, sy + s * 0.44, s * 0.3, s * 0.13, 0, 0, Math.PI * 2);
     ctx.fill();
 
+    ctx.lineWidth = Math.max(1, s * 0.06);
+    ctx.strokeStyle = OUTLINE;
+
+    // legs, drawn as two short stubs beneath the body so the silhouette doesn't read as one
+    // flat blob (Prison Architect/RimWorld units both have a visible torso/leg break)
     ctx.fillStyle = bodyColor;
-    ctx.fillRect(sx - s * 0.18, sy - s * 0.1, s * 0.36, s * 0.42);
+    ctx.beginPath(); ctx.rect(sx - s * 0.16, sy + s * 0.1, s * 0.12, s * 0.22); ctx.fill(); ctx.stroke();
+    ctx.beginPath(); ctx.rect(sx + s * 0.04, sy + s * 0.1, s * 0.12, s * 0.22); ctx.fill(); ctx.stroke();
+
+    ctx.beginPath();
+    ctx.rect(sx - s * 0.19, sy - s * 0.12, s * 0.38, s * 0.28);
+    ctx.fill();
+    ctx.stroke();
 
     ctx.fillStyle = headColor;
     ctx.beginPath();
-    ctx.arc(sx, sy - s * 0.28, s * 0.2, 0, Math.PI * 2);
+    ctx.arc(sx, sy - s * 0.3, s * 0.21, 0, Math.PI * 2);
     ctx.fill();
+    ctx.stroke();
 
     if (healthFrac !== undefined && healthFrac < 0.98) {
-      const barW = s * 0.5, barY = sy - s * 0.55;
+      const barW = s * 0.5, barY = sy - s * 0.58;
       ctx.fillStyle = 'rgba(0,0,0,0.5)';
       ctx.fillRect(sx - barW / 2, barY, barW, s * 0.08);
       ctx.fillStyle = healthFrac > 0.5 ? '#5fd15f' : healthFrac > 0.25 ? '#e0c040' : '#e05050';
@@ -199,13 +254,17 @@ export class Renderer {
     for (const dog of world.dogs || []) {
       const [sx, sy] = this.worldToScreen(dog.x, dog.y);
       const s = CELL * this.zoom * 0.4;
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.22, s * 0.34, s * 0.1, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.lineWidth = Math.max(1, s * 0.08);
+      ctx.strokeStyle = OUTLINE;
       ctx.fillStyle = '#7a5230';
       ctx.beginPath();
       ctx.ellipse(sx, sy, s * 0.32, s * 0.2, 0, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fill(); ctx.stroke();
       ctx.beginPath();
       ctx.arc(sx + s * 0.28, sy - s * 0.05, s * 0.14, 0, Math.PI * 2);
-      ctx.fill();
+      ctx.fill(); ctx.stroke();
     }
   }
 
@@ -223,6 +282,13 @@ export class Renderer {
       const [sx, sy] = this.worldToScreen(s.x, s.y);
       const size = CELL * this.zoom * 0.85;
 
+      if (s.kind !== 'fence') {
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.beginPath();
+        ctx.ellipse(sx, sy + size * 0.4, size * 0.35, size * 0.12, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
       ctx.save();
       if (s.underConstruction) ctx.globalAlpha = 0.4 + 0.3 * (s.buildProgress || 0);
       this._drawStructureShape(ctx, s, sx, sy, size);
@@ -239,9 +305,13 @@ export class Renderer {
   }
 
   _drawStructureShape(ctx, s, sx, sy, size) {
+    ctx.lineWidth = Math.max(1, size * 0.05);
+    ctx.strokeStyle = OUTLINE;
+
     if (s.kind === 'wall') {
-      ctx.fillStyle = '#3a3630';
+      ctx.fillStyle = '#413c34';
       ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+      ctx.strokeRect(sx - size / 2, sy - size / 2, size, size);
       return;
     }
     if (s.kind === 'fence') {
@@ -258,11 +328,13 @@ export class Renderer {
       ctx.beginPath();
       ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2);
       ctx.fill();
+      ctx.stroke();
       return;
     }
     if (s.kind === 'bed') {
       ctx.fillStyle = '#5a6fb0';
       ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
       ctx.fillStyle = '#8898cc';
       ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.18);
       return;
@@ -270,16 +342,19 @@ export class Renderer {
     if (s.kind === 'table') {
       ctx.fillStyle = '#a87d4a';
       ctx.fillRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
       return;
     }
     if (s.kind === 'door') {
       ctx.fillStyle = '#7a5a30';
       ctx.fillRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
+      ctx.strokeRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
       return;
     }
     if (s.kind === 'generator') {
       ctx.fillStyle = '#4a4a52';
       ctx.fillRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
+      ctx.strokeRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
       ctx.fillStyle = '#e0a336';
       ctx.beginPath();
       ctx.arc(sx, sy, size * 0.18, 0, Math.PI * 2);
@@ -289,6 +364,7 @@ export class Renderer {
     // turret (default)
     ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
     ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+    ctx.strokeRect(sx - size / 2, sy - size / 2, size, size);
     if (!s.destroyed) {
       ctx.fillStyle = '#2b2b2b';
       ctx.fillRect(sx - size * 0.08, sy - size * 0.6, size * 0.16, size * 0.4);
@@ -301,6 +377,8 @@ export class Renderer {
       if (n.depleted) continue;
       const [sx, sy] = this.worldToScreen(n.x, n.y);
       const s = CELL * this.zoom * (0.35 + 0.35 * (n.amount / n.maxAmount));
+      ctx.lineWidth = Math.max(1, s * 0.06);
+      ctx.strokeStyle = OUTLINE;
       ctx.fillStyle = '#8a8060';
       ctx.beginPath();
       ctx.moveTo(sx - s * 0.5, sy + s * 0.3);
@@ -309,6 +387,7 @@ export class Renderer {
       ctx.lineTo(sx + s * 0.5, sy + s * 0.35);
       ctx.closePath();
       ctx.fill();
+      ctx.stroke();
       ctx.fillStyle = '#b5aa80';
       ctx.fillRect(sx - s * 0.1, sy - s * 0.15, s * 0.18, s * 0.18);
     }
@@ -319,8 +398,13 @@ export class Renderer {
     for (const v of world.vehicles || []) {
       const [sx, sy] = this.worldToScreen(v.x, v.y);
       const s = CELL * this.zoom * 0.75;
+      ctx.fillStyle = 'rgba(0,0,0,0.3)';
+      ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.4, s * 0.55, s * 0.14, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.lineWidth = Math.max(1, s * 0.06);
+      ctx.strokeStyle = OUTLINE;
       ctx.fillStyle = v.kind === 'recycling' ? '#3d7a4a' : '#7a6a3d';
       ctx.fillRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
+      ctx.strokeRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
       ctx.fillStyle = '#222';
       ctx.beginPath(); ctx.arc(sx - s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
       ctx.beginPath(); ctx.arc(sx + s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
