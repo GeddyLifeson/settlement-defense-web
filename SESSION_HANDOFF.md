@@ -218,6 +218,63 @@ still gets the long survival time. If confirmed, the fix is almost certainly in
    (the "settlements giving each other resources" part of the ask). UI: a topbar button or `M`
    key opens a full-screen map overlay in the same DOM-panel style as the rest of the UI.
 
+## REAL SVG ART PASS (this session, solo foundation + 4 parallel subagents): DONE
+
+User asked to make the game look better -- clarified this means real hand-authored SVG art
+(not AI-generated images, that constraint is unchanged; not procedural-shape polish either,
+an actual art pipeline), while keeping the double-click-index.html-no-server design point
+intact. New file `src/assets.js`: SVG templates as inline JS template-literal strings (NOT
+separate `.svg` files -- a `fetch()` for an external file hits the exact `file://` CORS wall
+that already broke ES modules earlier in this project), loaded via `data:` URI, recolored per
+palette via `{{PLACEHOLDER}}` substitution, cached forever per distinct color combination.
+`getSprite`/`drawSprite` is the public API; every call site has a primitive-shape fallback for
+the few frames before a brand-new color combo's sprite finishes decoding.
+
+**Solo foundation pass** (done directly, not via subagent -- unified art direction across the
+most-repeated sprite benefits from one hand, unlike the systemic/mechanical work): humanoids
+(citizens + all 4 attacker archetypes share one `_drawHumanoid` function, so converting it once
+upgraded both) and dogs/wild animals. Hybrid split, deliberate: the torso+head silhouette (real
+curves, gradient shading, per-unit hair color) is SVG; legs stay Canvas-drawn since they're the
+part that animates every frame via a new phase-driven walk-bob (deterministic off
+`world.currentTick` + a per-unit seed, pausable/replayable like everything else in this sim).
+
+**4 parallel subagents, then**, converting every remaining structure/vehicle category (~24
+kinds) -- this was the highest same-file-collision-risk wave of the whole session (all 4 agents
+editing `render.js`'s `_drawStructureShape` and `assets.js`'s `TEMPLATES` object simultaneously):
+- Defense: wall, trap, turret, tesla, floodlight, armory, watchtower (fence correctly left as an
+  improved primitive -- it renders as a repeating line segment across a tile, not a centered
+  icon, so it doesn't fit `drawSprite`'s model, same reasoning as wire/pipe below)
+- Power/utility: all 5 generator variants, pump (wire/pipe also correctly left as improved
+  primitives, same repeating-line-segment reasoning as fence)
+- Economy + vehicles: garages, recycling center, waste storage, trucks (fuel-type stripe baked
+  directly into the SVG via a `{{STRIPE}}` placeholder), resource nodes (ore deposit, scales
+  with remaining `amount` exactly as before)
+- Furniture + security: bed, table, door, camera, monitor_station
+
+Every existing state-dependent visual (destroyed/underConstruction dimming, the overload-warning
+pulse ring, wind's sited-vs-crowded tint, solar's open-sky-vs-enclosed tint, the monitor
+station's staffed/unstaffed/destroyed 3-way color, camera's destroyed lens tint) was preserved
+by computing the same color the old primitive code branched on and passing it into `drawSprite`'s
+`vars` instead of losing the logic -- verified for every one of these, not assumed.
+
+**Verification note**: the furniture/security agent got locked out of the shared browser pane by
+contention from the other 3 concurrent agents and couldn't self-verify the monitor_station's
+3-state color logic or camera's destroyed tint. Verified in this integration pass instead via a
+differential-pixel-sum technique (render each state, sum all pixel values in a sample region
+around the sprite, confirm the sums differ) rather than guessing a single pixel's exact
+coordinates against the new SVG geometry -- monitor_station's three states produced measurably
+different sums (312904/312052/310985), camera's normal-vs-destroyed differed (218105/217313),
+confirming the state logic genuinely reaches the rendered pixels.
+
+**Also verified in this integration pass**: zero duplicate top-level declarations across the
+rebuilt bundle (the same `grep -oE "^(async function|function) [A-Za-z0-9_]+" game.bundle.js |
+sort | uniq -d` sweep from the previous collision-bug discovery, re-run given 4 agents editing
+`assets.js`'s single `TEMPLATES` object concurrently was real risk) -- clean, and no duplicate
+template keys either. Full rebuild, zero console errors, 85/85 automated tests still passing
+(render-layer-only change, no simulation logic touched), and a real in-game screenshot of all
+22 convertible structure kinds placed together confirmed every one renders as a distinct,
+legible silhouette with no broken/missing sprites.
+
 ## REMAINING-GAPS WAVE (this session, via 7 more parallel subagents): DONE
 
 User asked "what else are we missing" a third time; the honest answer by this point was mostly

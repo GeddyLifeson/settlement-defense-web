@@ -757,281 +757,410 @@ export class Renderer {
     }
 
     if (s.kind === 'wall') {
-      ctx.fillStyle = '#413c34';
-      ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
-      ctx.strokeRect(sx - size / 2, sy - size / 2, size, size);
+      const fill = '#413c34';
+      const drew = drawSprite(ctx, 'wall', { FILL: fill, FILL_HI: shade(fill, 0.25), OUTLINE }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+        ctx.strokeRect(sx - size / 2, sy - size / 2, size, size);
+      }
       return;
     }
     if (s.kind === 'fence') {
-      ctx.strokeStyle = s.destroyed ? 'rgba(80,60,40,0.4)' : '#a8825a';
+      // Left as an improved Canvas primitive, not an SVG sprite: fence renders as a continuous
+      // line segment across the tile (not a centered icon), which doesn't fit drawSprite's
+      // centered-silhouette model. Rounded caps + small post knobs are the "improvement" here.
+      const fenceColor = s.destroyed ? 'rgba(80,60,40,0.4)' : '#a8825a';
+      ctx.strokeStyle = fenceColor;
       ctx.lineWidth = Math.max(2, size * 0.12);
+      ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(sx - size / 2, sy);
       ctx.lineTo(sx + size / 2, sy);
       ctx.stroke();
+      ctx.fillStyle = fenceColor;
+      ctx.beginPath(); ctx.arc(sx, sy, size * 0.09, 0, Math.PI * 2); ctx.fill();
       return;
     }
     if (s.kind === 'trap') {
-      ctx.fillStyle = 'rgba(140,20,20,0.55)';
-      ctx.beginPath();
-      ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
+      const drew = drawSprite(ctx, 'trap',
+        { FILL: 'rgba(140,20,20,0.55)', FILL_HI: 'rgba(190,40,30,0.55)', TEETH: 'rgba(230,200,180,0.7)', OUTLINE },
+        sx, sy, size * 0.75);
+      if (!drew) {
+        ctx.fillStyle = 'rgba(140,20,20,0.55)';
+        ctx.beginPath();
+        ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+      }
       return;
     }
     if (s.kind === 'bed') {
-      ctx.fillStyle = '#5a6fb0';
-      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
-      ctx.strokeRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
-      ctx.fillStyle = '#8898cc';
-      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.18);
+      const frame = '#5a6fb0';
+      const drew = drawSprite(ctx, 'bed',
+        { FRAME: frame, FRAME_HI: shade(frame, 0.2), PILLOW: '#8898cc', OUTLINE }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = frame;
+        ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
+        ctx.strokeRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
+        ctx.fillStyle = '#8898cc';
+        ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.18);
+      }
       return;
     }
     if (s.kind === 'table') {
-      ctx.fillStyle = '#a87d4a';
-      ctx.fillRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
-      ctx.strokeRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
+      const fill = '#a87d4a';
+      const drew = drawSprite(ctx, 'table', { FILL: fill, FILL_HI: shade(fill, 0.2), OUTLINE }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
+        ctx.strokeRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
+      }
       return;
     }
     if (s.kind === 'door') {
-      ctx.fillStyle = '#7a5a30';
-      ctx.fillRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
-      ctx.strokeRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
+      const panel = '#7a5a30';
+      const drew = drawSprite(ctx, 'door', {
+        FRAME: shade(panel, -0.3), PANEL: panel, PANEL_HI: shade(panel, 0.2), HANDLE: '#d9c58a', OUTLINE,
+      }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = panel;
+        ctx.fillRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
+        ctx.strokeRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
+      }
       return;
     }
     if (s.kind === 'garage_recycling' || s.kind === 'garage_garbage') {
-      ctx.fillStyle = s.kind === 'garage_recycling' ? '#3a5a3f' : '#5a5030';
-      ctx.fillRect(sx - size * 0.45, sy - size * 0.4, size * 0.9, size * 0.8);
-      ctx.strokeRect(sx - size * 0.45, sy - size * 0.4, size * 0.9, size * 0.8);
-      ctx.fillStyle = '#1a1a1a';
-      ctx.fillRect(sx - size * 0.3, sy - size * 0.1, size * 0.6, size * 0.42); // garage door opening
+      const fill = s.kind === 'garage_recycling' ? '#3a5a3f' : '#5a5030';
+      const drew = drawSprite(ctx, 'garage',
+        { FILL: fill, FILL_HI: shade(fill, 0.25), DOOR: '#1a1a1a', OUTLINE }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(sx - size * 0.45, sy - size * 0.4, size * 0.9, size * 0.8);
+        ctx.strokeRect(sx - size * 0.45, sy - size * 0.4, size * 0.9, size * 0.8);
+        ctx.fillStyle = '#1a1a1a';
+        ctx.fillRect(sx - size * 0.3, sy - size * 0.1, size * 0.6, size * 0.42); // garage door opening
+      }
       return;
     }
     if (s.kind === 'watchtower') {
-      ctx.fillStyle = '#5a4a3a';
-      ctx.fillRect(sx - size * 0.15, sy - size * 0.1, size * 0.3, size * 0.55); // support post
-      ctx.fillStyle = '#8c949e';
-      ctx.fillRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35); // watch platform
-      ctx.strokeRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35);
+      const drew = drawSprite(ctx, 'watchtower',
+        { POST: '#5a4a3a', PLATFORM: '#8c949e', OUTLINE }, sx, sy - size * 0.15, size * 1.15);
+      if (!drew) {
+        ctx.fillStyle = '#5a4a3a';
+        ctx.fillRect(sx - size * 0.15, sy - size * 0.1, size * 0.3, size * 0.55); // support post
+        ctx.fillStyle = '#8c949e';
+        ctx.fillRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35); // watch platform
+        ctx.strokeRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35);
+      }
       return;
     }
     if (s.kind === 'camera') {
       // Cheap CCTV camera: a mounting post + a small angled lens housing with a "lit lens" dot,
       // deliberately smaller/plainer than the watchtower platform (cheaper, shorter-range).
-      ctx.fillStyle = '#4a4a4a';
-      ctx.fillRect(sx - size * 0.06, sy - size * 0.05, size * 0.12, size * 0.4); // mounting post
-      ctx.save();
-      ctx.translate(sx, sy - size * 0.32);
-      ctx.rotate(-0.4);
-      ctx.fillStyle = '#2b2b2b';
-      ctx.fillRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
-      ctx.strokeRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
-      ctx.fillStyle = s.destroyed ? '#5a1a1a' : '#59a6d9';
-      ctx.beginPath();
-      ctx.arc(size * 0.22, -size * 0.02, size * 0.07, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.restore();
+      const lens = s.destroyed ? '#5a1a1a' : '#59a6d9';
+      const drew = drawSprite(ctx, 'camera',
+        { POST: '#4a4a4a', HOUSING: '#2b2b2b', LENS: lens, OUTLINE }, sx, sy - size * 0.1, size * 1.1);
+      if (!drew) {
+        ctx.fillStyle = '#4a4a4a';
+        ctx.fillRect(sx - size * 0.06, sy - size * 0.05, size * 0.12, size * 0.4); // mounting post
+        ctx.save();
+        ctx.translate(sx, sy - size * 0.32);
+        ctx.rotate(-0.4);
+        ctx.fillStyle = '#2b2b2b';
+        ctx.fillRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
+        ctx.strokeRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
+        ctx.fillStyle = lens;
+        ctx.beginPath();
+        ctx.arc(size * 0.22, -size * 0.02, size * 0.07, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
       return;
     }
     if (s.kind === 'monitor_station') {
       // A desk with a bank of CCTV screens -- staffed/unstaffed reads via screen brightness so
       // the "manned monitor bonus" is visible on the map, not just in the milestone log.
-      ctx.fillStyle = '#5a4630';
-      ctx.fillRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4); // desk
-      ctx.strokeRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4);
-      ctx.fillStyle = '#2b2b2b';
-      ctx.fillRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4); // monitor bank
-      ctx.strokeRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4);
-      ctx.fillStyle = s.destroyed ? '#3a3a3a' : (s._staffed ? '#7ad9a0' : '#3a5a6a');
-      ctx.fillRect(sx - size * 0.34, sy - size * 0.42, size * 0.3, size * 0.28);
-      ctx.fillRect(sx + size * 0.04, sy - size * 0.42, size * 0.3, size * 0.28);
+      const desk = '#5a4630';
+      const screen = s.destroyed ? '#3a3a3a' : (s._staffed ? '#7ad9a0' : '#3a5a6a');
+      const drew = drawSprite(ctx, 'monitor_station',
+        { DESK: desk, DESK_HI: shade(desk, 0.2), BANK: '#2b2b2b', SCREEN: screen, OUTLINE }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = desk;
+        ctx.fillRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4); // desk
+        ctx.strokeRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4);
+        ctx.fillStyle = '#2b2b2b';
+        ctx.fillRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4); // monitor bank
+        ctx.strokeRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4);
+        ctx.fillStyle = screen;
+        ctx.fillRect(sx - size * 0.34, sy - size * 0.42, size * 0.3, size * 0.28);
+        ctx.fillRect(sx + size * 0.04, sy - size * 0.42, size * 0.3, size * 0.28);
+      }
       return;
     }
     if (s.kind === 'wire') {
-      // Thin conduit run rather than a box (same visual logic as 'fence'), drawn as a cross so
-      // a chain of them reads as continuous cable in any direction. Lit amber only when the
-      // segment is actually carrying power back to a generator; dead segments stay dull grey.
+      // Left as an improved Canvas primitive, not an SVG sprite: a wire tile renders as a
+      // repeating conduit run across the tile (a cross so a chain reads as continuous cable in
+      // any direction), not a centered icon -- that doesn't fit drawSprite's centered-silhouette
+      // model (see 'fence' above for the same reasoning). Lit amber only when the segment is
+      // actually carrying power back to a generator; dead segments stay dull grey.
       const live = !s.destroyed && !s.underConstruction && isTileEnergized(this._structuresForPower || [], s.x, s.y);
       ctx.strokeStyle = live ? '#e0a336' : 'rgba(110,105,95,0.75)';
       ctx.lineWidth = Math.max(1.5, size * 0.1);
+      ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(sx - size / 2, sy); ctx.lineTo(sx + size / 2, sy);
       ctx.moveTo(sx, sy - size / 2); ctx.lineTo(sx, sy + size / 2);
       ctx.stroke();
       ctx.fillStyle = live ? '#f5cf80' : '#57534b';
-      ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       return;
     }
     if (s.kind === 'pipe') {
-      // Water's answer to 'wire' above -- same thin cross-conduit shape so a chain reads as one
+      // Water's answer to 'wire' above -- same "repeating conduit, not a centered icon" reasoning
+      // for staying an improved primitive, same thin cross-conduit shape so a chain reads as one
       // continuous run, but blue-tinted instead of wire's amber so the two grids never get
       // visually confused when they're laid side by side. Lit only when actually carrying water
       // back to a pump; dead segments stay a dull blue-grey.
       const flowing = !s.destroyed && !s.underConstruction && isTileWatered(this._structuresForPower || [], s.x, s.y);
       ctx.strokeStyle = flowing ? '#3ea0d9' : 'rgba(90,105,115,0.75)';
       ctx.lineWidth = Math.max(1.5, size * 0.1);
+      ctx.lineCap = 'round';
       ctx.beginPath();
       ctx.moveTo(sx - size / 2, sy); ctx.lineTo(sx + size / 2, sy);
       ctx.moveTo(sx, sy - size / 2); ctx.lineTo(sx, sy + size / 2);
       ctx.stroke();
       ctx.fillStyle = flowing ? '#9adcf5' : '#5f6d72';
-      ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill();
+      ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
       return;
     }
     if (s.kind === 'pump') {
-      // Small well/tower silhouette -- a squat cylindrical drum with a raised spout, distinct
-      // from the generator's boxy housing so the two source buildings don't read as siblings.
+      // Small well/tower silhouette (SVG art, see assets.js's 'pump' template) -- a squat
+      // cylindrical drum with a raised spout, distinct from the generator family's boxy housing
+      // so the two source buildings don't read as siblings. Falls back to the old primitive
+      // drum+band+spout while a new color combo's sprite is still decoding.
       const running = !s.destroyed && !s.underConstruction;
-      ctx.fillStyle = running ? '#2e5266' : 'rgba(46,60,68,0.6)';
-      ctx.beginPath();
-      ctx.ellipse(sx, sy, size * 0.36, size * 0.4, 0, 0, Math.PI * 2);
-      ctx.fill(); ctx.stroke();
-      ctx.fillStyle = running ? '#3ea0d9' : '#5a6a70'; // water-level band
-      ctx.beginPath();
-      ctx.ellipse(sx, sy + size * 0.08, size * 0.28, size * 0.16, 0, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.fillStyle = running ? '#8c949e' : 'rgba(120,120,120,0.6)';
-      ctx.fillRect(sx - size * 0.06, sy - size * 0.5, size * 0.12, size * 0.24); // spout
+      const drum = running ? '#2e5266' : '#3a4750';
+      const drew = drawSprite(ctx, 'pump', {
+        DRUM: drum, DRUM_HI: shade(drum, 0.3),
+        WATER: running ? '#3ea0d9' : '#5a6a70',
+        SPOUT: running ? '#8c949e' : '#787878', OUTLINE,
+      }, sx, sy, size * 1.05, 0, running ? 1 : 0.75);
+      if (!drew) {
+        ctx.fillStyle = running ? '#2e5266' : 'rgba(46,60,68,0.6)';
+        ctx.beginPath();
+        ctx.ellipse(sx, sy, size * 0.36, size * 0.4, 0, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+        ctx.fillStyle = running ? '#3ea0d9' : '#5a6a70'; // water-level band
+        ctx.beginPath();
+        ctx.ellipse(sx, sy + size * 0.08, size * 0.28, size * 0.16, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = running ? '#8c949e' : 'rgba(120,120,120,0.6)';
+        ctx.fillRect(sx - size * 0.06, sy - size * 0.5, size * 0.12, size * 0.24); // spout
+      }
       return;
     }
     if (s.kind === 'generator') {
+      // Boxy industrial housing + core light (SVG art, see assets.js's 'generator' template) --
+      // the "default" power source silhouette the other generator_* variants below deliberately
+      // read as heavier/lighter/differently-shaped than.
       const running = !s.destroyed && !s.underConstruction;
-      ctx.fillStyle = running ? '#4a4a52' : 'rgba(60,60,64,0.6)';
-      ctx.fillRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
-      ctx.strokeRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
-      ctx.fillStyle = running ? '#e0a336' : '#6a6250'; // core light goes dark when it isn't running
-      ctx.beginPath();
-      ctx.arc(sx, sy, size * 0.18, 0, Math.PI * 2);
-      ctx.fill();
+      const housing = running ? '#4a4a52' : '#3c3c40';
+      const core = running ? '#e0a336' : '#6a6250'; // core light goes dark when it isn't running
+      const drew = drawSprite(ctx, 'generator', {
+        HOUSING: housing, HOUSING_HI: shade(housing, 0.25), HOUSING_SHADOW: shade(housing, -0.3),
+        CORE: core, CORE_HI: shade(core, running ? 0.4 : 0.1), OUTLINE,
+      }, sx, sy, size, 0, running ? 1 : 0.75);
+      if (!drew) {
+        ctx.fillStyle = running ? '#4a4a52' : 'rgba(60,60,64,0.6)';
+        ctx.fillRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
+        ctx.strokeRect(sx - size * 0.42, sy - size * 0.42, size * 0.84, size * 0.84);
+        ctx.fillStyle = core;
+        ctx.beginPath();
+        ctx.arc(sx, sy, size * 0.18, 0, Math.PI * 2);
+        ctx.fill();
+      }
       return;
     }
     if (s.kind === 'generator_nuclear') {
-      // Deliberately reads as heavier/more industrial than the plain generator (dark cooling-
-      // tower silhouette) with a glowing sickly-green core instead of the plain generator's warm
-      // amber -- the same green family as the hazard radius so the two visually associate.
+      // Deliberately reads as heavier/more industrial than the plain generator (dark housing,
+      // SVG art in assets.js's 'generator_nuclear' template) with a radiation-trefoil glyph
+      // glowing sickly green instead of the plain generator's warm amber -- the same green family
+      // as the hazard radius so the two visually associate.
       const running = !s.destroyed && !s.underConstruction;
-      ctx.fillStyle = running ? '#2e3230' : 'rgba(40,44,42,0.6)';
-      ctx.fillRect(sx - size * 0.46, sy - size * 0.46, size * 0.92, size * 0.92);
-      ctx.strokeRect(sx - size * 0.46, sy - size * 0.46, size * 0.92, size * 0.92);
-      // trefoil-ish radiation glyph: three wedges around a hot core
-      ctx.fillStyle = running ? '#161816' : '#3a3e3c';
-      ctx.beginPath(); ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2); ctx.fill();
-      ctx.fillStyle = running ? '#c8e63c' : '#5a6650';
-      for (let k = 0; k < 3; k++) {
-        const a = (k / 3) * Math.PI * 2 - Math.PI / 2;
-        ctx.beginPath();
-        ctx.moveTo(sx, sy);
-        ctx.arc(sx, sy, size * 0.26, a - 0.35, a + 0.35);
-        ctx.closePath();
-        ctx.fill();
+      const housing = running ? '#2e3230' : '#282c2a';
+      const core = running ? '#c8e63c' : '#5a6650';
+      const drew = drawSprite(ctx, 'generator_nuclear', {
+        HOUSING: housing, HOUSING_HI: shade(housing, 0.2),
+        WELL: running ? '#161816' : '#3a3e3c',
+        CORE: core, CORE_HI: running ? '#e8ffb0' : '#7a8570', OUTLINE,
+      }, sx, sy, size, 0, running ? 1 : 0.75);
+      if (!drew) {
+        ctx.fillStyle = running ? '#2e3230' : 'rgba(40,44,42,0.6)';
+        ctx.fillRect(sx - size * 0.46, sy - size * 0.46, size * 0.92, size * 0.92);
+        ctx.strokeRect(sx - size * 0.46, sy - size * 0.46, size * 0.92, size * 0.92);
+        // trefoil-ish radiation glyph: three wedges around a hot core
+        ctx.fillStyle = running ? '#161816' : '#3a3e3c';
+        ctx.beginPath(); ctx.arc(sx, sy, size * 0.3, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = core;
+        for (let k = 0; k < 3; k++) {
+          const a = (k / 3) * Math.PI * 2 - Math.PI / 2;
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.arc(sx, sy, size * 0.26, a - 0.35, a + 0.35);
+          ctx.closePath();
+          ctx.fill();
+        }
+        ctx.fillStyle = running ? '#e8ffb0' : '#7a8570';
+        ctx.beginPath(); ctx.arc(sx, sy, size * 0.08, 0, Math.PI * 2); ctx.fill();
       }
-      ctx.fillStyle = running ? '#e8ffb0' : '#7a8570';
-      ctx.beginPath(); ctx.arc(sx, sy, size * 0.08, 0, Math.PI * 2); ctx.fill();
       return;
     }
     if (s.kind === 'generator_coal') {
-      // "Worse plain generator": a squatter, dirtier housing than 'generator' -- a small coal pile
-      // out front and a dull red (not amber) core light so it visually reads as the cheaper, more
-      // polluting choice at a glance.
+      // "Worse plain generator": a squatter, dirtier housing than 'generator' (SVG art, see
+      // assets.js's 'generator_coal' template) with a coal-pile silhouette out front and a dull
+      // red (not amber) core light so it visually reads as the cheaper, more polluting choice at
+      // a glance.
       const running = !s.destroyed && !s.underConstruction;
-      ctx.fillStyle = running ? '#3a332c' : 'rgba(50,46,40,0.6)';
-      ctx.fillRect(sx - size * 0.4, sy - size * 0.36, size * 0.8, size * 0.72);
-      ctx.strokeRect(sx - size * 0.4, sy - size * 0.36, size * 0.8, size * 0.72);
-      ctx.fillStyle = running ? '#1a1a1a' : '#3a3a3a'; // coal pile
-      ctx.beginPath();
-      ctx.moveTo(sx - size * 0.3, sy + size * 0.36);
-      ctx.lineTo(sx - size * 0.05, sy + size * 0.12);
-      ctx.lineTo(sx + size * 0.2, sy + size * 0.36);
-      ctx.closePath();
-      ctx.fill();
-      ctx.fillStyle = running ? '#c0492e' : '#5a4a44'; // dull red core, not the plain generator's amber
-      ctx.beginPath();
-      ctx.arc(sx + size * 0.18, sy - size * 0.12, size * 0.13, 0, Math.PI * 2);
-      ctx.fill();
+      const housing = running ? '#3a332c' : '#332e28';
+      const coal = running ? '#1a1a1a' : '#3a3a3a';
+      const core = running ? '#c0492e' : '#5a4a44'; // dull red core, not the plain generator's amber
+      const drew = drawSprite(ctx, 'generator_coal', {
+        HOUSING: housing, HOUSING_HI: shade(housing, 0.2),
+        COAL: coal, COAL_HI: shade(coal, 0.25), CORE: core, OUTLINE,
+      }, sx, sy, size, 0, running ? 1 : 0.75);
+      if (!drew) {
+        ctx.fillStyle = running ? '#3a332c' : 'rgba(50,46,40,0.6)';
+        ctx.fillRect(sx - size * 0.4, sy - size * 0.36, size * 0.8, size * 0.72);
+        ctx.strokeRect(sx - size * 0.4, sy - size * 0.36, size * 0.8, size * 0.72);
+        ctx.fillStyle = coal;
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.3, sy + size * 0.36);
+        ctx.lineTo(sx - size * 0.05, sy + size * 0.12);
+        ctx.lineTo(sx + size * 0.2, sy + size * 0.36);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = core;
+        ctx.beginPath();
+        ctx.arc(sx + size * 0.18, sy - size * 0.12, size * 0.13, 0, Math.PI * 2);
+        ctx.fill();
+      }
       return;
     }
     if (s.kind === 'generator_wind') {
-      // Turbine silhouette: a slim mast + three blades. _windSited (power.js's isWindSited,
-      // recomputed live off the current structures list) tints the blades pale blue when actually
-      // acting as a power source and rust-red when crowded/badly sited, so the siting tradeoff is
-      // visible on the map, not just in a tooltip.
+      // Turbine silhouette: a slim mast + three static blades (SVG art, see assets.js's
+      // 'generator_wind' template -- a real spin was tried and read worse than a static
+      // silhouette at this sprite size). _windSited (power.js's isWindSited, recomputed live off
+      // the current structures list) tints the blades pale blue when actually acting as a power
+      // source and rust-red when crowded/badly sited, so the siting tradeoff is visible on the
+      // map, not just in a tooltip.
       const running = !s.destroyed && !s.underConstruction;
       const sited = s._windSited !== false;
-      ctx.fillStyle = running ? '#5a5a5a' : 'rgba(70,70,70,0.6)';
-      ctx.fillRect(sx - size * 0.05, sy - size * 0.05, size * 0.1, size * 0.55); // mast
-      ctx.fillStyle = running ? (sited ? '#bfe6f5' : '#c76b4a') : '#6a6a6a';
-      for (let k = 0; k < 3; k++) {
-        const a = (k / 3) * Math.PI * 2;
-        ctx.save();
-        ctx.translate(sx, sy - size * 0.28);
-        ctx.rotate(a);
-        ctx.beginPath();
-        ctx.ellipse(0, -size * 0.24, size * 0.07, size * 0.24, 0, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.restore();
+      const blade = running ? (sited ? '#bfe6f5' : '#c76b4a') : '#6a6a6a';
+      const drew = drawSprite(ctx, 'generator_wind', {
+        MAST: running ? '#5a5a5a' : '#464646', BLADE: blade,
+        HUB: running ? '#3a3a3a' : '#5a5a5a', OUTLINE,
+      }, sx, sy, size, 0, running ? 1 : 0.75);
+      if (!drew) {
+        ctx.fillStyle = running ? '#5a5a5a' : 'rgba(70,70,70,0.6)';
+        ctx.fillRect(sx - size * 0.05, sy - size * 0.05, size * 0.1, size * 0.55); // mast
+        ctx.fillStyle = blade;
+        for (let k = 0; k < 3; k++) {
+          const a = (k / 3) * Math.PI * 2;
+          ctx.save();
+          ctx.translate(sx, sy - size * 0.28);
+          ctx.rotate(a);
+          ctx.beginPath();
+          ctx.ellipse(0, -size * 0.24, size * 0.07, size * 0.24, 0, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.restore();
+        }
+        ctx.fillStyle = running ? '#3a3a3a' : '#5a5a5a';
+        ctx.beginPath(); ctx.arc(sx, sy - size * 0.28, size * 0.06, 0, Math.PI * 2); ctx.fill();
       }
-      ctx.fillStyle = running ? '#3a3a3a' : '#5a5a5a';
-      ctx.beginPath(); ctx.arc(sx, sy - size * 0.28, size * 0.06, 0, Math.PI * 2); ctx.fill();
       return;
     }
     if (s.kind === 'generator_solar') {
-      // Flat panel array in a grid pattern, tilted slightly (a parallelogram, not a square) so it
-      // reads as a solar panel rather than another generic box. Panel tint follows s._openSky
-      // (world.js's tick(), read back by power.js's isSource) the same sited/unsited color logic
-      // as the wind turbine above: bright blue when actually acting as a power source, dull grey
-      // when stuck inside an enclosed room.
+      // Flat panel array in a grid pattern, tilted slightly (SVG art, see assets.js's
+      // 'generator_solar' template -- a parallelogram, not a square, so it reads as a solar panel
+      // rather than another generic box). Panel/grid tint follows s._openSky (world.js's tick(),
+      // read back by power.js's isSource) the same sited/unsited color logic as the wind turbine
+      // above: bright blue when actually acting as a power source, dull grey when stuck inside an
+      // enclosed room.
       const running = !s.destroyed && !s.underConstruction;
       const openSky = s._openSky !== false;
-      ctx.fillStyle = running ? '#2a3038' : 'rgba(45,50,56,0.6)';
-      ctx.beginPath();
-      ctx.moveTo(sx - size * 0.45, sy + size * 0.3);
-      ctx.lineTo(sx - size * 0.2, sy - size * 0.35);
-      ctx.lineTo(sx + size * 0.45, sy - size * 0.35);
-      ctx.lineTo(sx + size * 0.2, sy + size * 0.3);
-      ctx.closePath();
-      ctx.fill(); ctx.stroke();
-      // Panel grid lines: interpolate between the bottom edge (bottomLeft -> bottomRight) and the
-      // top edge (topLeft -> topRight) so the divider lines stay parallel to the panel's tilt.
-      const blX = sx - size * 0.45, blY = sy + size * 0.3;
-      const brX = sx + size * 0.2, brY = sy + size * 0.3;
-      const tlX = sx - size * 0.2, tlY = sy - size * 0.35;
-      const trX = sx + size * 0.45, trY = sy - size * 0.35;
-      ctx.strokeStyle = running ? (openSky ? '#5aa0d9' : '#6a6e72') : 'rgba(90,95,100,0.5)';
-      ctx.lineWidth = Math.max(1, size * 0.03);
-      for (let k = 1; k < 3; k++) {
-        const t = k / 3;
+      const panel = running ? '#2a3038' : '#2d3238';
+      const grid = running ? (openSky ? '#5aa0d9' : '#6a6e72') : '#5a5f64';
+      const drew = drawSprite(ctx, 'generator_solar', {
+        PANEL: panel, PANEL_HI: shade(panel, 0.2), GRID: grid, OUTLINE,
+      }, sx, sy, size, 0, running ? 1 : 0.7);
+      if (!drew) {
+        ctx.fillStyle = running ? '#2a3038' : 'rgba(45,50,56,0.6)';
         ctx.beginPath();
-        ctx.moveTo(blX + (brX - blX) * t, blY + (brY - blY) * t);
-        ctx.lineTo(tlX + (trX - tlX) * t, tlY + (trY - tlY) * t);
-        ctx.stroke();
+        ctx.moveTo(sx - size * 0.45, sy + size * 0.3);
+        ctx.lineTo(sx - size * 0.2, sy - size * 0.35);
+        ctx.lineTo(sx + size * 0.45, sy - size * 0.35);
+        ctx.lineTo(sx + size * 0.2, sy + size * 0.3);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        // Panel grid lines: interpolate between the bottom edge (bottomLeft -> bottomRight) and the
+        // top edge (topLeft -> topRight) so the divider lines stay parallel to the panel's tilt.
+        const blX = sx - size * 0.45, blY = sy + size * 0.3;
+        const brX = sx + size * 0.2, brY = sy + size * 0.3;
+        const tlX = sx - size * 0.2, tlY = sy - size * 0.35;
+        const trX = sx + size * 0.45, trY = sy - size * 0.35;
+        ctx.strokeStyle = grid;
+        ctx.lineWidth = Math.max(1, size * 0.03);
+        for (let k = 1; k < 3; k++) {
+          const t = k / 3;
+          ctx.beginPath();
+          ctx.moveTo(blX + (brX - blX) * t, blY + (brY - blY) * t);
+          ctx.lineTo(tlX + (trX - tlX) * t, tlY + (trY - tlY) * t);
+          ctx.stroke();
+        }
       }
       return;
     }
     if (s.kind === 'waste_storage') {
-      // Squat drum cluster, hazard-striped so it reads as "the thing that fixes the green zone"
-      // at a glance, distinct from the recycling center's green triangle icon (that's a different
+      // Hazard-striped drum cluster so it reads as "the thing that fixes the green zone" at a
+      // glance, distinct from the recycling center's green arrow icon (that's a different
       // resource loop -- pollution, not nuclear waste).
-      ctx.fillStyle = s.destroyed ? 'rgba(70,64,30,0.5)' : '#4a4626';
-      ctx.fillRect(sx - size * 0.4, sy - size * 0.38, size * 0.8, size * 0.76);
-      ctx.strokeRect(sx - size * 0.4, sy - size * 0.38, size * 0.8, size * 0.76);
-      ctx.fillStyle = s.destroyed ? 'rgba(160,150,40,0.4)' : '#d9c93a';
-      for (const dx of [-0.22, 0.22]) {
-        ctx.beginPath();
-        ctx.arc(sx + size * dx, sy, size * 0.16, 0, Math.PI * 2);
-        ctx.fill();
-        ctx.stroke();
+      const fill = s.destroyed ? 'rgba(70,64,30,0.5)' : '#4a4626';
+      const cap = s.destroyed ? 'rgba(160,150,40,0.4)' : '#d9c93a';
+      const stripeDark = s.destroyed ? 'rgba(40,36,18,0.5)' : '#2b2812';
+      const drew = drawSprite(ctx, 'waste_storage', {
+        FILL: fill, FILL_HI: s.destroyed ? 'rgba(90,84,40,0.5)' : shade(fill, 0.3),
+        STRIPE_DARK: stripeDark, STRIPE_LIGHT: cap, CAP: cap, OUTLINE,
+      }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(sx - size * 0.4, sy - size * 0.38, size * 0.8, size * 0.76);
+        ctx.strokeRect(sx - size * 0.4, sy - size * 0.38, size * 0.8, size * 0.76);
+        ctx.fillStyle = cap;
+        for (const dx of [-0.22, 0.22]) {
+          ctx.beginPath();
+          ctx.arc(sx + size * dx, sy, size * 0.16, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+        }
       }
       return;
     }
     if (s.kind === 'recycling_center') {
-      ctx.fillStyle = '#2e5a4a';
-      ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
-      ctx.strokeRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
-      ctx.fillStyle = '#7ad9a0';
-      ctx.beginPath();
-      ctx.moveTo(sx, sy - size * 0.2); ctx.lineTo(sx + size * 0.16, sy); ctx.lineTo(sx, sy + size * 0.2);
-      ctx.lineTo(sx - size * 0.16, sy); ctx.closePath();
-      ctx.fill();
+      // Keeps the recognizable green chasing-arrows recycling motif, now baked into the sprite
+      // (see assets.js's 'recycling_center' template) instead of drawn as a single Canvas diamond.
+      const drew = drawSprite(ctx, 'recycling_center',
+        { FILL: '#2e5a4a', FILL_HI: shade('#2e5a4a', 0.25), ARROW: '#7ad9a0', OUTLINE }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = '#2e5a4a';
+        ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+        ctx.strokeRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+        ctx.fillStyle = '#7ad9a0';
+        ctx.beginPath();
+        ctx.moveTo(sx, sy - size * 0.2); ctx.lineTo(sx + size * 0.16, sy); ctx.lineTo(sx, sy + size * 0.2);
+        ctx.lineTo(sx - size * 0.16, sy); ctx.closePath();
+        ctx.fill();
+      }
       return;
     }
     if (s.kind === 'floodlight') {
@@ -1039,41 +1168,69 @@ export class Renderer {
         ctx.fillStyle = 'rgba(230,230,150,0.12)';
         ctx.beginPath(); ctx.arc(sx, sy, size * 1.4, 0, Math.PI * 2); ctx.fill();
       }
-      ctx.fillStyle = '#8c8060';
-      ctx.fillRect(sx - size * 0.08, sy - size * 0.1, size * 0.16, size * 0.5);
-      ctx.fillStyle = s.destroyed ? '#5a5540' : '#f2eec0';
-      ctx.beginPath(); ctx.arc(sx, sy - size * 0.22, size * 0.22, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      const lamp = s.destroyed ? '#5a5540' : '#f2eec0';
+      const drew = drawSprite(ctx, 'floodlight',
+        { POST: '#8c8060', HOUSING: '#8c8060', LAMP: lamp, OUTLINE }, sx, sy + size * 0.1, size * 1.1);
+      if (!drew) {
+        ctx.fillStyle = '#8c8060';
+        ctx.fillRect(sx - size * 0.08, sy - size * 0.1, size * 0.16, size * 0.5);
+        ctx.fillStyle = lamp;
+        ctx.beginPath(); ctx.arc(sx, sy - size * 0.22, size * 0.22, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      }
       return;
     }
     if (s.kind === 'tesla') {
-      ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#4a5a8c';
-      ctx.beginPath(); ctx.arc(sx, sy + size * 0.15, size * 0.35, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-      ctx.strokeStyle = s.destroyed ? 'rgba(120,140,220,0.3)' : '#a0c0ff';
-      ctx.lineWidth = Math.max(1, size * 0.06);
-      ctx.beginPath(); ctx.arc(sx, sy - size * 0.15, size * 0.16, 0, Math.PI * 2); ctx.stroke();
+      const base = s.destroyed ? 'rgba(60,60,60,0.6)' : '#4a5a8c';
+      const arc = s.destroyed ? 'rgba(120,140,220,0.3)' : '#a0c0ff';
+      const drew = drawSprite(ctx, 'tesla',
+        { FILL: base, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade('#4a5a8c', 0.3), ARC: arc, OUTLINE },
+        sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = base;
+        ctx.beginPath(); ctx.arc(sx, sy + size * 0.15, size * 0.35, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.strokeStyle = arc;
+        ctx.lineWidth = Math.max(1, size * 0.06);
+        ctx.beginPath(); ctx.arc(sx, sy - size * 0.15, size * 0.16, 0, Math.PI * 2); ctx.stroke();
+      }
       return;
     }
     if (s.kind === 'armory') {
-      ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#5a4a38';
-      ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
-      ctx.strokeRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : '#5a4a38';
+      const glyph = s.destroyed ? 'rgba(150,150,150,0.4)' : '#d8cba0';
       // Crossed-rifles glyph -- reads as "weapons issued here" at a glance, same idea as the
-      // recycling center's arrow icon just above.
-      ctx.strokeStyle = s.destroyed ? 'rgba(150,150,150,0.4)' : '#d8cba0';
-      ctx.lineWidth = Math.max(1, size * 0.07);
-      ctx.beginPath();
-      ctx.moveTo(sx - size * 0.2, sy - size * 0.18); ctx.lineTo(sx + size * 0.2, sy + size * 0.18);
-      ctx.moveTo(sx - size * 0.2, sy + size * 0.18); ctx.lineTo(sx + size * 0.2, sy - size * 0.18);
-      ctx.stroke();
+      // recycling center's arrow icon just above -- now baked into the sprite itself.
+      const drew = drawSprite(ctx, 'armory',
+        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade('#5a4a38', 0.25), GLYPH: glyph, OUTLINE },
+        sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+        ctx.strokeRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+        ctx.strokeStyle = glyph;
+        ctx.lineWidth = Math.max(1, size * 0.07);
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.2, sy - size * 0.18); ctx.lineTo(sx + size * 0.2, sy + size * 0.18);
+        ctx.moveTo(sx - size * 0.2, sy + size * 0.18); ctx.lineTo(sx + size * 0.2, sy - size * 0.18);
+        ctx.stroke();
+      }
       return;
     }
     // turret (default)
-    ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
-    ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
-    ctx.strokeRect(sx - size / 2, sy - size / 2, size, size);
-    if (!s.destroyed) {
-      ctx.fillStyle = '#2b2b2b';
-      ctx.fillRect(sx - size * 0.08, sy - size * 0.6, size * 0.16, size * 0.4);
+    {
+      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
+      const barrel = '#2b2b2b';
+      const drew = drawSprite(ctx, 'turret',
+        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade('#8c949e', 0.3), BARREL: s.destroyed ? fill : barrel, OUTLINE },
+        sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+        ctx.strokeRect(sx - size / 2, sy - size / 2, size, size);
+        if (!s.destroyed) {
+          ctx.fillStyle = barrel;
+          ctx.fillRect(sx - size * 0.08, sy - size * 0.6, size * 0.16, size * 0.4);
+        }
+      }
     }
   }
 
@@ -1083,19 +1240,25 @@ export class Renderer {
       if (n.depleted) continue;
       const [sx, sy] = this.worldToScreen(n.x, n.y);
       const s = CELL * this.zoom * (0.35 + 0.35 * (n.amount / n.maxAmount));
-      ctx.lineWidth = Math.max(1, s * 0.06);
-      ctx.strokeStyle = OUTLINE;
-      ctx.fillStyle = '#8a8060';
-      ctx.beginPath();
-      ctx.moveTo(sx - s * 0.5, sy + s * 0.3);
-      ctx.lineTo(sx - s * 0.15, sy - s * 0.35);
-      ctx.lineTo(sx + s * 0.2, sy - s * 0.1);
-      ctx.lineTo(sx + s * 0.5, sy + s * 0.35);
-      ctx.closePath();
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = '#b5aa80';
-      ctx.fillRect(sx - s * 0.1, sy - s * 0.15, s * 0.18, s * 0.18);
+      const fill = '#8a8060';
+      const vein = '#b5aa80';
+      const drew = drawSprite(ctx, 'ore_deposit',
+        { FILL: fill, FILL_HI: shade(fill, 0.25), VEIN: vein, OUTLINE }, sx, sy, s);
+      if (!drew) {
+        ctx.lineWidth = Math.max(1, s * 0.06);
+        ctx.strokeStyle = OUTLINE;
+        ctx.fillStyle = fill;
+        ctx.beginPath();
+        ctx.moveTo(sx - s * 0.5, sy + s * 0.3);
+        ctx.lineTo(sx - s * 0.15, sy - s * 0.35);
+        ctx.lineTo(sx + s * 0.2, sy - s * 0.1);
+        ctx.lineTo(sx + s * 0.5, sy + s * 0.35);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = vein;
+        ctx.fillRect(sx - s * 0.1, sy - s * 0.15, s * 0.18, s * 0.18);
+      }
     }
   }
 
@@ -1111,15 +1274,25 @@ export class Renderer {
       ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.4, s * 0.55, s * 0.14, 0, 0, Math.PI * 2); ctx.fill();
       ctx.lineWidth = Math.max(1, s * 0.06);
       ctx.strokeStyle = OUTLINE;
-      ctx.fillStyle = v.kind === 'recycling' ? '#3d7a4a' : '#7a6a3d';
-      ctx.fillRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
-      ctx.strokeRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
+      const bodyFill = v.kind === 'recycling' ? '#3d7a4a' : '#7a6a3d';
       // SEA:R fuel-type tradeoff (vehicles.js FUEL_TYPES): a colored fuel-tank stripe makes the
       // dirty/clean tradeoff visible at a glance without needing to inspect the truck --
       // fossil=sooty brown, gas=blue (the "best all-around" default), ethanol=green (clean but
-      // food-cost), electric=cyan (cleanest, power-hungry).
-      ctx.fillStyle = FUEL_COLOR[v.fuelType] || FUEL_COLOR.gas;
-      ctx.fillRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.12);
+      // food-cost), electric=cyan (cleanest, power-hungry). Baked into the sprite itself (see
+      // assets.js's 'truck' template STRIPE placeholder) rather than a Canvas overlay, so it
+      // still paints in the exact same spot on the cargo box regardless of the new cab silhouette.
+      const stripe = FUEL_COLOR[v.fuelType] || FUEL_COLOR.gas;
+      const drew = drawSprite(ctx, 'truck', {
+        FILL: bodyFill, FILL_HI: shade(bodyFill, 0.25), CAB: shade(bodyFill, -0.2),
+        WINDOW: '#bcd6e0', STRIPE: stripe, OUTLINE,
+      }, sx, sy, s);
+      if (!drew) {
+        ctx.fillStyle = bodyFill;
+        ctx.fillRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
+        ctx.strokeRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.64);
+        ctx.fillStyle = stripe;
+        ctx.fillRect(sx - s * 0.5, sy - s * 0.32, s, s * 0.12);
+      }
       ctx.fillStyle = '#222';
       ctx.beginPath(); ctx.arc(sx - s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
       ctx.beginPath(); ctx.arc(sx + s * 0.3, sy + s * 0.32, s * 0.14, 0, Math.PI * 2); ctx.fill();
