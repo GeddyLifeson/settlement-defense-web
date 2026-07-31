@@ -87,6 +87,139 @@ export class InputController {
     canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // right-drag is pan, not a context menu
     canvas.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
     window.addEventListener('keydown', (e) => this._onKey(e));
+
+    // ---- Touch input (strictly additive; every mouse path above is untouched) ----------------
+    // Touch is translated into the SAME internal state the mouse handlers use (_painting,
+    // _panning, marquee*) by synthesizing {clientX, clientY, button} shims and feeding them to
+    // _onDown/_onMove/_onUp -- so one-finger paint, one-finger marquee, tap-to-select and the
+    // 0.5-world-unit click-vs-drag threshold all behave identically to mouse without a second
+    // implementation. Only two-finger pan/pinch needs its own state, because there is no mouse
+    // gesture that pans and zooms simultaneously.
+    this._touchId = null;         // identifier of the single finger driving paint/marquee/tap
+    this._touchTapX = 0; this._touchTapY = 0; this._touchTapT = 0;
+    this._touchMoved = false;
+    this._pinchDist = 0;          // distance between the two fingers on the previous move
+    this._pinchMidX = 0; this._pinchMidY = 0;
+    // passive:false on all four so preventDefault() actually suppresses the browser's native
+    // scroll/pinch-zoom. These are bound to the canvas element only -- topbar/toolbar/panel DOM
+    // buttons are outside it and keep their native tap->click behaviour untouched.
+    canvas.addEventListener('touchstart', (e) => this._onTouchStart(e), { passive: false });
+    canvas.addEventListener('touchmove', (e) => this._onTouchMove(e), { passive: false });
+    canvas.addEventListener('touchend', (e) => this._onTouchEnd(e), { passive: false });
+    canvas.addEventListener('touchcancel', (e) => this._onTouchCancel(e), { passive: false });
+  }
+
+  // Mouse-event shim: the existing handlers only ever read clientX/clientY/button/preventDefault,
+  // so a Touch can stand in for a MouseEvent verbatim.
+  _touchAsMouse(t, button = 0) {
+    return { clientX: t.clientX, clientY: t.clientY, button, preventDefault() {} };
+  }
+
+  _findTouch(list, id) {
+    for (let i = 0; i < list.length; i++) if (list[i].identifier === id) return list[i];
+    return null;
+  }
+
+  // Drop whatever the single finger had armed, without committing it (used when a second finger
+  // arrives and the gesture turns out to be a pan/pinch rather than a paint or marquee).
+  _abortSingleTouch() {
+    this._touchId = null;
+    this._painting = false;
+    this.marqueeActive = false;
+  }
+
+  _beginPinch(a, b) {
+    this._pinchDist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    this._pinchMidX = (a.clientX + b.clientX) / 2;
+    this._pinchMidY = (a.clientY + b.clientY) / 2;
+    this._panning = true;
+  }
+
+  _onTouchStart(e) {
+    e.preventDefault(); // suppress native scroll/zoom/double-tap on the game canvas
+    if (e.touches.length >= 2) {
+      // Two (or more) fingers: pan + pinch. Cancel anything the first finger armed so a
+      // two-finger gesture never leaves a stray blueprint or half-drawn marquee behind.
+      if (this._touchId !== null) this._abortSingleTouch();
+      this._beginPinch(e.touches[0], e.touches[1]);
+      return;
+    }
+    if (this._touchId !== null) return; // already tracking a finger
+    const t = e.changedTouches[0];
+    if (!t) return;
+    this._touchId = t.identifier;
+    this._touchTapX = t.clientX; this._touchTapY = t.clientY;
+    this._touchTapT = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    this._touchMoved = false;
+    const shim = this._touchAsMouse(t, 0);
+    // Seed the hover cell from THIS touch before dispatching. _onDown's build branch calls
+    // _place() straight away and _place() reads hoverGridX/Y, which with a mouse is always fresh
+    // because a mousedown is necessarily preceded by a mousemove over the canvas. A finger has no
+    // such preamble, so without this the first tile of a touch-drag would be placed at whatever
+    // the last mouse position happened to be (or nowhere at all on a touch-only device).
+    this._updateHover(shim);
+    // Left-button-down semantics: with a tool this starts painting and places immediately; with
+    // the Select tool this runs _pickCitizen (so a tap already selects) and arms the marquee.
+    this._onDown(shim);
+  }
+
+  _onTouchMove(e) {
+    e.preventDefault();
+    if (this._panning && e.touches.length >= 2) {
+      const a = e.touches[0], b = e.touches[1];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      const midX = (a.clientX + b.clientX) / 2, midY = (a.clientY + b.clientY) / 2;
+      // Pan by the midpoint delta -- same call the right/middle-drag pan uses.
+      this.renderer.panByScreenDelta(midX - this._pinchMidX, midY - this._pinchMidY, this.getWorld());
+      // Pinch: change in finger separation since the last move is the zoom factor, anchored at
+      // the midpoint in canvas-local coordinates -- same call the wheel handler uses.
+      if (this._pinchDist > 0 && dist > 0) {
+        const factor = dist / this._pinchDist;
+        if (Math.abs(factor - 1) > 0.002) {
+          const rect = this.canvas.getBoundingClientRect();
+          this.renderer.zoomAt(midX - rect.left, midY - rect.top, factor, this.getWorld());
+        }
+      }
+      this._pinchDist = dist; this._pinchMidX = midX; this._pinchMidY = midY;
+      return;
+    }
+    if (this._touchId === null) return;
+    const t = this._findTouch(e.changedTouches, this._touchId);
+    if (!t) return;
+    if (Math.hypot(t.clientX - this._touchTapX, t.clientY - this._touchTapY) > 8) this._touchMoved = true;
+    this._onMove(this._touchAsMouse(t, 0));
+  }
+
+  _onTouchEnd(e) {
+    e.preventDefault();
+    if (this._panning) {
+      // Keep panning only while two fingers remain down; otherwise end the gesture. A finger
+      // left over after a pinch does NOT fall through into paint/marquee -- that would drop
+      // buildings the player never asked for.
+      if (e.touches.length >= 2) { this._beginPinch(e.touches[0], e.touches[1]); return; }
+      if (e.touches.length === 0) { this._panning = false; this._pinchDist = 0; }
+      return;
+    }
+    if (this._touchId === null) return;
+    const t = this._findTouch(e.changedTouches, this._touchId);
+    if (!t) return;
+    const dt = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - this._touchTapT;
+    this._touchId = null;
+    // Tap = short + no real movement. _onDown already ran _pickCitizen for the Select tool (so
+    // the selection is done), but fingers are imprecise and at high zoom a couple of stray
+    // pixels can exceed _onUp's 0.5-world-unit marquee threshold and turn a tap into a 1-citizen
+    // box-select. Disarming the marquee here keeps a tap a pure single pick.
+    if (!this._touchMoved && dt < 400) this.marqueeActive = false;
+    this._onUp(this._touchAsMouse(t, 0));
+    this.hoverGridX = null; this.hoverGridY = null; // no lingering hover ghost after lift-off
+  }
+
+  _onTouchCancel(e) {
+    if (e.cancelable) e.preventDefault();
+    this._abortSingleTouch();
+    this._panning = false;
+    this._pinchDist = 0;
+    this.hoverGridX = null; this.hoverGridY = null;
   }
 
   setTool(tool) {

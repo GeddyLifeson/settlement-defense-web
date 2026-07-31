@@ -719,6 +719,7 @@ function tickVehicles(world) {
 // everything into one classic script (import lines are stripped there, but the identifier still
 // has to resolve to something real).
 
+
 const NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const MIN_ROOM_SIZE = 2;
 const MAX_ROOM_SIZE = 400; // discourage "the whole map" from ever counting as one room
@@ -802,14 +803,106 @@ const CLEANLINESS_POLLUTION_DIVISOR = 20; // world.pollution this high alone ful
 const CLEANLINESS_NUCLEAR_DIVISOR = 10;   // world.nuclearWaste this high alone fully tanks cleanliness
 const CLEANLINESS_FIRE_PENALTY = 0.6;     // any structure actively on fire inside the room
 
+// ---------------------------------------------------------------------------------------------
+// Room roles (Prison Architect-style): an enclosed room only counts as a specific *role* -- and
+// only feeds the jobs.js room-refill bonus for the matching need -- if it's both zoned right
+// (zones.js's ZoneKind, same zone-painting system jobs.js already sends citizens to) AND
+// furnished right (siege.js's Structure kinds). A room can be enclosed with no matching zone at
+// all -- that's just generic "Unroofed Area"-style filler, same as PA's own unlabeled rooms.
+//
+// Requirement design notes (see task doc / FEATURE_RESEARCH.md for the broader room-roles ask):
+//  - Bedroom: needs a Bedroom zone AND at least 1 bed. No fixed occupancy count is enforced here
+//    -- jobs.js's zones.nearestOfKind(ZoneKind.Bedroom, ...) just walks a citizen to the nearest
+//    Bedroom-zoned tile regardless of which/how many beds are in the room, there's no per-bed
+//    reservation system to hook a capacity cap into. So "capacity" is reported for the UI
+//    (bedCount) but isn't itself a validity gate -- 1 bed is enough to validate, more beds just
+//    means more citizens can plausibly rest there at once without the mood/refill bonus lying.
+//  - Dining Room: needs a Food zone AND at least 1 table.
+//  - Recreation Room: needs a Recreation zone. No furniture requirement -- Recreation zones
+//    don't have a canonical "furniture" kind the way beds/tables do (siege.js has no rec-room
+//    Structure kind), so gating it on zone presence alone matches how jobs.js already treats it.
+const RoomRole = Object.freeze({
+  None: 'none',
+  Bedroom: 'bedroom',
+  DiningRoom: 'dining',
+  RecreationRoom: 'recreation',
+});
+
+const ROOM_ROLE_LABEL = {
+  [RoomRole.None]: 'Unroofed Area',
+  [RoomRole.Bedroom]: 'Bedroom',
+  [RoomRole.DiningRoom]: 'Dining Room',
+  [RoomRole.RecreationRoom]: 'Recreation Room',
+};
+
+const BED_MIN = 1;
+const TABLE_MIN = 1;
+
+// Which zone kind implies which candidate role, checked in this priority order when a room
+// happens to have more than one zone kind painted inside it (rare, but painting tools don't
+// stop a player from mixing zones in one enclosed space) -- Bedroom first since an unmade bed
+// is the highest-stakes miss (a citizen sleeping in the open loses the mood/refill bonus every
+// night), then Food, then Recreation.
+const ZONE_TO_ROLE = [
+  [ZoneKind.Bedroom, RoomRole.Bedroom],
+  [ZoneKind.Food, RoomRole.DiningRoom],
+  [ZoneKind.Recreation, RoomRole.RecreationRoom],
+];
+
+// Which need (jobs.js's JobState-adjacent "what is this citizen here to refill") a validated
+// role serves. Exported so jobs.js can gate ROOM_REFILL_BONUS by matching the citizen's current
+// activity to the room they're standing in, rather than "any enclosed room" as before.
+const ROLE_FOR_NEED = Object.freeze({
+  hunger: RoomRole.DiningRoom,
+  rest: RoomRole.Bedroom,
+  social: RoomRole.RecreationRoom,
+});
+
+// Counts which ZoneKind cells appear inside a room. Small map, but a room can be large -- this
+// is O(room.size), fine at the "only recompute when structures/zones change" cadence below.
+function zoneCellCounts(room, grid, zones) {
+  const counts = { [ZoneKind.Bedroom]: 0, [ZoneKind.Food]: 0, [ZoneKind.Recreation]: 0 };
+  for (const idx of room.cells) {
+    const kind = zones.kind[idx];
+    if (kind === ZoneKind.Bedroom || kind === ZoneKind.Food || kind === ZoneKind.Recreation) counts[kind]++;
+  }
+  return counts;
+}
+
+// Classifies a single room's role given its zone coverage + furniture counts (bedCount/
+// tableCount, tallied by computeRoomStats below while it's already walking structures for
+// beauty). Returns { role, roleValid, missingRequirements }.
+function classifyRoomRole(room, grid, zones, bedCount, tableCount) {
+  const zoneCounts = zoneCellCounts(room, grid, zones);
+  for (const [zoneKind, role] of ZONE_TO_ROLE) {
+    if (zoneCounts[zoneKind] === 0) continue;
+    if (role === RoomRole.Bedroom) {
+      const valid = bedCount >= BED_MIN;
+      return { role, roleValid: valid, missingRequirements: valid ? [] : ['a bed'], bedCount };
+    }
+    if (role === RoomRole.DiningRoom) {
+      const valid = tableCount >= TABLE_MIN;
+      return { role, roleValid: valid, missingRequirements: valid ? [] : ['a table'], tableCount };
+    }
+    if (role === RoomRole.RecreationRoom) {
+      return { role, roleValid: true, missingRequirements: [] };
+    }
+  }
+  return { role: RoomRole.None, roleValid: false, missingRequirements: [] };
+}
+
 // Call once per tick (world.js) with the *current* rooms/grid/structures/world state. Mutates
 // each room with .beauty (raw sum, informational), .cleanliness, .impressiveness, and the
-// combined .quality score (0..1) that citizens.js's tickNeedsAndMood reads to nudge mood.
-function computeRoomStats(rooms, grid, structures, world) {
+// combined .quality score (0..1) that citizens.js's tickNeedsAndMood reads to nudge mood. Also
+// mutates .role/.roleValid/.missingRequirements (see classifyRoomRole above) -- zones is
+// world.zones (zones.js's ZoneGrid), same grid dimensions/indexing as `grid` itself.
+function computeRoomStats(rooms, grid, structures, world, zones) {
   for (const room of rooms) {
     let beauty = 0;
     let niceCount = 0;
     let onFireInside = false;
+    let bedCount = 0;
+    let tableCount = 0;
 
     for (const s of structures) {
       if (s.destroyed || s.underConstruction) continue;
@@ -821,6 +914,8 @@ function computeRoomStats(rooms, grid, structures, world) {
       beauty += contribution;
       if (contribution > 0) niceCount++;
       if (s.onFire) onFireInside = true;
+      if (s.kind === 'bed') bedCount++;
+      if (s.kind === 'table') tableCount++;
     }
 
     const pollution = world?.pollution ?? 0;
@@ -838,6 +933,19 @@ function computeRoomStats(rooms, grid, structures, world) {
     room.cleanliness = cleanliness;
     room.impressiveness = impressiveness;
     room.quality = clamp01(0.5 + beauty * 0.05 + (impressiveness - 0.5) * 0.2) * cleanliness;
+
+    if (zones) {
+      const classified = classifyRoomRole(room, grid, zones, bedCount, tableCount);
+      room.role = classified.role;
+      room.roleValid = classified.roleValid;
+      room.missingRequirements = classified.missingRequirements;
+      room.bedCount = bedCount;
+      room.tableCount = tableCount;
+    } else {
+      room.role = RoomRole.None;
+      room.roleValid = false;
+      room.missingRequirements = [];
+    }
   }
 }
 
@@ -998,6 +1106,196 @@ function isPoweredAt(structures, x, y) {
     if (energized.has((tx + dx) * TILE_STRIDE + (ty + dy))) return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Overload risk (Prison Architect's power-grid overload mechanic). PA lets you wire too many
+// powered fixtures onto too few/weak generators; the grid strains and eventually something pops.
+// This ports the same idea onto the connected-graph model above: every generator variant
+// contributes a fixed capacity to whichever segment (connected component of wire+generator
+// tiles) it feeds, every powered consumer draws a fixed load from the segment it's fed by, and a
+// segment whose total load exceeds its capacity is "overloaded" -- consumers on it lose the
+// powered bonus (soft, always-correct, immediately visible) and, while it stays overloaded, its
+// conductor tiles carry a small per-tick chance to catch fire (rare, escalating stakes -- reuses
+// fire.js's igniteStructure/tickFire directly rather than a parallel damage system).
+//
+// Capacities are tiered the same way the real thing is: nuclear and coal are the "big steady
+// baseload" sources and get the highest capacity, the plain generator sits in the middle, and
+// wind/solar -- both already able to drop to zero output entirely on bad siting (isSource above)
+// -- carry the lowest capacity, same intermittent-renewable tradeoff as their real-world
+// counterparts, independent of their scrap cost in economy.js.
+const GENERATOR_CAPACITY = {
+  generator: 5,
+  generator_coal: 6,
+  generator_nuclear: 14,
+  generator_wind: 2.5,
+  generator_solar: 2.5,
+};
+
+// Load each powered consumer draws once it's actually receiving the powered bonus (siege.js's
+// POWERED_DAMAGE_MULT/POWERED_RANGE_MULT, world.js's watchtower warning-window boost). Tesla
+// draws more than a plain turret -- it chains to every attacker in range on every activation
+// (siege.js's TESLA_RANGE/TESLA_COOLDOWN_TICKS comment), the power-hungry crowd-control pick.
+// Anything else that ever starts consuming the powered bonus defaults to a flat 1 rather than
+// silently drawing nothing.
+const CONSUMER_LOAD = { turret: 1, tesla: 1.5, watchtower: 1 };
+const POWERED_CONSUMER_KINDS = new Set(Object.keys(CONSUMER_LOAD));
+function consumerLoad(kind) {
+  return CONSUMER_LOAD[kind] ?? 1;
+}
+
+// Rare, occasional threat, same tuning philosophy as fire.js's own ignition constants (see that
+// file's header) -- but rolled per overloaded conductor tile per tick, and deliberately higher
+// than a healthy generator's baseline spark chance (fire.js's IGNITION_CHANCE_PER_GENERATOR)
+// since overload is itself an avoidable, player-caused condition, not ambient risk.
+const OVERLOAD_FIRE_CHANCE_PER_TICK = 0.0004;
+
+function findSegmentIdForConsumer(x, y, segIdOf) {
+  const tx = Math.floor(x), ty = Math.floor(y);
+  const selfKey = tx * TILE_STRIDE + ty;
+  if (segIdOf.has(selfKey)) return segIdOf.get(selfKey);
+  for (const [dx, dy] of POWER_NEIGHBORS) {
+    const k = (tx + dx) * TILE_STRIDE + (ty + dy);
+    if (segIdOf.has(k)) return segIdOf.get(k);
+  }
+  return null;
+}
+
+// Flood-fills the same conductor graph as computeEnergized, but keeps each connected component
+// (segment) distinct instead of merging them into one big energized set, and sums the capacity
+// of every source-eligible generator each segment actually contains.
+function computeSegments(structures) {
+  const conductors = new Map(); // tileKey -> structure
+  for (const s of structures) {
+    if (!isConductor(s, structures)) continue;
+    conductors.set(powerTileKey(s.x, s.y), s);
+  }
+
+  const segIdOf = new Map(); // tileKey -> segment id
+  const segments = []; // { id, capacity, load }
+  for (const [startKey] of conductors) {
+    if (segIdOf.has(startKey)) continue;
+    const id = segments.length;
+    let capacity = 0;
+    const queue = [startKey];
+    segIdOf.set(startKey, id);
+    while (queue.length) {
+      const k = queue.pop();
+      const cs = conductors.get(k);
+      if (cs && isSource(cs, structures)) capacity += GENERATOR_CAPACITY[cs.kind] ?? 0;
+      const tx = Math.floor(k / TILE_STRIDE);
+      const ty = k - tx * TILE_STRIDE;
+      for (const [dx, dy] of POWER_NEIGHBORS) {
+        const nk = (tx + dx) * TILE_STRIDE + (ty + dy);
+        if (!conductors.has(nk) || segIdOf.has(nk)) continue;
+        segIdOf.set(nk, id);
+        queue.push(nk);
+      }
+    }
+    segments.push({ id, capacity, load: 0 });
+  }
+  return { segments, segIdOf };
+}
+
+// Same cheap-hash-gated caching pattern as energizedTiles above, folded to also change whenever
+// a powered-consumer structure (turret/tesla/watchtower) is built, finished, destroyed, or moves
+// -- since consumer load, not just the conductor layout, determines overload state.
+function overloadSignature(structures) {
+  let h = layoutSignature(structures);
+  for (const s of structures) {
+    if (!POWERED_CONSUMER_KINDS.has(s.kind) || s.destroyed || s.underConstruction) continue;
+    h = (Math.imul(h, 31) + powerTileKey(s.x, s.y) + 5) | 0;
+  }
+  return h;
+}
+
+function computeOverloadState(structures) {
+  const { segments, segIdOf } = computeSegments(structures);
+  const nuclearBuckets = new Map(); // nuclear generator tileKey -> wireless load fed to it
+  const nuclearCapacity = GENERATOR_CAPACITY.generator_nuclear;
+
+  for (const s of structures) {
+    if (!POWERED_CONSUMER_KINDS.has(s.kind) || s.destroyed || s.underConstruction) continue;
+    const load = consumerLoad(s.kind);
+
+    // Nuclear's wireless radius takes precedence, matching isPoweredAt's own precedence above --
+    // a consumer inside the radius draws from the reactor directly, not through the wire graph.
+    let nuclearGen = null;
+    for (const gen of structures) {
+      if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction) continue;
+      if (Math.hypot(gen.x - s.x, gen.y - s.y) <= NUCLEAR_WIRELESS_RADIUS) { nuclearGen = gen; break; }
+    }
+    if (nuclearGen) {
+      const key = powerTileKey(nuclearGen.x, nuclearGen.y);
+      nuclearBuckets.set(key, (nuclearBuckets.get(key) ?? 0) + load);
+      continue;
+    }
+
+    const segId = findSegmentIdForConsumer(s.x, s.y, segIdOf);
+    if (segId != null) segments[segId].load += load;
+  }
+
+  return { segments, segIdOf, nuclearBuckets, nuclearCapacity };
+}
+
+let _cachedOverloadSignature = null;
+let _cachedOverloadState = { segments: [], segIdOf: new Map(), nuclearBuckets: new Map(), nuclearCapacity: GENERATOR_CAPACITY.generator_nuclear };
+
+function overloadState(structures) {
+  const sig = overloadSignature(structures);
+  if (sig !== _cachedOverloadSignature) {
+    _cachedOverloadSignature = sig;
+    _cachedOverloadState = computeOverloadState(structures);
+  }
+  return _cachedOverloadState;
+}
+
+// True if the segment (or nuclear wireless bucket) feeding this exact conductor tile (a wire or
+// generator, not a consumer) is currently overloaded -- render.js uses this to tint the tile, and
+// world.js's fire-risk roll and overload milestone log use it to find which tiles are at risk.
+function isSegmentOverloadedAt(structures, x, y) {
+  const { segments, segIdOf, nuclearBuckets, nuclearCapacity } = overloadState(structures);
+  const key = powerTileKey(x, y);
+  const segId = segIdOf.get(key);
+  if (segId != null && segments[segId].load > segments[segId].capacity) return true;
+  const nuclearLoad = nuclearBuckets.get(key);
+  if (nuclearLoad != null && nuclearLoad > nuclearCapacity) return true;
+  return false;
+}
+
+// True if the consumer at (x, y) is powered AND the specific segment/nuclear-radius feeding it
+// isn't overloaded -- this is the gate siege.js's turret/tesla damage-and-range boost and
+// world.js's watchtower warning-window boost should check instead of plain isPoweredAt, so the
+// bonus silently stops applying (rather than the consumer losing power outright) the moment its
+// supply is overloaded.
+function hasPoweredBonus(structures, x, y) {
+  if (!isPoweredAt(structures, x, y)) return false;
+  const { segments, segIdOf, nuclearBuckets, nuclearCapacity } = overloadState(structures);
+
+  let nuclearGen = null;
+  for (const gen of structures) {
+    if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction) continue;
+    if (Math.hypot(gen.x - x, gen.y - y) <= NUCLEAR_WIRELESS_RADIUS) { nuclearGen = gen; break; }
+  }
+  if (nuclearGen) {
+    const load = nuclearBuckets.get(powerTileKey(nuclearGen.x, nuclearGen.y)) ?? 0;
+    return load <= nuclearCapacity;
+  }
+
+  const segId = findSegmentIdForConsumer(x, y, segIdOf);
+  if (segId == null) return true; // touching an energized tile with no tracked segment shouldn't happen, but fail open
+  return segments[segId].load <= segments[segId].capacity;
+}
+
+// Set of stable string keys identifying every currently-overloaded segment/nuclear-bucket, for
+// world.js's tick() to diff tick-over-tick and log a milestone only the first tick a given supply
+// actually crosses into overload (not every tick it stays there).
+function overloadedSupplyKeys(structures) {
+  const { segments, nuclearBuckets, nuclearCapacity } = overloadState(structures);
+  const keys = new Set();
+  for (const seg of segments) if (seg.load > seg.capacity) keys.add('seg:' + seg.id);
+  for (const [k, load] of nuclearBuckets) if (load > nuclearCapacity) keys.add('nuc:' + k);
+  return keys;
 }
 
 
@@ -1162,6 +1460,22 @@ class CitizenStore {
     this.backstory = new Array(capacity).fill(null); // see backstories.js -- childhood/adult flavor pair + skill nudge
     this.passionCombat = new Uint8Array(capacity); // Passion tier (backstories.js), biases skillCombat gain rate
     this.passionConstruction = new Uint8Array(capacity); // Passion tier, biases skillConstruction gain rate
+
+    // Work Priorities (RimWorld Work-tab-style, see jobs.js's WorkCategory/tickJobs). All four
+    // default to 0 (Uint8Array zero-init), but 0 in workPriority* means "disabled" while 0 in
+    // hasWorkPriorities means "no override at all" -- those are deliberately different questions,
+    // so hasWorkPriorities gates whether the workPriority* arrays are consulted. A citizen nobody
+    // has ever opened the Work Priorities panel for has hasWorkPriorities[i] === 0 and jobs.js's
+    // Idle branch runs its original fixed-order ladder for them, completely untouched. Only once
+    // a citizen has been customized (see main.js's Work Priorities panel) does hasWorkPriorities
+    // flip to 1 and these four arrays start mattering: each cell is 0 (never do this job) or a
+    // 1-3 priority tier, lower number = higher priority (RimWorld's inverted-number convention).
+    this.hasWorkPriorities = new Uint8Array(capacity);
+    this.workPriorityConstruction = new Uint8Array(capacity); // JobState SeekingBuild/Building
+    this.workPriorityHauling = new Uint8Array(capacity); // JobState SeekingVehicle/Driving
+    this.workPriorityHarvesting = new Uint8Array(capacity); // JobState SeekingScrap/Harvesting
+    this.workPriorityAnimal = new Uint8Array(capacity); // JobState SeekingAnimal/Taming
+
     this._nextId = 1;
   }
 
@@ -1184,6 +1498,15 @@ class CitizenStore {
     const passions = randomPassions(rng, backstory);
     this.passionCombat[i] = passions.combat;
     this.passionConstruction[i] = passions.construction;
+    // Equal-tier defaults so that if the Work Priorities panel ever flips hasWorkPriorities on
+    // without the player touching every cell, the untouched cells tie-break in jobs.js's fixed
+    // array order (Construction, Hauling, Harvesting, Animal) -- the same order the legacy ladder
+    // already uses, so "just enabled overrides, changed nothing yet" reads as unchanged behavior.
+    this.hasWorkPriorities[i] = 0;
+    this.workPriorityConstruction[i] = 1;
+    this.workPriorityHauling[i] = 1;
+    this.workPriorityHarvesting[i] = 1;
+    this.workPriorityAnimal[i] = 1;
     return i;
   }
 
@@ -1951,6 +2274,16 @@ const POWERED_RANGE_MULT = 1.25;
 function isPowered(structures, x, y) {
   return isPoweredAt(structures, x, y);
 }
+
+// Overload-aware gate for the powered *bonus* specifically (power.js's overload mechanic): true
+// only when this tile is powered AND the segment/nuclear-radius feeding it isn't overloaded.
+// isPowered above stays a plain connectivity check (vehicles.js's electric-garage gate reads it
+// as "is there power at all", which overload deliberately doesn't cut) -- this is strictly for
+// consumer-side bonus decisions like the turret/tesla boost below and world.js's watchtower
+// warning-window boost.
+function isPoweredBonus(structures, x, y) {
+  return hasPoweredBonus(structures, x, y);
+}
 const ATTACKER_SPEED = 0.03;
 const ATTACKER_CITIZEN_DAMAGE = 0.008;
 const ATTACKER_CONTACT_RANGE = 0.5;
@@ -2088,7 +2421,7 @@ function tickTurrets(structures, attackers, onScrap, onFire, onKill) {
     if (s.destroyed || s.underConstruction) continue;
     if (s.cooldown > 0) { s.cooldown--; continue; }
 
-    const powered = isPowered(structures, s.x, s.y);
+    const powered = isPoweredBonus(structures, s.x, s.y);
     const isTesla = s.kind === 'tesla';
     const range = (isTesla ? TESLA_RANGE : TURRET_RANGE) * (powered ? POWERED_RANGE_MULT : 1);
     const damage = (isTesla ? TESLA_DAMAGE : TURRET_DAMAGE) * (powered ? POWERED_DAMAGE_MULT : 1);
@@ -2356,6 +2689,7 @@ function isNight(timeOfDay) {
 
 
 
+
 const ROOM_REFILL_BONUS = 1.3; // RimWorld/PA-style: an actually-enclosed room works better than open ground
 // Water grid payoff (water.js): a Food or Recreation zone tile fed by a pump/pipe run refills
 // hunger/social faster, same "provisioned area works better" precedent as ROOM_REFILL_BONUS
@@ -2383,6 +2717,35 @@ const JobState = Object.freeze({
   Taming: 14,
 });
 
+// Work Priorities (RimWorld Work-tab-style, see citizens.js's hasWorkPriorities/workPriority*
+// fields and main.js's Work Priorities panel). One category per non-needs JobState pair below --
+// deliberately no categories without a corresponding behavior. Order here doubles as the
+// legacy/default fixed priority ladder's order (Construction > Hauling > Harvesting > Animal),
+// so equal-priority ties in a citizen's custom order break the same way the untouched ladder
+// already does.
+const WorkCategory = Object.freeze({
+  Construction: 0, // SeekingBuild / Building
+  Hauling: 1,       // SeekingVehicle / Driving
+  Harvesting: 2,    // SeekingScrap / Harvesting
+  Animal: 3,        // SeekingAnimal / Taming
+});
+const WORK_CATEGORY_ORDER = [
+  WorkCategory.Construction, WorkCategory.Hauling, WorkCategory.Harvesting, WorkCategory.Animal,
+];
+const WORK_CATEGORY_LABELS = {
+  [WorkCategory.Construction]: 'Construction',
+  [WorkCategory.Hauling]: 'Hauling',
+  [WorkCategory.Harvesting]: 'Harvesting',
+  [WorkCategory.Animal]: 'Animal Handling',
+};
+// Per-citizen priority field name for each category, matching citizens.js's CitizenStore fields.
+const WORK_CATEGORY_FIELD = {
+  [WorkCategory.Construction]: 'workPriorityConstruction',
+  [WorkCategory.Hauling]: 'workPriorityHauling',
+  [WorkCategory.Harvesting]: 'workPriorityHarvesting',
+  [WorkCategory.Animal]: 'workPriorityAnimal',
+};
+
 const SEEK_SOCIAL_THRESHOLD = 0.35;
 const SEEK_HUNGER_THRESHOLD = 0.45;
 const SEEK_REST_THRESHOLD = 0.4;
@@ -2409,10 +2772,69 @@ const BUILD_SKILL_GAIN = 0.02;
 const HARVEST_RATE = 3; // scrap per tick pulled from a node
 const HARVEST_SKILL_GAIN = 0.01;
 const ON_BREAK_RATE_MULT = 0.5; // low-mood citizens work/harvest/build/travel at half speed
+// Unrest (world.js's UNREST_* constants/world.unrestActive -- Prison Architect's riot
+// state-machine reframed genre-neutral, see world.js's doc comment for the trigger/resolve
+// design): a COLONY-WIDE penalty distinct from ON_BREAK_RATE_MULT above -- applies to every
+// citizen's work/build/harvest/travel rate while world.unrestActive is true, not just the
+// citizens who happen to already be individually OnBreak. Stacks multiplicatively with
+// ON_BREAK_RATE_MULT for a citizen who's both (0.5 * 0.7 = 0.35x), which is intentional --
+// unrest hits hardest on top of an already-struggling citizen. Deliberately milder than the
+// per-citizen break penalty (0.7 vs 0.5) since this is colony-wide and stacks on top of it.
+const UNREST_RATE_MULT = 0.7;
 
 function isOnJob(store, i) {
   return store.jobState[i] !== JobState.Idle;
 }
+
+// One try-to-claim helper per WorkCategory, each doing exactly what the original inline Idle-
+// branch code did for that job type (see the git history of tickJobs below) -- factored out so
+// both the legacy fixed-order ladder and a citizen's custom Work Priorities order can call the
+// same claim logic instead of drifting apart. Returns true (and mutates store/jobState/_jobRef)
+// only if a job of that category was actually available and claimed this tick.
+function tryClaimConstruction(store, i, structures, idOf) {
+  const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i));
+  if (!blueprint) return false;
+  blueprint.claimedBy = idOf(i);
+  store.jobState[i] = JobState.SeekingBuild;
+  store.targetX[i] = blueprint.x; store.targetY[i] = blueprint.y;
+  store._jobRef[i] = blueprint;
+  return true;
+}
+
+function tryClaimHauling(store, i, world) {
+  const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i]);
+  if (!vehicle) return false;
+  store.jobState[i] = JobState.SeekingVehicle;
+  store.targetX[i] = vehicle.x; store.targetY[i] = vehicle.y;
+  store._jobRef[i] = vehicle;
+  return true;
+}
+
+function tryClaimHarvesting(store, i, resourceNodes) {
+  const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
+  if (!node) return false;
+  store.jobState[i] = JobState.SeekingScrap;
+  store.targetX[i] = node.x; store.targetY[i] = node.y;
+  store._jobRef[i] = node;
+  return true;
+}
+
+function tryClaimAnimal(store, i, world, idOf) {
+  const animal = findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i]);
+  if (!animal) return false;
+  animal.claimedBy = idOf(i);
+  store.jobState[i] = JobState.SeekingAnimal;
+  store.targetX[i] = animal.x; store.targetY[i] = animal.y;
+  store._jobRef[i] = animal;
+  return true;
+}
+
+const WORK_CATEGORY_CLAIM = {
+  [WorkCategory.Construction]: (store, i, structures, resourceNodes, world, idOf) => tryClaimConstruction(store, i, structures, idOf),
+  [WorkCategory.Hauling]: (store, i, structures, resourceNodes, world, idOf) => tryClaimHauling(store, i, world),
+  [WorkCategory.Harvesting]: (store, i, structures, resourceNodes, world, idOf) => tryClaimHarvesting(store, i, resourceNodes),
+  [WorkCategory.Animal]: (store, i, structures, resourceNodes, world, idOf) => tryClaimAnimal(store, i, world, idOf),
+};
 
 function findNearestBlueprint(structures, x, y, excludeClaimedBy) {
   let best = null, bestDist = Infinity;
@@ -2512,6 +2934,24 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
         if (rec) { store.jobState[i] = JobState.SeekingRec; store.targetX[i] = rec.x; store.targetY[i] = rec.y; continue; }
       }
 
+      // Work Priorities override (RimWorld Work-tab-style, see citizens.js's hasWorkPriorities/
+      // workPriority* fields and main.js's Work Priorities panel). Only a citizen the player has
+      // actually opened that panel for takes this branch; everyone else falls through to the
+      // original fixed ladder below completely untouched. Enabled categories (priority > 0) are
+      // tried in ascending priority-number order (lower = higher priority, ties broken by
+      // WORK_CATEGORY_ORDER, which is the same order the legacy ladder below uses), and a
+      // category set to 0 is skipped entirely -- that citizen will never claim that kind of job,
+      // even if it's the only thing available.
+      if (store.hasWorkPriorities[i]) {
+        const order = WORK_CATEGORY_ORDER
+          .filter(cat => store[WORK_CATEGORY_FIELD[cat]][i] > 0)
+          .sort((a, b) => store[WORK_CATEGORY_FIELD[a]][i] - store[WORK_CATEGORY_FIELD[b]][i]);
+        for (const cat of order) {
+          if (WORK_CATEGORY_CLAIM[cat](store, i, structures, resourceNodes, world, idOf)) break;
+        }
+        continue;
+      }
+
       const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i));
       if (blueprint) {
         blueprint.claimedBy = idOf(i);
@@ -2594,7 +3034,8 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
           : state === JobState.SeekingBuild ? JobState.Building
           : JobState.Harvesting;
       } else {
-        const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1) * (store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1);
+        const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1) * (store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1)
+          * (world?.unrestActive ? UNREST_RATE_MULT : 1);
         store.x[i] += (dx / dist) * speed;
         store.y[i] += (dy / dist) * speed;
       }
@@ -2602,7 +3043,12 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
     }
 
     if (state === JobState.Eating) {
-      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      const eatRoom = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      // Room-role gate (rooms.js's computeRoomStats/classifyRoomRole): the enclosed-room bonus
+      // only applies to a room actually validated as a Dining Room (Food zone + >=1 table) --
+      // an enclosed space with a Food zone but no table (or no room at all) still refills at the
+      // baseline rate, same as open ground, rather than getting the bonus for four walls alone.
+      const roomBonus = (eatRoom && eatRoom.role === RoomRole.DiningRoom && eatRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
       const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
       // Ethanol-fuel trucks (vehicles.js FUEL_TYPES.ethanol) brew clean fuel out of the
       // settlement's food surplus -- there's no bulk food-stockpile resource in this codebase
@@ -2615,14 +3061,21 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
     }
 
     if (state === JobState.Sleeping) {
-      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      const sleepRoom = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      // Same role gate as Eating above: only a validated Bedroom (Bedroom zone + >=1 bed) gets
+      // the enclosed-room refill bonus -- four walls around an empty Bedroom zone is not a bed.
+      const roomBonus = (sleepRoom && sleepRoom.role === RoomRole.Bedroom && sleepRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
       store.rest[i] = Math.min(1, store.rest[i] + REFILL_RATE * roomBonus);
       if (store.rest[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
 
     if (state === JobState.Recreating) {
-      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      const recRoom = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      // Same role gate as Eating/Sleeping above: Recreation Room only requires the zone (see
+      // classifyRoomRole's doc comment -- no furniture kind exists for it), so this mostly just
+      // excludes an enclosed room with no Recreation zone at all from getting the bonus.
+      const roomBonus = (recRoom && recRoom.role === RoomRole.RecreationRoom && recRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
       const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
       store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * waterBonus * (store.trait[i]?.socialGainMult ?? 1));
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
@@ -2632,7 +3085,7 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
     if (state === JobState.Building) {
       const bp = store._jobRef?.[i];
       if (!bp || bp.destroyed || !bp.underConstruction) { store.jobState[i] = JobState.Idle; continue; }
-      const buildRateMult = store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1;
+      const buildRateMult = (store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1) * (world?.unrestActive ? UNREST_RATE_MULT : 1);
       bp.buildProgress = Math.min(1, (bp.buildProgress || 0) + BUILD_RATE * (1 + store.skillConstruction[i]) * buildRateMult);
       if (bp.buildProgress >= 1) {
         bp.underConstruction = false;
@@ -2646,7 +3099,7 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
     if (state === JobState.Harvesting) {
       const node = store._jobRef?.[i];
       if (!node || node.depleted) { store.jobState[i] = JobState.Idle; continue; }
-      const harvestRateMult = store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1;
+      const harvestRateMult = (store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1) * (world?.unrestActive ? UNREST_RATE_MULT : 1);
       const take = Math.min(HARVEST_RATE * harvestRateMult, node.amount);
       node.amount -= take;
       onScrapGain?.(take);
@@ -2687,6 +3140,15 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
         // same as the starting dog in world.js's constructor.
         world.dogs.push({ ownerId: null, x: animal.x, y: animal.y, cooldown: 0 });
         store.jobState[i] = JobState.Idle;
+        // No milestone existed for a successful taming before this -- worth logging like every
+        // other "something notable just happened" event (refugee arrivals, region control, etc.
+        // in world.js/worldmap.js), and it's the natural event-driven hook point for
+        // metaprogress.js's Beast Tamer achievement rather than polling world.dogs every tick.
+        if (world?.milestoneLog) {
+          world.milestoneLog.push({ tick: world.currentTick, text: `${store.name[i]} tames a wild animal` });
+          if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+        }
+        checkTameAchievement();
         continue;
       }
       if (animal.tameTicks >= TAME_MAX_TICKS) {
@@ -2883,6 +3345,9 @@ function tickWorldMap(world) {
       r.owned = true;
       world.milestoneLog.push({ tick: world.currentTick, text: `${r.name} is fully under your control` });
       if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+      // metaprogress.js's Conquest achievements -- checked right here, the instant a region flips
+      // to owned, rather than polled from tick().
+      checkConquestAchievements(wm);
     }
   } else {
     r.control = 100;
@@ -3525,9 +3990,242 @@ function playCitizenDowned() {
 }
 
 
+// ---- metaprogress.js ----
+// Cross-run meta-progression -- lifetime stats and achievements that survive every restart,
+// game-over, and "Quit to Title", independent of any single settlement's save data.
+//
+// This is deliberately a FOURTH, independent localStorage key (META_KEY below), alongside
+// main.js's SAVE_KEY / AUTOSAVE_KEY / SLOTS_KEY -- same reasoning as those three not sharing a
+// key with each other (see main.js's header comments on each): wiping or overwriting a save must
+// never touch lifetime totals, and finishing/losing a run must never touch save data. It is also
+// independent of world.js's `world.finance` (a per-run budget ledger) and grading.js's live
+// per-run Safety/Wellbeing/Sustainability/Cohesion score -- both of those die with the SimWorld on
+// game-over/restart/quit-to-title; everything in this file is the opposite, it's what's left AFTER
+// the SimWorld is gone.
+//
+// Two kinds of state:
+//  - LIFETIME STATS: running totals that only ever grow, across every settlement ever played on
+//    this browser (gamesPlayed, longestSurvivalTicks/Waves, mostCitizensAlive, lifetime kills,
+//    lifetime scrap earned, the set of generator kinds ever built).
+//  - ACHIEVEMENTS: a fixed list (see ACHIEVEMENTS below), each unlocked at most once and never
+//    re-locked. `checked against real numbers in the game as of this writing -- see the doc
+//    comment on each achievement below for where its threshold comes from (research.js's node
+//    count, worldmap.js's region count, the five generator_* structure kinds, CitizenStore's
+//    capacity).
+//
+// Hook points are event-driven, not polled every tick -- each check function below is called from
+// an already-existing event/milestone site (world.js's wave-complete and game-over blocks,
+// worldmap.js's region-owned flip, main.js's successful tryResearch(), jobs.js's taming
+// completion, and main.js's onBuildComplete structure-finished hook), never from inside
+// SimWorld.tick()'s main body itself.
+
+const META_KEY = 'settlement-defense-meta';
+
+// Five generator variants a colony can build (see research.js's 'scrap_power'/'alternative_power'/
+// 'fission' nodes for where each unlocks) -- the full set as of this writing.
+const GENERATOR_KINDS = ['generator', 'generator_coal', 'generator_wind', 'generator_solar', 'generator_nuclear'];
+
+/** @type {{id:string,name:string,desc:string}[]} */
+const ACHIEVEMENTS = [
+  {
+    id: 'survive_10k', name: 'Iron Grip',
+    desc: 'Survive 10,000 ticks (~1000s at 1x speed) in a single settlement.',
+  },
+  {
+    id: 'wave_20', name: 'Weathered the Storm',
+    desc: 'Reach Wave 20 in a single settlement.',
+  },
+  {
+    id: 'full_research', name: 'Master Engineers',
+    // research.js's RESEARCH_NODES is 14 entries as of this writing (3 free "core" nodes shown
+    // for legibility + 11 gated ones) -- "fully researched" means every one of them, not just the
+    // gated tier, so the panel can legitimately say 100%.
+    desc: 'Unlock every technology in the research tree.',
+  },
+  {
+    id: 'conquest_3', name: 'Warlord',
+    // worldmap.js's WorldMap is a fixed 4x4 = 16-region grid; 3 owned is an early-mid-campaign
+    // milestone, not the whole map.
+    desc: 'Control 3 regions on the Conquest Map.',
+  },
+  {
+    id: 'conquest_all', name: 'One Wasteland, Under You',
+    desc: 'Control all 16 regions on the Conquest Map.',
+  },
+  {
+    id: 'tame_animal', name: 'Beast Tamer',
+    desc: 'Successfully tame a wild animal.',
+  },
+  {
+    id: 'all_generators', name: 'Power Broker',
+    desc: 'Build every generator variant at least once, across any settlement (plain, coal, wind, solar, nuclear).',
+  },
+  {
+    id: 'pop_30', name: 'Boomtown',
+    desc: 'Have 30 citizens alive in one settlement at the same time.',
+  },
+  {
+    id: 'games_10', name: 'Seasoned Settler',
+    desc: 'Play 10 settlements to their end (game over or a fresh restart both count).',
+  },
+  {
+    id: 'kills_100', name: 'Perimeter Held',
+    desc: 'Kill 100 attackers, total, across every settlement.',
+  },
+  {
+    id: 'scrap_5000', name: 'Scrap Baron',
+    desc: 'Earn 5,000 scrap, total, across every settlement.',
+  },
+];
+const ACHIEVEMENTS_BY_ID = Object.fromEntries(ACHIEVEMENTS.map(a => [a.id, a]));
+
+function defaultMeta() {
+  return {
+    gamesPlayed: 0,
+    longestSurvivalTicks: 0,
+    longestSurvivalWaves: 0,
+    mostCitizensAlive: 0,
+    totalAttackersKilled: 0,
+    totalScrapEarned: 0,
+    builtGeneratorKinds: [], // lifetime set of GENERATOR_KINDS ever completed, any settlement
+    achievements: {},        // id -> unix ms timestamp of unlock, absent/false = locked
+  };
+}
+
+let meta = null;
+// Set by main.js so an unlock can surface as a toast; left null so this module never assumes a
+// UI exists (e.g. under a future headless/test harness).
+let onUnlock = null;
+
+function setAchievementUnlockedCallback(fn) { onUnlock = fn; }
+
+function _loadMeta() {
+  if (meta) return meta;
+  try {
+    const raw = localStorage.getItem(META_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    meta = { ...defaultMeta(), ...(parsed || {}) };
+    meta.achievements = { ...(parsed && parsed.achievements) };
+    meta.builtGeneratorKinds = Array.isArray(parsed && parsed.builtGeneratorKinds) ? parsed.builtGeneratorKinds : [];
+  } catch (err) {
+    console.error('[MetaProgress] Lifetime stats corrupt, resetting:', err);
+    meta = defaultMeta();
+  }
+  return meta;
+}
+
+function _persistMeta() {
+  try {
+    localStorage.setItem(META_KEY, JSON.stringify(meta));
+  } catch (err) {
+    console.error('[MetaProgress] Failed to write lifetime stats (storage full?):', err);
+  }
+}
+
+/** Read-only snapshot for the Statistics/Achievements panel. Always the live object -- callers
+ *  must not mutate it directly, everything here goes through the functions below. */
+function getMeta() { return _loadMeta(); }
+
+function isAchievementUnlocked(id) { return !!_loadMeta().achievements[id]; }
+
+function _unlockAchievement(id) {
+  const m = _loadMeta();
+  if (m.achievements[id]) return false; // never re-locked, never double-fires the toast
+  if (!ACHIEVEMENTS_BY_ID[id]) return false;
+  m.achievements[id] = Date.now();
+  _persistMeta();
+  onUnlock?.(ACHIEVEMENTS_BY_ID[id]);
+  return true;
+}
+
+// ---------------------------------------------------------------- event-driven check functions
+// Each of these is called from exactly the existing milestone/event site named in its comment --
+// never from inside the tick loop's main body -- so an achievement is only ever evaluated at the
+// moment something relevant actually happened.
+
+/** world.js, the wave-complete milestone site (this.waveSpawner.waveNumber just incremented). */
+function checkWaveAchievements(world) {
+  if (world.currentTick >= 10000) _unlockAchievement('survive_10k');
+  if (world.waveSpawner.waveNumber >= 20) _unlockAchievement('wave_20');
+}
+
+/** main.js, right after tryResearch() returns { ok: true } for a node. Takes the research state
+ *  directly (not the whole world) so main.js's research-panel handler doesn't need an extra import. */
+function checkResearchAchievements(researchState, researchNodes) {
+  if (researchNodes.every(n => !!researchState.unlocked[n.id])) _unlockAchievement('full_research');
+}
+
+/** worldmap.js, the instant a region's control meter hits 100 and r.owned flips true. */
+function checkConquestAchievements(worldMap) {
+  const owned = worldMap.ownedCount();
+  if (owned >= 3) _unlockAchievement('conquest_3');
+  if (owned >= worldMap.regions.length) _unlockAchievement('conquest_all');
+}
+
+/** jobs.js, the instant a Taming job actually succeeds (animal moves from wildAnimals into dogs). */
+function checkTameAchievement() {
+  _unlockAchievement('tame_animal');
+}
+
+/** main.js's onBuildComplete hook (world.js fires this once per structure, the tick
+ *  underConstruction flips false). Lifetime-cumulative: the five generator kinds don't all have
+ *  to exist in the same settlement at once, just each be built at least once, ever. */
+function noteStructureBuilt(kind) {
+  if (!GENERATOR_KINDS.includes(kind)) return;
+  const m = _loadMeta();
+  if (!m.builtGeneratorKinds.includes(kind)) {
+    m.builtGeneratorKinds.push(kind);
+    _persistMeta();
+  }
+  if (GENERATOR_KINDS.every(k => m.builtGeneratorKinds.includes(k))) _unlockAchievement('all_generators');
+}
+
+/** world.js, called only when this run's peak alive-citizen count actually increases (guarded by
+ *  the caller so this never fires on the common case of population holding steady or shrinking). */
+function checkPopulationAchievement(peakAliveCitizens) {
+  const m = _loadMeta();
+  if (peakAliveCitizens > m.mostCitizensAlive) {
+    m.mostCitizensAlive = peakAliveCitizens;
+    _persistMeta();
+  }
+  if (peakAliveCitizens >= 30) _unlockAchievement('pop_30');
+}
+
+/** world.js, the instant world.gameOver flips true (the settlement has fallen). Rolls this run's
+ *  final numbers into the lifetime totals. Deliberately NOT called on a quit-to-title or a
+ *  mid-run restart -- see recordAbandonedGame() below for that path -- so "games played" only
+ *  counts runs that actually concluded one way or another, matching the games_10 achievement's
+ *  "play 10 settlements to their end" wording. */
+function recordGameEnd(world) {
+  const m = _loadMeta();
+  m.gamesPlayed++;
+  if (world.currentTick > m.longestSurvivalTicks) m.longestSurvivalTicks = world.currentTick;
+  if (world.waveSpawner.waveNumber > m.longestSurvivalWaves) m.longestSurvivalWaves = world.waveSpawner.waveNumber;
+  if (world.peakAliveCitizens > m.mostCitizensAlive) m.mostCitizensAlive = world.peakAliveCitizens;
+  m.totalAttackersKilled += world.attackersKilled || 0;
+  m.totalScrapEarned += world.scrapEarnedThisRun || 0;
+  _persistMeta();
+  if (m.gamesPlayed >= 10) _unlockAchievement('games_10');
+  if (m.totalAttackersKilled >= 100) _unlockAchievement('kills_100');
+  if (m.totalScrapEarned >= 5000) _unlockAchievement('scrap_5000');
+}
+
+/** main.js's confirmRestart()/quit-to-title/"New" path -- a run abandoned mid-game (not a real
+ *  game-over) still deserves to count toward games_10 and bank its partial numbers, otherwise a
+ *  player who never lets a settlement die would never accumulate lifetime stats at all. Same
+ *  bookkeeping as recordGameEnd, just triggered from a different call site and guarded against
+ *  double-counting a settlement that already game-overed (main.js only calls this for a world
+ *  that's being discarded while still alive). */
+function recordGameAbandoned(world) {
+  if (world.gameOver) return; // already counted via recordGameEnd
+  recordGameEnd(world);
+}
+
+
 // ---- world.js ----
 // Ported from SD.Headless/SimWorld.cs -- the composition root that owns every store/system
 // and advances them one fixed tick at a time (10 Hz, matching ARCHITECTURE.md section 2).
+
 
 
 
@@ -3585,6 +4283,26 @@ const REFUGEE_MAX_GROUP = 3;
 const FINANCE_SNAPSHOT_INTERVAL = 300; // ticks between budget-report history snapshots, see finance comment below
 const FINANCE_HISTORY_MAX = 20; // capped rolling window of finance snapshots kept for the trend sparkline
 
+// Unrest (Prison Architect's riot state-machine, reframed genre-neutral): a COLONY-WIDE crisis
+// distinct from an individual citizen's OnBreak (citizens.js -- that's a per-citizen speed/render
+// state that fires whenever *one* citizen's own mood crashes). unrestLevel blends the fraction of
+// the living population currently OnBreak with the Settlement Grading Wellbeing axis (grading.js
+// -- reused rather than re-averaging mood a second time) and eases toward that blend each
+// throttle step rather than snapping, same "slow trend, not a single bad tick" idea as
+// citizens.js's mood easing. unrestActive only flips on once unrestLevel has sat at or above
+// UNREST_TRIGGER_THRESHOLD for UNREST_SUSTAIN_TICKS running ticks (a genuine sustained crisis,
+// not one bad reading) and resolves at a lower UNREST_RESOLVE_THRESHOLD (hysteresis, so it can't
+// flicker on/off right at the boundary) -- there's no player action to "put it down", it resolves
+// on its own once the same root causes an individual OnBreak already responds to (beds, food,
+// room quality) improve. The actual penalty while active lives in jobs.js (UNREST_RATE_MULT),
+// applied to every citizen's work/build/harvest/travel rate, not just the already-OnBreak ones --
+// see that file's constant for the exact multiplier.
+const UNREST_INTERVAL_TICKS = GRADING_INTERVAL_TICKS; // piggyback grading.js's own throttle cadence -- wellbeing only updates this often anyway
+const UNREST_EASE = 0.15; // per UNREST_INTERVAL_TICKS step
+const UNREST_TRIGGER_THRESHOLD = 0.55; // deliberately high -- this should be rare, not background noise
+const UNREST_RESOLVE_THRESHOLD = 0.35;
+const UNREST_SUSTAIN_TICKS = 600; // ~60s at 10Hz sustained at/above the trigger threshold before it actually flips on
+
 class SimWorld {
   constructor(width, height, seed, aggression = AggressionPreset.Calm, startingCitizens = 24) {
     this.width = width;
@@ -3597,6 +4315,10 @@ class SimWorld {
     this.paused = false;
     this.gameOver = false;
     this.milestoneLog = [];
+    // power.js's overload mechanic: tick-over-tick diff set so the milestone below logs only the
+    // first tick a given segment/nuclear-bucket actually crosses into overload, not every tick it
+    // stays there. Purely transient bookkeeping -- deliberately not part of save/load state.
+    this._prevOverloadedSupply = new Set();
     this.pollution = 0; // SEA:R's signature mechanic -- unmanaged waste makes waves worse, see director.js
     this.nuclearWaste = 0; // separate hazard resource from a nuclear generator, see siege.js's NUCLEAR_* comment
     this.ethanolPenaltyTimer = 0; // ethanol-fuel truck tradeoff (vehicles.js) -- counts down after a haul, halving Food zone refill meanwhile
@@ -3619,6 +4341,15 @@ class SimWorld {
     // colony can still wall up and put down turrets on tick 0.
     this.research = createResearchState();
     this._lastWaveLogged = 0;
+
+    // Per-run counters feeding metaprogress.js's cross-run lifetime stats (see that module's
+    // header comment) -- purely additive bookkeeping here, this world instance dies at
+    // game-over/restart/quit-to-title same as everything else on it, but the numbers get folded
+    // into localStorage's lifetime totals right before that happens (recordGameEnd/
+    // recordGameAbandoned, called from this file's tick() and from main.js respectively).
+    this.peakAliveCitizens = 0;   // highest alive-citizen count seen this run, updated in tick()
+    this.attackersKilled = 0;     // count (not scrap) of attackers killed this run, see addScrap()
+    this.scrapEarnedThisRun = 0;  // cumulative scrap EARNED this run, never decremented by spending -- distinct from this.scrap
 
     // Budget/finance ledger (Prison Architect's budget report, see FEATURE_RESEARCH.md): the
     // scrap economy itself is unchanged (still just world.scrap, a single running total) -- this
@@ -3649,6 +4380,12 @@ class SimWorld {
     // so a fresh colony shows its real scores immediately rather than placeholder 100s.
     this.grading = { safety: 100, wellbeing: 100, sustainability: 100, cohesion: 100 };
     this._gradingPrevScrap = this.scrap;
+
+    // Unrest (see the UNREST_* constants' doc comment above): starts calm/inactive, updated by
+    // _updateUnrest() below every UNREST_INTERVAL_TICKS.
+    this.unrestLevel = 0;
+    this.unrestActive = false;
+    this._unrestAboveTicks = 0; // running count of ticks unrestLevel has sat at/above UNREST_TRIGGER_THRESHOLD
 
     // Presentation-layer audio hooks (see audio.js) -- optional callbacks the host app (main.js)
     // can assign after construction. Left null by default so world.js/siege.js never need to
@@ -3733,12 +4470,13 @@ class SimWorld {
   addScrap(amount, kind) {
     this.scrap += amount;
     if (amount > 0 && this.finance) {
-      if (kind === 'kill') this.finance.killScrap += amount;
+      if (kind === 'kill') { this.finance.killScrap += amount; this.attackersKilled++; }
       else if (kind === 'harvest') this.finance.harvestScrap += amount;
       else if (kind === 'haul') this.finance.haulScrap += amount;
       else if (kind === 'recycling') this.finance.recyclingScrap += amount;
       else if (kind === 'conquest') this.finance.conquestScrap += amount;
       else this.finance.otherScrap += amount;
+      this.scrapEarnedThisRun += amount; // metaprogress.js's lifetime scrap-earned stat, see recordGameEnd()
     }
   }
 
@@ -3808,6 +4546,51 @@ class SimWorld {
     this.onRandomEvent?.(text);
   }
 
+  // Unrest (see the UNREST_* constants' doc comment above the class): throttled to
+  // UNREST_INTERVAL_TICKS, same cadence grading.js's Wellbeing axis already updates on, so this
+  // reads a fresh value each time rather than a stale one. Eases unrestLevel toward a target
+  // blend of "how many citizens are OnBreak right now" and "how bad is Wellbeing right now",
+  // then applies the sustained-duration + hysteresis gate described above to flip unrestActive.
+  _updateUnrest() {
+    if (this.currentTick % UNREST_INTERVAL_TICKS !== 0) return;
+
+    let aliveCount = 0, onBreakCount = 0;
+    for (let i = 0; i < this.citizens.count; i++) {
+      if (!this.citizens.isAliveAt(i)) continue;
+      aliveCount++;
+      if (this.citizens.isOnBreakAt(i)) onBreakCount++;
+    }
+    const onBreakFraction = aliveCount > 0 ? onBreakCount / aliveCount : 0;
+    const wellbeingDeficit = 1 - (this.grading?.wellbeing ?? 100) / 100;
+    const target = Math.max(0, Math.min(1, 0.65 * onBreakFraction + 0.35 * wellbeingDeficit));
+    this.unrestLevel += (target - this.unrestLevel) * UNREST_EASE;
+    this.unrestLevel = Math.max(0, Math.min(1, this.unrestLevel));
+
+    if (this.unrestLevel >= UNREST_TRIGGER_THRESHOLD) {
+      this._unrestAboveTicks += UNREST_INTERVAL_TICKS;
+    } else if (this.unrestLevel < UNREST_RESOLVE_THRESHOLD) {
+      this._unrestAboveTicks = 0;
+    }
+    // Between the resolve and trigger thresholds, _unrestAboveTicks is left alone -- neither
+    // building nor reset -- so a value oscillating right at the boundary doesn't get its
+    // sustained-duration progress wiped by a single throttle-step dip.
+
+    if (!this.unrestActive && this._unrestAboveTicks >= UNREST_SUSTAIN_TICKS) {
+      this.unrestActive = true;
+      const text = 'Unrest is spreading through the settlement';
+      this.milestoneLog.push({ tick: this.currentTick, text });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+      this.onRandomEvent?.(text);
+    } else if (this.unrestActive && this.unrestLevel < UNREST_RESOLVE_THRESHOLD) {
+      this.unrestActive = false;
+      this._unrestAboveTicks = 0;
+      const text = 'The settlement has calmed';
+      this.milestoneLog.push({ tick: this.currentTick, text });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+      this.onRandomEvent?.(text);
+    }
+  }
+
   tick() {
     if (this.paused || this.gameOver) return;
     this.currentTick++;
@@ -3818,7 +4601,7 @@ class SimWorld {
     // -- unlike detectRooms' cell layout, a room's contents change far more often than its walls
     // do, so this can't be gated behind the wall-signature check below. Read by tickNeedsAndMood
     // just after, via roomContaining, to nudge a citizen's mood based on the room they're in.
-    computeRoomStats(this.rooms, this.grid, this.structures, this);
+    computeRoomStats(this.rooms, this.grid, this.structures, this, this.zones);
 
     tickNeedsAndMood(this.citizens, (i) => this.isStaffOnDutyAt(i), this.rng, this);
     // Off-duty check runs before tickJobs so a staff member whose fatigue/hunger just crossed
@@ -3918,6 +4701,32 @@ class SimWorld {
     tickFireIgnition(this.structures, this.rng);
     tickFire(this.structures, this.rng);
 
+    // Power grid overload (Prison Architect's overload/explosion-risk mechanic, power.js): too
+    // many powered turrets/tesla/watchtowers wired to too few/weak generators strains a segment.
+    // hasPoweredBonus (siege.js's turret/tesla boost, watchtower's warning-window boost above)
+    // already stops applying the bonus on an overloaded segment on its own every tick it's read --
+    // the two things left to do here are (a) log a milestone the first tick a segment/nuclear
+    // radius actually crosses into overload, and (b) roll the rare fire-risk consequence, reusing
+    // fire.js's igniteStructure directly rather than a parallel damage system.
+    const overloadedNow = overloadedSupplyKeys(this.structures);
+    for (const key of overloadedNow) {
+      if (this._prevOverloadedSupply.has(key)) continue;
+      this.milestoneLog.push({
+        tick: this.currentTick,
+        text: 'Power grid overloaded -- powered consumers on that line lose their boost, and it now risks catching fire',
+      });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    }
+    this._prevOverloadedSupply = overloadedNow;
+    if (overloadedNow.size > 0) {
+      for (const s of this.structures) {
+        if (s.kind !== 'wire' && !s.kind.startsWith('generator')) continue;
+        if (s.destroyed || s.underConstruction || s.onFire) continue;
+        if (!isSegmentOverloadedAt(this.structures, s.x, s.y)) continue;
+        if (this.rng() < OVERLOAD_FIRE_CHANCE_PER_TICK) igniteStructure(s);
+      }
+    }
+
     // Conquest layer (worldmap.js): advances THIS region's control meter based on how the
     // settlement is doing, and trickles scrap in from every other region you already hold.
     // Strictly additive on top of the scrap economy above -- it adds income, never gates it.
@@ -4003,6 +4812,10 @@ class SimWorld {
       });
       if (this.milestoneLog.length > 20) this.milestoneLog.shift();
       this.onWaveIncoming?.();
+      // metaprogress.js's cross-run achievements (see that module's header comment) -- checked
+      // right here rather than every tick, since a wave-complete is exactly the kind of milestone
+      // event the survive-N-ticks / reach-wave-N thresholds should be evaluated against.
+      checkWaveAchievements(this);
     }
 
     // Watchtowers (CCTV/early-warning analog, see FEATURE_RESEARCH.md) give advance notice of
@@ -4023,7 +4836,7 @@ class SimWorld {
     // A powered watchtower (generator in range) sees further out in time, same pattern as the
     // powered-turret damage/range boost -- generators are now a real consumer-side upgrade
     // wherever they're built near, not just a pollution-producing decoration.
-    let warningWindow = watchtower ? (isPowered(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
+    let warningWindow = watchtower ? (hasPoweredBonus(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
     let warningSource = watchtower ? 'watchtower' : null;
     if (camera) {
       const cameraWindow = monitorStaffed ? 70 : 30;
@@ -4045,9 +4858,21 @@ class SimWorld {
 
     let aliveCitizens = 0;
     for (let i = 0; i < this.citizens.count; i++) if (this.citizens.isAliveAt(i)) aliveCitizens++;
+    // metaprogress.js's "most citizens alive at once" lifetime stat + its Boomtown achievement --
+    // only actually calls into that module when this run's peak just increased (population holds
+    // steady or shrinks far more often than it grows), so this isn't a per-tick achievement check.
+    if (aliveCitizens > this.peakAliveCitizens) {
+      this.peakAliveCitizens = aliveCitizens;
+      checkPopulationAchievement(this.peakAliveCitizens);
+    }
     if (aliveCitizens === 0 && this.citizens.count > 0) {
       this.gameOver = true;
       this.milestoneLog.push({ tick: this.currentTick, text: 'GAME OVER -- the settlement has fallen' });
+      // Roll this run's final numbers into metaprogress.js's lifetime totals right as the run ends
+      // -- see that module's recordGameEnd doc comment for why this is the one authoritative
+      // "did this settlement finish" call site (main.js's recordGameAbandoned covers the other
+      // path, a run discarded while still alive).
+      recordGameEnd(this);
     }
 
     // Finance history snapshot (budget report trend/sparkline, see the constructor's finance
@@ -4070,6 +4895,11 @@ class SimWorld {
     // resources.js's maybeSpawnNode/security.js's breed check above -- a modulo gate on
     // currentTick rather than every tick, since nothing downstream needs sub-second freshness.
     if (this.currentTick % GRADING_INTERVAL_TICKS === 0) computeGrading(this);
+
+    // Unrest (see UNREST_* constants above and the _updateUnrest doc comment): runs right after
+    // grading so it reads this tick's freshly-recomputed Wellbeing axis rather than a stale one
+    // from before the throttle window advanced.
+    this._updateUnrest();
   }
 
   serialize() {
@@ -4080,6 +4910,8 @@ class SimWorld {
       startingCitizenCount: this.startingCitizenCount, nextRefugeeNameIndex: this._nextRefugeeNameIndex,
       pollution: this.pollution, nuclearWaste: this.nuclearWaste, ethanolPenaltyTimer: this.ethanolPenaltyTimer,
       storyteller: this.storyteller, timeOfDay: this.timeOfDay,
+      unrestLevel: this.unrestLevel, unrestActive: this.unrestActive, unrestAboveTicks: this._unrestAboveTicks,
+      peakAliveCitizens: this.peakAliveCitizens, attackersKilled: this.attackersKilled, scrapEarnedThisRun: this.scrapEarnedThisRun,
       research: serializeResearch(this.research),
       weather: this.weather, weatherTimer: this._weatherTimer,
       waveNumber: this.waveSpawner.waveNumber, nextWaveTick: this.waveSpawner.nextWaveTick,
@@ -4145,6 +4977,12 @@ class SimWorld {
     w.pollution = json.pollution || 0;
     w.nuclearWaste = json.nuclearWaste || 0;
     w.ethanolPenaltyTimer = json.ethanolPenaltyTimer || 0;
+    w.unrestLevel = json.unrestLevel || 0;
+    w.unrestActive = json.unrestActive || false;
+    w._unrestAboveTicks = json.unrestAboveTicks || 0;
+    w.peakAliveCitizens = json.peakAliveCitizens || 0;
+    w.attackersKilled = json.attackersKilled || 0;
+    w.scrapEarnedThisRun = json.scrapEarnedThisRun || 0;
     w.storyteller = json.storyteller || 'Cassandra';
     // Pre-research saves have no `research` key -- deserializeResearch falls back to a fresh
     // state, so an old save loads with the survival core unlocked and 0 points rather than
@@ -4206,6 +5044,7 @@ class SimWorld {
 // generated images. Visual language borrows from RimWorld/Prison Architect: flat top-down
 // grid, a visible floor grid, outlined silhouettes so units read clearly against the ground,
 // and zone/room tints rather than photographic texture.
+
 
 
 
@@ -4414,6 +5253,7 @@ class Renderer {
     if (input) {
       this._drawCursor(world, input);
       this._drawSelection(world, input);
+      this._drawRoomLabel(world, input);
     }
   }
 
@@ -4577,6 +5417,45 @@ class Renderer {
     ctx.strokeStyle = input.tool ? '#ffffff' : 'rgba(255,255,255,0.3)';
     ctx.lineWidth = 2;
     ctx.strokeRect(px + 1, py + 1, size - 2, size - 2);
+  }
+
+  // Room-role hover label (rooms.js's computeRoomStats/classifyRoomRole, RimWorld/Prison
+  // Architect's "hover a room to see what it is" convention): only shown while no build tool is
+  // selected (so it doesn't fight with zone/structure placement feedback) and only when the
+  // cursor is actually over an enclosed room detectRooms found. Shows the role name, and -- if
+  // the room has a matching zone but is missing furniture -- what's missing, e.g.
+  // "Bedroom (needs a bed)"; a room with no matching zone at all just doesn't get a label
+  // (Unroofed Area is the quiet default, not something worth bannering over every plain room).
+  _drawRoomLabel(world, input) {
+    if (input.tool) return;
+    if (!input.hoverGridX && input.hoverGridX !== 0) return;
+    const room = roomContaining(world.rooms, world.grid, input.hoverGridX + 0.5, input.hoverGridY + 0.5);
+    if (!room || !room.role || room.role === RoomRole.None) return;
+
+    const label = ROOM_ROLE_LABEL[room.role] ?? 'Room';
+    const text = room.roleValid
+      ? label
+      : `${label} (needs ${room.missingRequirements.join(', ')})`;
+
+    const ctx = this.ctx;
+    const [px, py] = this.worldToScreen(input.hoverGridX, input.hoverGridY);
+    const size = CELL * this.zoom;
+    const x = px + size / 2;
+    const y = py - 6;
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    const padX = 6, padY = 3;
+    const w = ctx.measureText(text).width;
+    ctx.fillStyle = room.roleValid ? 'rgba(24,22,20,0.85)' : 'rgba(90,30,20,0.85)';
+    ctx.fillRect(x - w / 2 - padX, y - 14 - padY, w + padX * 2, 14 + padY * 2);
+    ctx.strokeStyle = room.roleValid ? '#4a9e5f' : '#d95a3a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x - w / 2 - padX, y - 14 - padY, w + padX * 2, 14 + padY * 2);
+    ctx.fillStyle = '#f0ece4';
+    ctx.fillText(text, x, y);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
   }
 
   // Ground is pre-rendered once into an offscreen canvas with smooth (bilinearly-interpolated)
@@ -4852,6 +5731,22 @@ class Renderer {
   _drawStructureShape(ctx, s, sx, sy, size) {
     ctx.lineWidth = Math.max(1, size * 0.05);
     ctx.strokeStyle = OUTLINE;
+
+    // Overload warning ring (power.js's overload mechanic): drawn underneath the tile's own
+    // shape so it reads as a hazard glow around the wire/generator, not a replacement paint job.
+    // Pulses off the wall clock (same pattern as the boss threat-ring above) so it's still
+    // visible while the sim is paused.
+    if ((s.kind === 'wire' || s.kind.startsWith('generator')) && !s.destroyed && !s.underConstruction &&
+      isSegmentOverloadedAt(this._structuresForPower || [], s.x, s.y)) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 180);
+      ctx.save();
+      ctx.strokeStyle = `rgba(230,40,30,${0.5 + 0.4 * pulse})`;
+      ctx.lineWidth = Math.max(2, size * 0.14);
+      ctx.beginPath();
+      ctx.arc(sx, sy, size * 0.62, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
 
     if (s.kind === 'wall') {
       ctx.fillStyle = '#413c34';
@@ -5421,6 +6316,139 @@ class InputController {
     canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // right-drag is pan, not a context menu
     canvas.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
     window.addEventListener('keydown', (e) => this._onKey(e));
+
+    // ---- Touch input (strictly additive; every mouse path above is untouched) ----------------
+    // Touch is translated into the SAME internal state the mouse handlers use (_painting,
+    // _panning, marquee*) by synthesizing {clientX, clientY, button} shims and feeding them to
+    // _onDown/_onMove/_onUp -- so one-finger paint, one-finger marquee, tap-to-select and the
+    // 0.5-world-unit click-vs-drag threshold all behave identically to mouse without a second
+    // implementation. Only two-finger pan/pinch needs its own state, because there is no mouse
+    // gesture that pans and zooms simultaneously.
+    this._touchId = null;         // identifier of the single finger driving paint/marquee/tap
+    this._touchTapX = 0; this._touchTapY = 0; this._touchTapT = 0;
+    this._touchMoved = false;
+    this._pinchDist = 0;          // distance between the two fingers on the previous move
+    this._pinchMidX = 0; this._pinchMidY = 0;
+    // passive:false on all four so preventDefault() actually suppresses the browser's native
+    // scroll/pinch-zoom. These are bound to the canvas element only -- topbar/toolbar/panel DOM
+    // buttons are outside it and keep their native tap->click behaviour untouched.
+    canvas.addEventListener('touchstart', (e) => this._onTouchStart(e), { passive: false });
+    canvas.addEventListener('touchmove', (e) => this._onTouchMove(e), { passive: false });
+    canvas.addEventListener('touchend', (e) => this._onTouchEnd(e), { passive: false });
+    canvas.addEventListener('touchcancel', (e) => this._onTouchCancel(e), { passive: false });
+  }
+
+  // Mouse-event shim: the existing handlers only ever read clientX/clientY/button/preventDefault,
+  // so a Touch can stand in for a MouseEvent verbatim.
+  _touchAsMouse(t, button = 0) {
+    return { clientX: t.clientX, clientY: t.clientY, button, preventDefault() {} };
+  }
+
+  _findTouch(list, id) {
+    for (let i = 0; i < list.length; i++) if (list[i].identifier === id) return list[i];
+    return null;
+  }
+
+  // Drop whatever the single finger had armed, without committing it (used when a second finger
+  // arrives and the gesture turns out to be a pan/pinch rather than a paint or marquee).
+  _abortSingleTouch() {
+    this._touchId = null;
+    this._painting = false;
+    this.marqueeActive = false;
+  }
+
+  _beginPinch(a, b) {
+    this._pinchDist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    this._pinchMidX = (a.clientX + b.clientX) / 2;
+    this._pinchMidY = (a.clientY + b.clientY) / 2;
+    this._panning = true;
+  }
+
+  _onTouchStart(e) {
+    e.preventDefault(); // suppress native scroll/zoom/double-tap on the game canvas
+    if (e.touches.length >= 2) {
+      // Two (or more) fingers: pan + pinch. Cancel anything the first finger armed so a
+      // two-finger gesture never leaves a stray blueprint or half-drawn marquee behind.
+      if (this._touchId !== null) this._abortSingleTouch();
+      this._beginPinch(e.touches[0], e.touches[1]);
+      return;
+    }
+    if (this._touchId !== null) return; // already tracking a finger
+    const t = e.changedTouches[0];
+    if (!t) return;
+    this._touchId = t.identifier;
+    this._touchTapX = t.clientX; this._touchTapY = t.clientY;
+    this._touchTapT = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    this._touchMoved = false;
+    const shim = this._touchAsMouse(t, 0);
+    // Seed the hover cell from THIS touch before dispatching. _onDown's build branch calls
+    // _place() straight away and _place() reads hoverGridX/Y, which with a mouse is always fresh
+    // because a mousedown is necessarily preceded by a mousemove over the canvas. A finger has no
+    // such preamble, so without this the first tile of a touch-drag would be placed at whatever
+    // the last mouse position happened to be (or nowhere at all on a touch-only device).
+    this._updateHover(shim);
+    // Left-button-down semantics: with a tool this starts painting and places immediately; with
+    // the Select tool this runs _pickCitizen (so a tap already selects) and arms the marquee.
+    this._onDown(shim);
+  }
+
+  _onTouchMove(e) {
+    e.preventDefault();
+    if (this._panning && e.touches.length >= 2) {
+      const a = e.touches[0], b = e.touches[1];
+      const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+      const midX = (a.clientX + b.clientX) / 2, midY = (a.clientY + b.clientY) / 2;
+      // Pan by the midpoint delta -- same call the right/middle-drag pan uses.
+      this.renderer.panByScreenDelta(midX - this._pinchMidX, midY - this._pinchMidY, this.getWorld());
+      // Pinch: change in finger separation since the last move is the zoom factor, anchored at
+      // the midpoint in canvas-local coordinates -- same call the wheel handler uses.
+      if (this._pinchDist > 0 && dist > 0) {
+        const factor = dist / this._pinchDist;
+        if (Math.abs(factor - 1) > 0.002) {
+          const rect = this.canvas.getBoundingClientRect();
+          this.renderer.zoomAt(midX - rect.left, midY - rect.top, factor, this.getWorld());
+        }
+      }
+      this._pinchDist = dist; this._pinchMidX = midX; this._pinchMidY = midY;
+      return;
+    }
+    if (this._touchId === null) return;
+    const t = this._findTouch(e.changedTouches, this._touchId);
+    if (!t) return;
+    if (Math.hypot(t.clientX - this._touchTapX, t.clientY - this._touchTapY) > 8) this._touchMoved = true;
+    this._onMove(this._touchAsMouse(t, 0));
+  }
+
+  _onTouchEnd(e) {
+    e.preventDefault();
+    if (this._panning) {
+      // Keep panning only while two fingers remain down; otherwise end the gesture. A finger
+      // left over after a pinch does NOT fall through into paint/marquee -- that would drop
+      // buildings the player never asked for.
+      if (e.touches.length >= 2) { this._beginPinch(e.touches[0], e.touches[1]); return; }
+      if (e.touches.length === 0) { this._panning = false; this._pinchDist = 0; }
+      return;
+    }
+    if (this._touchId === null) return;
+    const t = this._findTouch(e.changedTouches, this._touchId);
+    if (!t) return;
+    const dt = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - this._touchTapT;
+    this._touchId = null;
+    // Tap = short + no real movement. _onDown already ran _pickCitizen for the Select tool (so
+    // the selection is done), but fingers are imprecise and at high zoom a couple of stray
+    // pixels can exceed _onUp's 0.5-world-unit marquee threshold and turn a tap into a 1-citizen
+    // box-select. Disarming the marquee here keeps a tap a pure single pick.
+    if (!this._touchMoved && dt < 400) this.marqueeActive = false;
+    this._onUp(this._touchAsMouse(t, 0));
+    this.hoverGridX = null; this.hoverGridY = null; // no lingering hover ghost after lift-off
+  }
+
+  _onTouchCancel(e) {
+    if (e.cancelable) e.preventDefault();
+    this._abortSingleTouch();
+    this._panning = false;
+    this._pinchDist = 0;
+    this.hoverGridX = null; this.hoverGridY = null;
   }
 
   setTool(tool) {
@@ -5986,6 +7014,8 @@ function initOnboarding() {
 
 
 
+
+
 const SECONDS_PER_TICK = 0.1;
 const SAVE_KEY = 'settlement-defense-save';
 // Autosave lives in its own localStorage key, deliberately separate from SAVE_KEY -- it must
@@ -6020,7 +7050,7 @@ window.addEventListener('resize', () => renderer.resize());
 // reassigned (restart/load/expandTo all construct a fresh SimWorld), since the hooks live on the
 // instance, not anywhere global.
 function attachAudioHooks(w) {
-  w.onBuildComplete = () => playBuildComplete();
+  w.onBuildComplete = (structure) => { playBuildComplete(); noteStructureBuilt(structure.kind); };
   w.onWaveIncoming = () => playWaveAlert();
   w.onTurretFire = () => playTurretFire();
   w.onKill = () => playKill();
@@ -6068,6 +7098,24 @@ function showAutosaveIndicator() {
   autosaveIndicatorTimer = 15; // frames, ~1.5s at 10Hz -- shorter/subtler than the toast's 2s
 }
 
+// ---------------------------------------------------------------- achievement unlock toast
+// metaprogress.js's cross-run achievements (see that module's header comment) surface here the
+// instant one unlocks (setAchievementUnlockedCallback below, called from checkXxxAchievements/
+// recordGameEnd, all of which run at an event/milestone site, never every tick). Deliberately its
+// own element/timer rather than routing through showToast()/toastEl -- an achievement unlock can
+// land in the same frame as an ordinary toast (e.g. "Researched: X" and a research-tree-complete
+// achievement firing together) and neither should clobber the other; a bit longer-lived and more
+// celebratory than the plain toast, but still small and non-blocking per the task's "don't build
+// something heavyweight" ask.
+let achievementToastTimer = 0;
+const achievementToastEl = document.getElementById('achievement-toast');
+function showAchievementToast(ach) {
+  achievementToastEl.innerHTML = `<span class="ach-icon">🏆</span><span><b>Achievement Unlocked</b><br>${ach.name}</span>`;
+  achievementToastEl.classList.add('show');
+  achievementToastTimer = 35; // frames, ~3.5s at 10Hz -- a bit longer than the plain toast's 2s
+}
+setAchievementUnlockedCallback(showAchievementToast);
+
 const input = new InputController(canvas, renderer, () => world, (s) => { speedMultiplier = s; }, showToast);
 
 window.__debug = {
@@ -6111,6 +7159,15 @@ window.__debug = {
     delete: (idx) => deleteSlot(idx),
     toggle: (v) => toggleSaveLoad(v),
   },
+  // File-backed backup (Download/Upload Save, #saveload panel) -- same console-verification
+  // pattern as saveSlots above. downloadSave() triggers a real browser download when a game is
+  // running. importSaveJson(text)/importSaveFile(file) drive the exact same parse-validate-
+  // deserialize-startGame path the Upload button's file picker uses, so a test script can exercise
+  // it without a real file dialog (construct a File/Blob and pass it to importSaveFile).
+  downloadSave: () => downloadSave(),
+  importSaveJson: (text) => importSaveJson(text),
+  importSaveFile: (file) => importSaveFile(file),
+  isPlausibleSaveJson: (parsed) => isPlausibleSaveJson(parsed),
   // conquest-layer handles for console verification (see SESSION_HANDOFF.md's verification pattern)
   toggleWorldMap: (v) => toggleWorldMap(v),
   expandTo: (id) => expandTo(id),
@@ -6156,6 +7213,22 @@ window.__debug = {
     force: (kind) => { world.weather = kind; },
     triggerWanderer: () => tryWandererEvent(world),
     triggerBlight: () => tryBlightEvent(world),
+  },
+  // metaprogress.js cross-run stats/achievements -- console-verification pattern matching every
+  // other feature above (toggle the panel directly, read the live lifetime numbers, and force a
+  // check function without waiting on the real event so a soak test doesn't have to grind out
+  // 10,000 real ticks/16 real regions/etc. to see an unlock).
+  meta: {
+    ACHIEVEMENTS,
+    getMeta: () => getMeta(),
+    isUnlocked: (id) => isAchievementUnlocked(id),
+    toggleStats: (v) => toggleStats(v),
+    // Force-fire a check without waiting on the real trigger -- e.g. set world.waveSpawner.waveNumber
+    // then call checkWave() rather than soaking out 20 real waves.
+    checkWave: () => checkWaveAchievements(world),
+    checkResearch: () => checkResearchAchievements(world.research, RESEARCH_NODES),
+    checkConquest: () => checkConquestAchievements(worldMap),
+    checkTame: () => checkTameAchievement(),
   },
 };
 
@@ -6778,6 +7851,119 @@ function renderSaveLoad() {
 document.getElementById('btn-saveload-close').addEventListener('click', () => toggleSaveLoad(false));
 document.getElementById('btn-title-saveload').addEventListener('click', () => toggleSaveLoad(true));
 
+// ---- File-backed backup (Download/Upload Save) --------------------------------------------
+// Durable alternative to the localStorage-based slots/quicksave/autosave above: localStorage
+// under a file:// origin (this project is built to be double-clicked, no server -- see build.py's
+// header comment) is genuinely unreliable across browsers, so this writes/reads an actual .json
+// file on disk instead. Reuses exactly the same payload shape as save()/saveToSlot() (world.serialize()
+// + worldMap.serialize() + savedAt) and the same SimWorld.deserialize()/startGame() handoff every
+// other load path uses -- this is purely a different transport for the identical data, not a
+// second save format. Lives in the Save/Load panel (#saveload) so it's reachable from both the
+// title screen and, in-game, the pause menu's Save button.
+
+/** Cheap shape check on parsed JSON before handing it to SimWorld.deserialize() -- catches "picked
+ *  the wrong file entirely" (an unrelated JSON file, a save from some other game) with a toast
+ *  instead of an uncaught exception partway through deserialize(). Checks the same top-level keys
+ *  world.serialize()/SimWorld.deserialize() actually read (see world.js), not an exhaustive schema. */
+function isPlausibleSaveJson(parsed) {
+  return !!parsed && typeof parsed === 'object' &&
+    typeof parsed.width === 'number' && typeof parsed.height === 'number' &&
+    parsed.citizens && typeof parsed.citizens === 'object' &&
+    typeof parsed.citizens.count === 'number' && Array.isArray(parsed.citizens.alive) &&
+    Array.isArray(parsed.structures) && Array.isArray(parsed.zones);
+}
+
+/** Trigger a browser download of the current settlement as a standalone .json file. Blob + a
+ *  throwaway <a download> click -- the standard vanilla-JS pattern, no library. */
+function downloadSave() {
+  if (!world) { showToast('Nothing to save yet'); return false; }
+  const data = { ...world.serialize(), worldMap: worldMap.serialize(), savedAt: Date.now() };
+  const json = JSON.stringify(data);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `settlement-${world.seed}-tick${world.currentTick}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showToast('Save downloaded');
+  console.log(`[SimWorldHost] Downloaded save at tick ${world.currentTick} (${json.length} bytes).`);
+  return true;
+}
+
+/** Actually perform the load once `parsed` has already passed isPlausibleSaveJson(). Shared tail
+ *  end of both the real file-upload path and the confirm-dialog gate below. */
+function loadParsedSave(parsed) {
+  let loaded;
+  try {
+    loaded = SimWorld.deserialize(parsed);
+  } catch (err) {
+    console.error('[SimWorldHost] Uploaded save is corrupt:', err);
+    showToast('That save file is corrupt');
+    return false;
+  }
+  if (parsed.worldMap) worldMap.deserialize(parsed.worldMap);
+  startGame(loaded);
+  toggleSaveLoad(false);
+  showToast('Save file loaded');
+  console.log(`[SimWorldHost] Loaded uploaded save file at tick ${world.currentTick}.`);
+  return true;
+}
+
+/** Gate for importing a file while a game may already be running -- mirrors confirmedLoad()'s
+ *  shape exactly: skip the confirm dialog when there's nothing live to lose (title screen), show
+ *  it when there is (in-game). */
+function confirmedImportParsed(parsed) {
+  if (world) {
+    confirmAction('Load this save file? Your current unsaved progress will be lost.', () => loadParsedSave(parsed));
+  } else {
+    loadParsedSave(parsed);
+  }
+}
+
+/** Validate + confirm-gate a JSON string read from an uploaded file (or handed in directly for
+ *  console/test verification via window.__debug.importSaveJson). Returns false immediately on
+ *  malformed JSON or an unrecognized shape (toast, not a crash); the confirm gate / actual load
+ *  happens asynchronously past that point. */
+function importSaveJson(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    console.error('[SimWorldHost] Uploaded file is not valid JSON:', err);
+    showToast('That file is not valid JSON');
+    return false;
+  }
+  if (!isPlausibleSaveJson(parsed)) {
+    showToast('That file is not a settlement save');
+    return false;
+  }
+  confirmedImportParsed(parsed);
+  return true;
+}
+
+/** Read a File/Blob (from the file picker or, in tests, constructed directly) via FileReader and
+ *  hand its text off to importSaveJson(). Split out from the file-input's change handler so
+ *  window.__debug.importSaveFile(file) can drive the exact same path without a real picker. */
+function importSaveFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => importSaveJson(String(reader.result));
+  reader.onerror = () => showToast('Could not read that file');
+  reader.readAsText(file);
+}
+
+document.getElementById('btn-saveload-download').addEventListener('click', () => downloadSave());
+const saveloadFileInputEl = document.getElementById('saveload-file-input');
+document.getElementById('btn-saveload-upload').addEventListener('click', () => saveloadFileInputEl.click());
+saveloadFileInputEl.addEventListener('change', () => {
+  const file = saveloadFileInputEl.files && saveloadFileInputEl.files[0];
+  importSaveFile(file);
+  saveloadFileInputEl.value = ''; // allow re-selecting the same filename later
+});
+
 /** Immediate fresh settlement, no trip back to the menu -- same behaviour the [R] key and the
  *  "New"/game-over buttons always had, except the map size / aggression / citizen count /
  *  storyteller now come from whatever the player configured for this run instead of a hardcoded
@@ -6882,6 +8068,104 @@ function toggleResearch(force) {
 input.onToggleResearch = () => toggleResearch();
 input.onCloseResearch = () => toggleResearch(false);
 
+// ---------------------------------------------------------------- work priorities panel
+// RimWorld Work-tab-style grid: every living citizen (row) x jobs.js's 4 non-needs WorkCategory
+// columns (Construction/Hauling/Harvesting/Animal Handling). Reached from the citizen inspector's
+// button (index.html #insp-workprio-btn) rather than the topbar -- this is a per-citizen roster
+// tool, not a colony-wide report like Finance/Research. Same full-screen-overlay convention as
+// those two, just with its own toggle wired here instead of an input.js hotkey (no existing key
+// slot fit, and the inspector button is a perfectly discoverable entry point).
+const workprioEl = document.getElementById('workprio');
+const workprioTableEl = document.getElementById('workprio-table');
+
+function toggleWorkPriorities(force) {
+  const show = force != null ? force : workprioEl.classList.contains('hidden');
+  workprioEl.classList.toggle('hidden', !show);
+  if (show) renderWorkPriorities();
+}
+document.getElementById('insp-workprio-btn').addEventListener('click', () => toggleWorkPriorities());
+document.getElementById('btn-workprio-close').addEventListener('click', () => toggleWorkPriorities(false));
+
+const WORKPRIO_CYCLE_MAX = 3; // priority tiers 1-3, plus 0 (Off) -- matches WORK_CATEGORY_FIELD's 4 categories
+
+/** Full rebuild of the citizen x category grid. Only ever called while the overlay is open
+ *  (toggleWorkPriorities/the per-cell click handler below), so a rebuild-on-every-click is cheap
+ *  enough -- same "no diffing needed, small enough list" reasoning as renderResearch. */
+function renderWorkPriorities() {
+  const c = world.citizens;
+  workprioTableEl.innerHTML = '';
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr><th>Citizen</th>' +
+    WORK_CATEGORY_ORDER.map(cat => `<th>${WORK_CATEGORY_LABELS[cat]}</th>`).join('') +
+    '<th></th></tr>';
+  workprioTableEl.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  let anyRows = false;
+  for (let i = 0; i < c.count; i++) {
+    if (!c.isAliveAt(i)) continue;
+    anyRows = true;
+    const tr = document.createElement('tr');
+    const role = world.roster.isStaff(c.id[i]) ? world.roster.kindOf(c.id[i]) : 'Citizen';
+    const nameTd = document.createElement('td');
+    nameTd.innerHTML = `<div class="wp-name">${c.name[i]}</div><div class="wp-role">${role}</div>`;
+    tr.appendChild(nameTd);
+
+    for (const cat of WORK_CATEGORY_ORDER) {
+      const td = document.createElement('td');
+      const cell = document.createElement('div');
+      const field = WORK_CATEGORY_FIELD[cat];
+      const custom = c.hasWorkPriorities[i] === 1;
+      const value = c[field][i];
+      cell.className = 'wp-cell ' + (!custom ? 'wp-default' : value === 0 ? 'wp-off' : `wp-p${value}`);
+      cell.textContent = !custom ? 'Default' : value === 0 ? 'Off' : String(value);
+      cell.title = !custom
+        ? 'Not customized -- this citizen still follows the original autonomous priority order. Click to start customizing.'
+        : value === 0 ? 'Off -- this citizen never does this job.' : `Priority ${value} (lower = higher priority).`;
+      cell.addEventListener('click', () => {
+        // First click on a still-Default citizen turns on their override (equal-tier defaults on
+        // every OTHER category, see citizens.js's spawn(), so clicking one cell doesn't leave the
+        // other three silently uninitialized) and starts the clicked cell's own cycle fresh at 1
+        // -- otherwise the pre-seeded equal-tier default of 1 would make the very first click jump
+        // straight to 2, which reads as broken against the documented Off -> 1 -> 2 -> 3 cycle.
+        if (c.hasWorkPriorities[i] !== 1) {
+          c.hasWorkPriorities[i] = 1;
+          c[field][i] = 1;
+        } else {
+          c[field][i] = (c[field][i] + 1) % (WORKPRIO_CYCLE_MAX + 1);
+        }
+        renderWorkPriorities();
+      });
+      td.appendChild(cell);
+      tr.appendChild(td);
+    }
+
+    const resetTd = document.createElement('td');
+    if (c.hasWorkPriorities[i] === 1) {
+      const resetBtn = document.createElement('button');
+      resetBtn.className = 'wp-reset';
+      resetBtn.textContent = 'Reset';
+      resetBtn.title = 'Clear this citizen\'s overrides and go back to the default autonomous order.';
+      resetBtn.addEventListener('click', () => {
+        c.hasWorkPriorities[i] = 0;
+        c.workPriorityConstruction[i] = 1; c.workPriorityHauling[i] = 1;
+        c.workPriorityHarvesting[i] = 1; c.workPriorityAnimal[i] = 1;
+        renderWorkPriorities();
+      });
+      resetTd.appendChild(resetBtn);
+    }
+    tr.appendChild(resetTd);
+    tbody.appendChild(tr);
+  }
+  workprioTableEl.appendChild(tbody);
+  if (!anyRows) {
+    const empty = document.createElement('div');
+    empty.className = 'wp-empty';
+    empty.textContent = 'No living citizens.';
+    workprioTableEl.appendChild(empty);
+  }
+}
+
 // ---------------------------------------------------------------- onboarding (tutorial.js)
 // The guided tour and the reference panel own all of their own DOM/controls; main.js only has to
 // bind the topbar button + hotkey and trigger the tour from the new-game path (see beginSettlement).
@@ -6927,6 +8211,7 @@ function renderResearch() {
         showToast(`Researched: ${node.name}`);
         world.milestoneLog.push({ tick: world.currentTick, text: `Research complete: ${node.name}` });
         if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+        checkResearchAchievements(world.research, RESEARCH_NODES);
         renderResearch();
       });
       card.appendChild(btn);
@@ -7239,6 +8524,18 @@ function updateTopbar() {
   const pollutionEl = document.getElementById('stat-pollution');
   pollutionEl.textContent = Math.round(world.pollution);
   pollutionEl.classList.toggle('danger', world.pollution > 150);
+  // Unrest (world.js's UNREST_* / world.unrestLevel/unrestActive): stays out of the topbar
+  // entirely on a healthy colony (kept hidden below a "starting to matter" floor) rather than
+  // showing a 0%/1% reading all the time -- this is meant to read as a rare warning, not
+  // background noise, matching the crisis-not-clutter brief.
+  const unrestWrapEl = document.getElementById('stat-unrest-wrap');
+  const unrestVisible = world.unrestActive || world.unrestLevel > 0.15;
+  unrestWrapEl.classList.toggle('hidden', !unrestVisible);
+  if (unrestVisible) {
+    const unrestEl = document.getElementById('stat-unrest');
+    unrestEl.textContent = Math.round(world.unrestLevel * 100) + '%';
+    unrestEl.classList.toggle('danger', world.unrestActive);
+  }
   const night = isNight(world.timeOfDay);
   document.getElementById('stat-daynight-icon').textContent = night ? '🌙' : '☀';
   document.getElementById('stat-daynight').textContent = (night ? 'Night ' : 'Day ') + Math.round(world.timeOfDay * 100) + '%';
@@ -7302,6 +8599,13 @@ const titleSetupEl = document.getElementById('title-setup');
  *  or not a game is already running (restart/expand both call it over a live world). */
 function startGame(newWorld) {
   if (!newWorld) { console.warn('[SimWorldHost] startGame called without a world'); return null; }
+  // metaprogress.js's lifetime stats (see that module's recordGameAbandoned doc comment): a
+  // settlement that's about to be replaced (restart, load-over-a-running-game, conquest
+  // expansion) without ever reaching its own game-over still banks its numbers -- this is the one
+  // choke point every one of those paths already goes through, since they all end in a call here.
+  // No-op if there's no previous world (title-screen "New Game"/"Continue") or it already
+  // game-overed (recordGameEnd already banked it from world.js's tick()).
+  if (world) recordGameAbandoned(world);
   world = newWorld;
   attachAudioHooks(world);
   lastAutosaveTick = world.currentTick; // full interval before the first autosave of this run
@@ -7345,13 +8649,16 @@ function startGame(newWorld) {
 /** Drop the running game and return to the menu. `world = null` is what actually stops the sim:
  *  frame() early-returns on it, so the tick loop keeps running but does nothing. */
 function showTitleScreen() {
+  // Same "bank a run that never reached its own game-over" reasoning as startGame() above --
+  // Quit to Title is the other path that can discard a live settlement.
+  if (world) recordGameAbandoned(world);
   world = null;
   document.body.classList.add('pregame');
   titleEl.classList.remove('hidden');
   titleMainEl.classList.remove('hidden');
   titleSetupEl.classList.add('hidden');
   // Any overlay left open by the game being torn down would otherwise reappear on the next start.
-  for (const id of ['worldmap', 'finance', 'research', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
+  for (const id of ['worldmap', 'finance', 'research', 'workprio', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
     document.getElementById(id).classList.add('hidden');
   }
   // Quitting to title mid-tour shouldn't burn the first-run flag -- the player hasn't actually
@@ -7496,6 +8803,53 @@ document.getElementById('btn-title-load').addEventListener('click', () => load()
 // same reasoning confirmedLoad() uses for the title-screen branch.
 document.getElementById('btn-title-resume-autosave').addEventListener('click', () => loadAutosave());
 
+// ---------------------------------------------------------------- statistics / achievements overlay
+// Title-screen-only (see index.html's #statspanel), same reasoning as #credits directly below --
+// no in-game entry point, so nothing to worry about across a startGame()/showTitleScreen()
+// transition. Reads metaprogress.js's lifetime totals + ACHIEVEMENTS list directly; this panel is
+// purely a display, it never writes to that module itself (all the writes happen at the
+// event-driven call sites in world.js/worldmap.js/jobs.js/main.js's research handler above).
+const statsEl = document.getElementById('statspanel');
+const statsRowsEl = document.getElementById('stats-rows');
+const statsAchievementsEl = document.getElementById('stats-achievements');
+const statsSubEl = document.getElementById('stats-sub');
+
+function fmtNum(n) { return Math.round(n || 0).toLocaleString(); }
+
+function renderStats() {
+  const m = getMeta();
+  const rows = [
+    ['Settlements played', fmtNum(m.gamesPlayed)],
+    ['Longest survival', `${fmtNum(m.longestSurvivalTicks)} ticks (Wave ${fmtNum(m.longestSurvivalWaves)})`],
+    ['Most citizens alive at once', fmtNum(m.mostCitizensAlive)],
+    ['Attackers killed, lifetime', fmtNum(m.totalAttackersKilled)],
+    ['Scrap earned, lifetime', fmtNum(m.totalScrapEarned)],
+  ];
+  statsRowsEl.innerHTML = rows.map(([label, val]) =>
+    `<div class="stats-row"><span class="label">${label}</span><span class="val">${val}</span></div>`).join('');
+
+  const unlockedCount = ACHIEVEMENTS.filter(a => isAchievementUnlocked(a.id)).length;
+  statsSubEl.textContent = `${unlockedCount} of ${ACHIEVEMENTS.length} achievements unlocked`;
+
+  statsAchievementsEl.innerHTML = ACHIEVEMENTS.map(a => {
+    const unlocked = isAchievementUnlocked(a.id);
+    const ts = unlocked ? new Date(m.achievements[a.id]).toLocaleDateString() : null;
+    return `<div class="ach-card${unlocked ? ' done' : ''}">` +
+      `<div class="ach-name">${unlocked ? '🏆' : '🔒'} ${a.name}</div>` +
+      `<div class="ach-desc">${a.desc}</div>` +
+      (unlocked ? `<div class="ach-date">Unlocked ${ts}</div>` : '') +
+      `</div>`;
+  }).join('');
+}
+
+function toggleStats(force) {
+  const show = force != null ? force : statsEl.classList.contains('hidden');
+  statsEl.classList.toggle('hidden', !show);
+  if (show) renderStats();
+}
+document.getElementById('btn-title-stats').addEventListener('click', () => toggleStats(true));
+document.getElementById('btn-stats-close').addEventListener('click', () => toggleStats(false));
+
 // ---------------------------------------------------------------- credits / about overlay
 // Title-screen-only (see index.html's #credits) -- there's no in-game entry point, so no need to
 // worry about it being left open across a startGame()/showTitleScreen() transition.
@@ -7556,6 +8910,10 @@ function frame() {
   if (autosaveIndicatorTimer > 0) {
     autosaveIndicatorTimer--;
     if (autosaveIndicatorTimer === 0) autosaveIndicatorEl.classList.remove('show');
+  }
+  if (achievementToastTimer > 0) {
+    achievementToastTimer--;
+    if (achievementToastTimer === 0) achievementToastEl.classList.remove('show');
   }
 }
 

@@ -21,6 +21,12 @@ import {
   initOnboarding, maybeStartTutorial, startTutorial, stopTutorial, isTutorialActive,
   toggleHelp, isHelpOpen, hasSeenTutorial, resetTutorialSeen, TUTORIAL_SEEN_KEY, TUTORIAL_STEPS,
 } from './tutorial.js';
+import { WorkCategory, WORK_CATEGORY_ORDER, WORK_CATEGORY_LABELS, WORK_CATEGORY_FIELD } from './jobs.js';
+import {
+  ACHIEVEMENTS, getMeta, isAchievementUnlocked, setAchievementUnlockedCallback,
+  checkResearchAchievements, checkWaveAchievements, checkConquestAchievements, checkTameAchievement,
+  noteStructureBuilt, recordGameAbandoned,
+} from './metaprogress.js';
 
 const SECONDS_PER_TICK = 0.1;
 const SAVE_KEY = 'settlement-defense-save';
@@ -56,7 +62,7 @@ window.addEventListener('resize', () => renderer.resize());
 // reassigned (restart/load/expandTo all construct a fresh SimWorld), since the hooks live on the
 // instance, not anywhere global.
 function attachAudioHooks(w) {
-  w.onBuildComplete = () => playBuildComplete();
+  w.onBuildComplete = (structure) => { playBuildComplete(); noteStructureBuilt(structure.kind); };
   w.onWaveIncoming = () => playWaveAlert();
   w.onTurretFire = () => playTurretFire();
   w.onKill = () => playKill();
@@ -104,6 +110,24 @@ function showAutosaveIndicator() {
   autosaveIndicatorTimer = 15; // frames, ~1.5s at 10Hz -- shorter/subtler than the toast's 2s
 }
 
+// ---------------------------------------------------------------- achievement unlock toast
+// metaprogress.js's cross-run achievements (see that module's header comment) surface here the
+// instant one unlocks (setAchievementUnlockedCallback below, called from checkXxxAchievements/
+// recordGameEnd, all of which run at an event/milestone site, never every tick). Deliberately its
+// own element/timer rather than routing through showToast()/toastEl -- an achievement unlock can
+// land in the same frame as an ordinary toast (e.g. "Researched: X" and a research-tree-complete
+// achievement firing together) and neither should clobber the other; a bit longer-lived and more
+// celebratory than the plain toast, but still small and non-blocking per the task's "don't build
+// something heavyweight" ask.
+let achievementToastTimer = 0;
+const achievementToastEl = document.getElementById('achievement-toast');
+function showAchievementToast(ach) {
+  achievementToastEl.innerHTML = `<span class="ach-icon">🏆</span><span><b>Achievement Unlocked</b><br>${ach.name}</span>`;
+  achievementToastEl.classList.add('show');
+  achievementToastTimer = 35; // frames, ~3.5s at 10Hz -- a bit longer than the plain toast's 2s
+}
+setAchievementUnlockedCallback(showAchievementToast);
+
 const input = new InputController(canvas, renderer, () => world, (s) => { speedMultiplier = s; }, showToast);
 
 window.__debug = {
@@ -147,6 +171,15 @@ window.__debug = {
     delete: (idx) => deleteSlot(idx),
     toggle: (v) => toggleSaveLoad(v),
   },
+  // File-backed backup (Download/Upload Save, #saveload panel) -- same console-verification
+  // pattern as saveSlots above. downloadSave() triggers a real browser download when a game is
+  // running. importSaveJson(text)/importSaveFile(file) drive the exact same parse-validate-
+  // deserialize-startGame path the Upload button's file picker uses, so a test script can exercise
+  // it without a real file dialog (construct a File/Blob and pass it to importSaveFile).
+  downloadSave: () => downloadSave(),
+  importSaveJson: (text) => importSaveJson(text),
+  importSaveFile: (file) => importSaveFile(file),
+  isPlausibleSaveJson: (parsed) => isPlausibleSaveJson(parsed),
   // conquest-layer handles for console verification (see SESSION_HANDOFF.md's verification pattern)
   toggleWorldMap: (v) => toggleWorldMap(v),
   expandTo: (id) => expandTo(id),
@@ -192,6 +225,22 @@ window.__debug = {
     force: (kind) => { world.weather = kind; },
     triggerWanderer: () => tryWandererEvent(world),
     triggerBlight: () => tryBlightEvent(world),
+  },
+  // metaprogress.js cross-run stats/achievements -- console-verification pattern matching every
+  // other feature above (toggle the panel directly, read the live lifetime numbers, and force a
+  // check function without waiting on the real event so a soak test doesn't have to grind out
+  // 10,000 real ticks/16 real regions/etc. to see an unlock).
+  meta: {
+    ACHIEVEMENTS,
+    getMeta: () => getMeta(),
+    isUnlocked: (id) => isAchievementUnlocked(id),
+    toggleStats: (v) => toggleStats(v),
+    // Force-fire a check without waiting on the real trigger -- e.g. set world.waveSpawner.waveNumber
+    // then call checkWave() rather than soaking out 20 real waves.
+    checkWave: () => checkWaveAchievements(world),
+    checkResearch: () => checkResearchAchievements(world.research, RESEARCH_NODES),
+    checkConquest: () => checkConquestAchievements(worldMap),
+    checkTame: () => checkTameAchievement(),
   },
 };
 
@@ -814,6 +863,119 @@ function renderSaveLoad() {
 document.getElementById('btn-saveload-close').addEventListener('click', () => toggleSaveLoad(false));
 document.getElementById('btn-title-saveload').addEventListener('click', () => toggleSaveLoad(true));
 
+// ---- File-backed backup (Download/Upload Save) --------------------------------------------
+// Durable alternative to the localStorage-based slots/quicksave/autosave above: localStorage
+// under a file:// origin (this project is built to be double-clicked, no server -- see build.py's
+// header comment) is genuinely unreliable across browsers, so this writes/reads an actual .json
+// file on disk instead. Reuses exactly the same payload shape as save()/saveToSlot() (world.serialize()
+// + worldMap.serialize() + savedAt) and the same SimWorld.deserialize()/startGame() handoff every
+// other load path uses -- this is purely a different transport for the identical data, not a
+// second save format. Lives in the Save/Load panel (#saveload) so it's reachable from both the
+// title screen and, in-game, the pause menu's Save button.
+
+/** Cheap shape check on parsed JSON before handing it to SimWorld.deserialize() -- catches "picked
+ *  the wrong file entirely" (an unrelated JSON file, a save from some other game) with a toast
+ *  instead of an uncaught exception partway through deserialize(). Checks the same top-level keys
+ *  world.serialize()/SimWorld.deserialize() actually read (see world.js), not an exhaustive schema. */
+function isPlausibleSaveJson(parsed) {
+  return !!parsed && typeof parsed === 'object' &&
+    typeof parsed.width === 'number' && typeof parsed.height === 'number' &&
+    parsed.citizens && typeof parsed.citizens === 'object' &&
+    typeof parsed.citizens.count === 'number' && Array.isArray(parsed.citizens.alive) &&
+    Array.isArray(parsed.structures) && Array.isArray(parsed.zones);
+}
+
+/** Trigger a browser download of the current settlement as a standalone .json file. Blob + a
+ *  throwaway <a download> click -- the standard vanilla-JS pattern, no library. */
+function downloadSave() {
+  if (!world) { showToast('Nothing to save yet'); return false; }
+  const data = { ...world.serialize(), worldMap: worldMap.serialize(), savedAt: Date.now() };
+  const json = JSON.stringify(data);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `settlement-${world.seed}-tick${world.currentTick}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+  showToast('Save downloaded');
+  console.log(`[SimWorldHost] Downloaded save at tick ${world.currentTick} (${json.length} bytes).`);
+  return true;
+}
+
+/** Actually perform the load once `parsed` has already passed isPlausibleSaveJson(). Shared tail
+ *  end of both the real file-upload path and the confirm-dialog gate below. */
+function loadParsedSave(parsed) {
+  let loaded;
+  try {
+    loaded = SimWorld.deserialize(parsed);
+  } catch (err) {
+    console.error('[SimWorldHost] Uploaded save is corrupt:', err);
+    showToast('That save file is corrupt');
+    return false;
+  }
+  if (parsed.worldMap) worldMap.deserialize(parsed.worldMap);
+  startGame(loaded);
+  toggleSaveLoad(false);
+  showToast('Save file loaded');
+  console.log(`[SimWorldHost] Loaded uploaded save file at tick ${world.currentTick}.`);
+  return true;
+}
+
+/** Gate for importing a file while a game may already be running -- mirrors confirmedLoad()'s
+ *  shape exactly: skip the confirm dialog when there's nothing live to lose (title screen), show
+ *  it when there is (in-game). */
+function confirmedImportParsed(parsed) {
+  if (world) {
+    confirmAction('Load this save file? Your current unsaved progress will be lost.', () => loadParsedSave(parsed));
+  } else {
+    loadParsedSave(parsed);
+  }
+}
+
+/** Validate + confirm-gate a JSON string read from an uploaded file (or handed in directly for
+ *  console/test verification via window.__debug.importSaveJson). Returns false immediately on
+ *  malformed JSON or an unrecognized shape (toast, not a crash); the confirm gate / actual load
+ *  happens asynchronously past that point. */
+function importSaveJson(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    console.error('[SimWorldHost] Uploaded file is not valid JSON:', err);
+    showToast('That file is not valid JSON');
+    return false;
+  }
+  if (!isPlausibleSaveJson(parsed)) {
+    showToast('That file is not a settlement save');
+    return false;
+  }
+  confirmedImportParsed(parsed);
+  return true;
+}
+
+/** Read a File/Blob (from the file picker or, in tests, constructed directly) via FileReader and
+ *  hand its text off to importSaveJson(). Split out from the file-input's change handler so
+ *  window.__debug.importSaveFile(file) can drive the exact same path without a real picker. */
+function importSaveFile(file) {
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => importSaveJson(String(reader.result));
+  reader.onerror = () => showToast('Could not read that file');
+  reader.readAsText(file);
+}
+
+document.getElementById('btn-saveload-download').addEventListener('click', () => downloadSave());
+const saveloadFileInputEl = document.getElementById('saveload-file-input');
+document.getElementById('btn-saveload-upload').addEventListener('click', () => saveloadFileInputEl.click());
+saveloadFileInputEl.addEventListener('change', () => {
+  const file = saveloadFileInputEl.files && saveloadFileInputEl.files[0];
+  importSaveFile(file);
+  saveloadFileInputEl.value = ''; // allow re-selecting the same filename later
+});
+
 /** Immediate fresh settlement, no trip back to the menu -- same behaviour the [R] key and the
  *  "New"/game-over buttons always had, except the map size / aggression / citizen count /
  *  storyteller now come from whatever the player configured for this run instead of a hardcoded
@@ -918,6 +1080,104 @@ function toggleResearch(force) {
 input.onToggleResearch = () => toggleResearch();
 input.onCloseResearch = () => toggleResearch(false);
 
+// ---------------------------------------------------------------- work priorities panel
+// RimWorld Work-tab-style grid: every living citizen (row) x jobs.js's 4 non-needs WorkCategory
+// columns (Construction/Hauling/Harvesting/Animal Handling). Reached from the citizen inspector's
+// button (index.html #insp-workprio-btn) rather than the topbar -- this is a per-citizen roster
+// tool, not a colony-wide report like Finance/Research. Same full-screen-overlay convention as
+// those two, just with its own toggle wired here instead of an input.js hotkey (no existing key
+// slot fit, and the inspector button is a perfectly discoverable entry point).
+const workprioEl = document.getElementById('workprio');
+const workprioTableEl = document.getElementById('workprio-table');
+
+function toggleWorkPriorities(force) {
+  const show = force != null ? force : workprioEl.classList.contains('hidden');
+  workprioEl.classList.toggle('hidden', !show);
+  if (show) renderWorkPriorities();
+}
+document.getElementById('insp-workprio-btn').addEventListener('click', () => toggleWorkPriorities());
+document.getElementById('btn-workprio-close').addEventListener('click', () => toggleWorkPriorities(false));
+
+const WORKPRIO_CYCLE_MAX = 3; // priority tiers 1-3, plus 0 (Off) -- matches WORK_CATEGORY_FIELD's 4 categories
+
+/** Full rebuild of the citizen x category grid. Only ever called while the overlay is open
+ *  (toggleWorkPriorities/the per-cell click handler below), so a rebuild-on-every-click is cheap
+ *  enough -- same "no diffing needed, small enough list" reasoning as renderResearch. */
+function renderWorkPriorities() {
+  const c = world.citizens;
+  workprioTableEl.innerHTML = '';
+  const thead = document.createElement('thead');
+  thead.innerHTML = '<tr><th>Citizen</th>' +
+    WORK_CATEGORY_ORDER.map(cat => `<th>${WORK_CATEGORY_LABELS[cat]}</th>`).join('') +
+    '<th></th></tr>';
+  workprioTableEl.appendChild(thead);
+
+  const tbody = document.createElement('tbody');
+  let anyRows = false;
+  for (let i = 0; i < c.count; i++) {
+    if (!c.isAliveAt(i)) continue;
+    anyRows = true;
+    const tr = document.createElement('tr');
+    const role = world.roster.isStaff(c.id[i]) ? world.roster.kindOf(c.id[i]) : 'Citizen';
+    const nameTd = document.createElement('td');
+    nameTd.innerHTML = `<div class="wp-name">${c.name[i]}</div><div class="wp-role">${role}</div>`;
+    tr.appendChild(nameTd);
+
+    for (const cat of WORK_CATEGORY_ORDER) {
+      const td = document.createElement('td');
+      const cell = document.createElement('div');
+      const field = WORK_CATEGORY_FIELD[cat];
+      const custom = c.hasWorkPriorities[i] === 1;
+      const value = c[field][i];
+      cell.className = 'wp-cell ' + (!custom ? 'wp-default' : value === 0 ? 'wp-off' : `wp-p${value}`);
+      cell.textContent = !custom ? 'Default' : value === 0 ? 'Off' : String(value);
+      cell.title = !custom
+        ? 'Not customized -- this citizen still follows the original autonomous priority order. Click to start customizing.'
+        : value === 0 ? 'Off -- this citizen never does this job.' : `Priority ${value} (lower = higher priority).`;
+      cell.addEventListener('click', () => {
+        // First click on a still-Default citizen turns on their override (equal-tier defaults on
+        // every OTHER category, see citizens.js's spawn(), so clicking one cell doesn't leave the
+        // other three silently uninitialized) and starts the clicked cell's own cycle fresh at 1
+        // -- otherwise the pre-seeded equal-tier default of 1 would make the very first click jump
+        // straight to 2, which reads as broken against the documented Off -> 1 -> 2 -> 3 cycle.
+        if (c.hasWorkPriorities[i] !== 1) {
+          c.hasWorkPriorities[i] = 1;
+          c[field][i] = 1;
+        } else {
+          c[field][i] = (c[field][i] + 1) % (WORKPRIO_CYCLE_MAX + 1);
+        }
+        renderWorkPriorities();
+      });
+      td.appendChild(cell);
+      tr.appendChild(td);
+    }
+
+    const resetTd = document.createElement('td');
+    if (c.hasWorkPriorities[i] === 1) {
+      const resetBtn = document.createElement('button');
+      resetBtn.className = 'wp-reset';
+      resetBtn.textContent = 'Reset';
+      resetBtn.title = 'Clear this citizen\'s overrides and go back to the default autonomous order.';
+      resetBtn.addEventListener('click', () => {
+        c.hasWorkPriorities[i] = 0;
+        c.workPriorityConstruction[i] = 1; c.workPriorityHauling[i] = 1;
+        c.workPriorityHarvesting[i] = 1; c.workPriorityAnimal[i] = 1;
+        renderWorkPriorities();
+      });
+      resetTd.appendChild(resetBtn);
+    }
+    tr.appendChild(resetTd);
+    tbody.appendChild(tr);
+  }
+  workprioTableEl.appendChild(tbody);
+  if (!anyRows) {
+    const empty = document.createElement('div');
+    empty.className = 'wp-empty';
+    empty.textContent = 'No living citizens.';
+    workprioTableEl.appendChild(empty);
+  }
+}
+
 // ---------------------------------------------------------------- onboarding (tutorial.js)
 // The guided tour and the reference panel own all of their own DOM/controls; main.js only has to
 // bind the topbar button + hotkey and trigger the tour from the new-game path (see beginSettlement).
@@ -963,6 +1223,7 @@ function renderResearch() {
         showToast(`Researched: ${node.name}`);
         world.milestoneLog.push({ tick: world.currentTick, text: `Research complete: ${node.name}` });
         if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+        checkResearchAchievements(world.research, RESEARCH_NODES);
         renderResearch();
       });
       card.appendChild(btn);
@@ -1275,6 +1536,18 @@ function updateTopbar() {
   const pollutionEl = document.getElementById('stat-pollution');
   pollutionEl.textContent = Math.round(world.pollution);
   pollutionEl.classList.toggle('danger', world.pollution > 150);
+  // Unrest (world.js's UNREST_* / world.unrestLevel/unrestActive): stays out of the topbar
+  // entirely on a healthy colony (kept hidden below a "starting to matter" floor) rather than
+  // showing a 0%/1% reading all the time -- this is meant to read as a rare warning, not
+  // background noise, matching the crisis-not-clutter brief.
+  const unrestWrapEl = document.getElementById('stat-unrest-wrap');
+  const unrestVisible = world.unrestActive || world.unrestLevel > 0.15;
+  unrestWrapEl.classList.toggle('hidden', !unrestVisible);
+  if (unrestVisible) {
+    const unrestEl = document.getElementById('stat-unrest');
+    unrestEl.textContent = Math.round(world.unrestLevel * 100) + '%';
+    unrestEl.classList.toggle('danger', world.unrestActive);
+  }
   const night = isNight(world.timeOfDay);
   document.getElementById('stat-daynight-icon').textContent = night ? '🌙' : '☀';
   document.getElementById('stat-daynight').textContent = (night ? 'Night ' : 'Day ') + Math.round(world.timeOfDay * 100) + '%';
@@ -1338,6 +1611,13 @@ const titleSetupEl = document.getElementById('title-setup');
  *  or not a game is already running (restart/expand both call it over a live world). */
 function startGame(newWorld) {
   if (!newWorld) { console.warn('[SimWorldHost] startGame called without a world'); return null; }
+  // metaprogress.js's lifetime stats (see that module's recordGameAbandoned doc comment): a
+  // settlement that's about to be replaced (restart, load-over-a-running-game, conquest
+  // expansion) without ever reaching its own game-over still banks its numbers -- this is the one
+  // choke point every one of those paths already goes through, since they all end in a call here.
+  // No-op if there's no previous world (title-screen "New Game"/"Continue") or it already
+  // game-overed (recordGameEnd already banked it from world.js's tick()).
+  if (world) recordGameAbandoned(world);
   world = newWorld;
   attachAudioHooks(world);
   lastAutosaveTick = world.currentTick; // full interval before the first autosave of this run
@@ -1381,13 +1661,16 @@ function startGame(newWorld) {
 /** Drop the running game and return to the menu. `world = null` is what actually stops the sim:
  *  frame() early-returns on it, so the tick loop keeps running but does nothing. */
 function showTitleScreen() {
+  // Same "bank a run that never reached its own game-over" reasoning as startGame() above --
+  // Quit to Title is the other path that can discard a live settlement.
+  if (world) recordGameAbandoned(world);
   world = null;
   document.body.classList.add('pregame');
   titleEl.classList.remove('hidden');
   titleMainEl.classList.remove('hidden');
   titleSetupEl.classList.add('hidden');
   // Any overlay left open by the game being torn down would otherwise reappear on the next start.
-  for (const id of ['worldmap', 'finance', 'research', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
+  for (const id of ['worldmap', 'finance', 'research', 'workprio', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
     document.getElementById(id).classList.add('hidden');
   }
   // Quitting to title mid-tour shouldn't burn the first-run flag -- the player hasn't actually
@@ -1532,6 +1815,53 @@ document.getElementById('btn-title-load').addEventListener('click', () => load()
 // same reasoning confirmedLoad() uses for the title-screen branch.
 document.getElementById('btn-title-resume-autosave').addEventListener('click', () => loadAutosave());
 
+// ---------------------------------------------------------------- statistics / achievements overlay
+// Title-screen-only (see index.html's #statspanel), same reasoning as #credits directly below --
+// no in-game entry point, so nothing to worry about across a startGame()/showTitleScreen()
+// transition. Reads metaprogress.js's lifetime totals + ACHIEVEMENTS list directly; this panel is
+// purely a display, it never writes to that module itself (all the writes happen at the
+// event-driven call sites in world.js/worldmap.js/jobs.js/main.js's research handler above).
+const statsEl = document.getElementById('statspanel');
+const statsRowsEl = document.getElementById('stats-rows');
+const statsAchievementsEl = document.getElementById('stats-achievements');
+const statsSubEl = document.getElementById('stats-sub');
+
+function fmtNum(n) { return Math.round(n || 0).toLocaleString(); }
+
+function renderStats() {
+  const m = getMeta();
+  const rows = [
+    ['Settlements played', fmtNum(m.gamesPlayed)],
+    ['Longest survival', `${fmtNum(m.longestSurvivalTicks)} ticks (Wave ${fmtNum(m.longestSurvivalWaves)})`],
+    ['Most citizens alive at once', fmtNum(m.mostCitizensAlive)],
+    ['Attackers killed, lifetime', fmtNum(m.totalAttackersKilled)],
+    ['Scrap earned, lifetime', fmtNum(m.totalScrapEarned)],
+  ];
+  statsRowsEl.innerHTML = rows.map(([label, val]) =>
+    `<div class="stats-row"><span class="label">${label}</span><span class="val">${val}</span></div>`).join('');
+
+  const unlockedCount = ACHIEVEMENTS.filter(a => isAchievementUnlocked(a.id)).length;
+  statsSubEl.textContent = `${unlockedCount} of ${ACHIEVEMENTS.length} achievements unlocked`;
+
+  statsAchievementsEl.innerHTML = ACHIEVEMENTS.map(a => {
+    const unlocked = isAchievementUnlocked(a.id);
+    const ts = unlocked ? new Date(m.achievements[a.id]).toLocaleDateString() : null;
+    return `<div class="ach-card${unlocked ? ' done' : ''}">` +
+      `<div class="ach-name">${unlocked ? '🏆' : '🔒'} ${a.name}</div>` +
+      `<div class="ach-desc">${a.desc}</div>` +
+      (unlocked ? `<div class="ach-date">Unlocked ${ts}</div>` : '') +
+      `</div>`;
+  }).join('');
+}
+
+function toggleStats(force) {
+  const show = force != null ? force : statsEl.classList.contains('hidden');
+  statsEl.classList.toggle('hidden', !show);
+  if (show) renderStats();
+}
+document.getElementById('btn-title-stats').addEventListener('click', () => toggleStats(true));
+document.getElementById('btn-stats-close').addEventListener('click', () => toggleStats(false));
+
 // ---------------------------------------------------------------- credits / about overlay
 // Title-screen-only (see index.html's #credits) -- there's no in-game entry point, so no need to
 // worry about it being left open across a startGame()/showTitleScreen() transition.
@@ -1592,6 +1922,10 @@ function frame() {
   if (autosaveIndicatorTimer > 0) {
     autosaveIndicatorTimer--;
     if (autosaveIndicatorTimer === 0) autosaveIndicatorEl.classList.remove('show');
+  }
+  if (achievementToastTimer > 0) {
+    achievementToastTimer--;
+    if (achievementToastTimer === 0) achievementToastEl.classList.remove('show');
   }
 }
 

@@ -218,6 +218,62 @@ still gets the long survival time. If confirmed, the fix is almost certainly in
    (the "settlements giving each other resources" part of the ask). UI: a topbar button or `M`
    key opens a full-screen map overlay in the same DOM-panel style as the rest of the UI.
 
+## REMAINING-GAPS WAVE (this session, via 7 more parallel subagents): DONE
+
+User asked "what else are we missing" a third time; the honest answer by this point was mostly
+small polish plus two genuinely practical gaps (save reliability under `file://`, and zero touch
+input despite being a browser game). All 7 landed cleanly.
+
+- **Save export/import to file** — Download/Upload Save buttons (title screen + pause menu),
+  reusing the exact `world.serialize()` payload the existing save systems already produce.
+  Addresses a real risk: every save mechanism (manual/slots/autosave) writes to `localStorage`,
+  which is genuinely unreliable under a `file://` origin (this project's whole "double-click
+  index.html" design point) — a file-backed save is a durable path that doesn't depend on it.
+- **Touch/mobile input** — implemented as a thin shim feeding synthesized mouse-shaped events
+  into the *existing* mouse handlers (one-finger drag/tap literally reuses `_onDown`/`_onMove`/
+  `_onUp`, not a parallel code path), plus new two-finger pan/pinch state. Caught and fixed a
+  real bug in the process: touch-start has no "hover" preamble the way mouse always does (a
+  `mousedown` is necessarily preceded by a `mousemove`), so the first tile of a touch-drag
+  build was landing wrong until `_updateHover()` was added to the touch-start path.
+- **Per-citizen work-priority table** — a RimWorld Work-tab-style override (Construction/
+  Hauling/Harvesting/Animal, 4 categories mapped 1:1 to the existing non-needs `JobState`s) that
+  biases, not replaces, the needs-first autonomy. Citizens with no override keep the exact
+  original fixed-priority behavior (verified byte-for-byte identical).
+- **Formal room roles** — Bedroom/Dining/Recreation Room classification requiring the matching
+  zone AND furniture (a bed, a table) to validate; the existing room-refill mood/need bonus now
+  gates on role validity, not just "any enclosed room" (verified an exact 1.63x refill-rate
+  change the moment the missing furniture is built).
+- **Riot/unrest crisis** — a colony-wide `unrestLevel` (reusing `grading.js`'s Wellbeing axis
+  rather than recomputing it) with hysteresis trigger/resolve thresholds, applying a real 0.7x
+  colony-wide rate penalty (stacking with individual `OnBreak`) while active. Verified a healthy
+  colony never comes close to spuriously triggering it.
+- **Power grid overload/explosion risk** — per-segment load vs. generator capacity; exceeding it
+  soft-fails the powered damage/range bonus (verified exact damage-output match) and adds a real,
+  low, tuned fire-ignition risk reusing `fire.js`'s existing spread/damage system rather than a
+  parallel one.
+- **Persistent meta-progression / achievements** — 11 achievements checked against real in-game
+  numbers (research node count, region count, generator variety), lifetime stats in a dedicated
+  `localStorage` key separate from any save/slot/autosave key, verified accumulating correctly
+  across multiple runs and surviving a page reload.
+
+**A systemic bug class caught during this round, worth remembering going forward**: the
+meta-progression agent found that `build.py`'s flat-concatenation bundling means EVERY top-level
+`function`/`const`/`let`/`class` name across all of `src/*.js` shares one global scope — a
+same-named helper in two different files silently collides, and the later one in `build.py`'s
+`ORDER` wins with no error (their own `load()`/`unlock()` helpers had been silently overwritten
+by unrelated same-named functions in `main.js`/`audio.js`). Fixed by renaming to underscore-
+prefixed internal names. **Verified in this integration pass**: a full sweep of the rebuilt
+bundle (`grep -oE "^(async function|function) [A-Za-z0-9_]+" game.bundle.js | sort | uniq -d`)
+found zero duplicate top-level declarations across all 251 functions — this specific check is
+worth re-running after any future large multi-agent pass, since it's a silent-failure class that
+produces no build error and no console error until the exact wrong function happens to get
+called.
+
+**Verification**: full rebuild, zero duplicate top-level names (251 functions checked), zero
+console errors, `tests/run.html` still 85/85 passing, and a 3-seed soak test came back byte-for-
+byte identical to the established baseline (22568/21241/21344 ticks) confirming zero balance
+drift from this entire round despite the new crisis/overload systems being active throughout.
+
 ## MENUS/UX WAVE (this session, via 8 more parallel subagents): DONE
 
 User asked what was missing for "menus, setup, things like that" — the meta-game wrapper around

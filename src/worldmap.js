@@ -12,6 +12,8 @@
 // because the map has to OUTLIVE any individual SimWorld -- expanding to a new region throws the
 // old SimWorld away and constructs a fresh one, and the conquest progress must survive that.
 
+import { checkConquestAchievements } from './metaprogress.js';
+
 const GRID_COLS = 4;
 const GRID_ROWS = 4;
 
@@ -178,6 +180,9 @@ export function tickWorldMap(world) {
       r.owned = true;
       world.milestoneLog.push({ tick: world.currentTick, text: `${r.name} is fully under your control` });
       if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+      // metaprogress.js's Conquest achievements -- checked right here, the instant a region flips
+      // to owned, rather than polled from tick().
+      checkConquestAchievements(wm);
     }
   } else {
     r.control = 100;

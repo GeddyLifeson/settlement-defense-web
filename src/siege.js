@@ -2,7 +2,7 @@
 // combat resolution, scrap rewards).
 import { SCRAP_PER_KILL } from './economy.js';
 import { CitizenFlags } from './citizens.js';
-import { isPoweredAt } from './power.js';
+import { isPoweredAt, hasPoweredBonus } from './power.js';
 import { PASSION_GAIN_MULT } from './backstories.js';
 import { WEAPON_TIERS } from './security.js';
 
@@ -299,6 +299,16 @@ const POWERED_RANGE_MULT = 1.25;
 export function isPowered(structures, x, y) {
   return isPoweredAt(structures, x, y);
 }
+
+// Overload-aware gate for the powered *bonus* specifically (power.js's overload mechanic): true
+// only when this tile is powered AND the segment/nuclear-radius feeding it isn't overloaded.
+// isPowered above stays a plain connectivity check (vehicles.js's electric-garage gate reads it
+// as "is there power at all", which overload deliberately doesn't cut) -- this is strictly for
+// consumer-side bonus decisions like the turret/tesla boost below and world.js's watchtower
+// warning-window boost.
+export function isPoweredBonus(structures, x, y) {
+  return hasPoweredBonus(structures, x, y);
+}
 const ATTACKER_SPEED = 0.03;
 const ATTACKER_CITIZEN_DAMAGE = 0.008;
 const ATTACKER_CONTACT_RANGE = 0.5;
@@ -436,7 +446,7 @@ export function tickTurrets(structures, attackers, onScrap, onFire, onKill) {
     if (s.destroyed || s.underConstruction) continue;
     if (s.cooldown > 0) { s.cooldown--; continue; }
 
-    const powered = isPowered(structures, s.x, s.y);
+    const powered = isPoweredBonus(structures, s.x, s.y);
     const isTesla = s.kind === 'tesla';
     const range = (isTesla ? TESLA_RANGE : TURRET_RANGE) * (powered ? POWERED_RANGE_MULT : 1);
     const damage = (isTesla ? TESLA_DAMAGE : TURRET_DAMAGE) * (powered ? POWERED_DAMAGE_MULT : 1);

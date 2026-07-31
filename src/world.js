@@ -6,7 +6,7 @@ import { CitizenStore, tickNeedsAndMood, tickWander, CitizenFlags } from './citi
 import { StaffRoster, tickStaffDuty, tickStaffOffDuty, tickDogs, maybeSpawnWildAnimal, tickWildAnimals, tickDogBreeding, tickArmoryIssuance } from './security.js';
 import {
   AttackerStore, Structure, WaveSpawner, tickAttackers, tickTurrets,
-  tickAttackerVsCitizens, tickStaffCombat, isPowered, tickNuclearHazard, isNuclearContained,
+  tickAttackerVsCitizens, tickStaffCombat, tickNuclearHazard, isNuclearContained,
   NUCLEAR_WASTE_RATE, ArrivalMethod,
 } from './siege.js';
 import { ZoneGrid, ZoneKind } from './zones.js';
@@ -18,13 +18,14 @@ import { scatterNodes, maybeSpawnNode, ResourceNode } from './resources.js';
 import { tickVehicles, spawnParkedVehicle, parseGarageKind } from './vehicles.js';
 import { detectRooms, roomContaining, computeRoomStats } from './rooms.js';
 import { isWateredAt } from './water.js';
-import { isWindSited } from './power.js';
-import { tickFireIgnition, tickFire } from './fire.js';
+import { isWindSited, hasPoweredBonus, isSegmentOverloadedAt, overloadedSupplyKeys, OVERLOAD_FIRE_CHANCE_PER_TICK } from './power.js';
+import { tickFireIgnition, tickFire, igniteStructure } from './fire.js';
 import { DAY_NIGHT_CYCLE_TICKS } from './schedule.js';
 import { tickWorldMap } from './worldmap.js';
 import { createResearchState, tickResearch, serializeResearch, deserializeResearch } from './research.js';
 import { initWeather, tickWeather, tickRandomEvents, weatherWanderSpeedMult } from './weather.js';
 import { computeGrading, GRADING_INTERVAL_TICKS } from './grading.js';
+import { checkWaveAchievements, checkPopulationAchievement, recordGameEnd } from './metaprogress.js';
 
 // Exported: weather.js's wanderer-joins event draws from this same pool (via world._namePool)
 // rather than importing it directly, to avoid a circular import (world.js already imports
@@ -62,6 +63,26 @@ const REFUGEE_MAX_GROUP = 3;
 const FINANCE_SNAPSHOT_INTERVAL = 300; // ticks between budget-report history snapshots, see finance comment below
 const FINANCE_HISTORY_MAX = 20; // capped rolling window of finance snapshots kept for the trend sparkline
 
+// Unrest (Prison Architect's riot state-machine, reframed genre-neutral): a COLONY-WIDE crisis
+// distinct from an individual citizen's OnBreak (citizens.js -- that's a per-citizen speed/render
+// state that fires whenever *one* citizen's own mood crashes). unrestLevel blends the fraction of
+// the living population currently OnBreak with the Settlement Grading Wellbeing axis (grading.js
+// -- reused rather than re-averaging mood a second time) and eases toward that blend each
+// throttle step rather than snapping, same "slow trend, not a single bad tick" idea as
+// citizens.js's mood easing. unrestActive only flips on once unrestLevel has sat at or above
+// UNREST_TRIGGER_THRESHOLD for UNREST_SUSTAIN_TICKS running ticks (a genuine sustained crisis,
+// not one bad reading) and resolves at a lower UNREST_RESOLVE_THRESHOLD (hysteresis, so it can't
+// flicker on/off right at the boundary) -- there's no player action to "put it down", it resolves
+// on its own once the same root causes an individual OnBreak already responds to (beds, food,
+// room quality) improve. The actual penalty while active lives in jobs.js (UNREST_RATE_MULT),
+// applied to every citizen's work/build/harvest/travel rate, not just the already-OnBreak ones --
+// see that file's constant for the exact multiplier.
+const UNREST_INTERVAL_TICKS = GRADING_INTERVAL_TICKS; // piggyback grading.js's own throttle cadence -- wellbeing only updates this often anyway
+const UNREST_EASE = 0.15; // per UNREST_INTERVAL_TICKS step
+const UNREST_TRIGGER_THRESHOLD = 0.55; // deliberately high -- this should be rare, not background noise
+const UNREST_RESOLVE_THRESHOLD = 0.35;
+const UNREST_SUSTAIN_TICKS = 600; // ~60s at 10Hz sustained at/above the trigger threshold before it actually flips on
+
 export class SimWorld {
   constructor(width, height, seed, aggression = AggressionPreset.Calm, startingCitizens = 24) {
     this.width = width;
@@ -74,6 +95,10 @@ export class SimWorld {
     this.paused = false;
     this.gameOver = false;
     this.milestoneLog = [];
+    // power.js's overload mechanic: tick-over-tick diff set so the milestone below logs only the
+    // first tick a given segment/nuclear-bucket actually crosses into overload, not every tick it
+    // stays there. Purely transient bookkeeping -- deliberately not part of save/load state.
+    this._prevOverloadedSupply = new Set();
     this.pollution = 0; // SEA:R's signature mechanic -- unmanaged waste makes waves worse, see director.js
     this.nuclearWaste = 0; // separate hazard resource from a nuclear generator, see siege.js's NUCLEAR_* comment
     this.ethanolPenaltyTimer = 0; // ethanol-fuel truck tradeoff (vehicles.js) -- counts down after a haul, halving Food zone refill meanwhile
@@ -96,6 +121,15 @@ export class SimWorld {
     // colony can still wall up and put down turrets on tick 0.
     this.research = createResearchState();
     this._lastWaveLogged = 0;
+
+    // Per-run counters feeding metaprogress.js's cross-run lifetime stats (see that module's
+    // header comment) -- purely additive bookkeeping here, this world instance dies at
+    // game-over/restart/quit-to-title same as everything else on it, but the numbers get folded
+    // into localStorage's lifetime totals right before that happens (recordGameEnd/
+    // recordGameAbandoned, called from this file's tick() and from main.js respectively).
+    this.peakAliveCitizens = 0;   // highest alive-citizen count seen this run, updated in tick()
+    this.attackersKilled = 0;     // count (not scrap) of attackers killed this run, see addScrap()
+    this.scrapEarnedThisRun = 0;  // cumulative scrap EARNED this run, never decremented by spending -- distinct from this.scrap
 
     // Budget/finance ledger (Prison Architect's budget report, see FEATURE_RESEARCH.md): the
     // scrap economy itself is unchanged (still just world.scrap, a single running total) -- this
@@ -126,6 +160,12 @@ export class SimWorld {
     // so a fresh colony shows its real scores immediately rather than placeholder 100s.
     this.grading = { safety: 100, wellbeing: 100, sustainability: 100, cohesion: 100 };
     this._gradingPrevScrap = this.scrap;
+
+    // Unrest (see the UNREST_* constants' doc comment above): starts calm/inactive, updated by
+    // _updateUnrest() below every UNREST_INTERVAL_TICKS.
+    this.unrestLevel = 0;
+    this.unrestActive = false;
+    this._unrestAboveTicks = 0; // running count of ticks unrestLevel has sat at/above UNREST_TRIGGER_THRESHOLD
 
     // Presentation-layer audio hooks (see audio.js) -- optional callbacks the host app (main.js)
     // can assign after construction. Left null by default so world.js/siege.js never need to
@@ -210,12 +250,13 @@ export class SimWorld {
   addScrap(amount, kind) {
     this.scrap += amount;
     if (amount > 0 && this.finance) {
-      if (kind === 'kill') this.finance.killScrap += amount;
+      if (kind === 'kill') { this.finance.killScrap += amount; this.attackersKilled++; }
       else if (kind === 'harvest') this.finance.harvestScrap += amount;
       else if (kind === 'haul') this.finance.haulScrap += amount;
       else if (kind === 'recycling') this.finance.recyclingScrap += amount;
       else if (kind === 'conquest') this.finance.conquestScrap += amount;
       else this.finance.otherScrap += amount;
+      this.scrapEarnedThisRun += amount; // metaprogress.js's lifetime scrap-earned stat, see recordGameEnd()
     }
   }
 
@@ -285,6 +326,51 @@ export class SimWorld {
     this.onRandomEvent?.(text);
   }
 
+  // Unrest (see the UNREST_* constants' doc comment above the class): throttled to
+  // UNREST_INTERVAL_TICKS, same cadence grading.js's Wellbeing axis already updates on, so this
+  // reads a fresh value each time rather than a stale one. Eases unrestLevel toward a target
+  // blend of "how many citizens are OnBreak right now" and "how bad is Wellbeing right now",
+  // then applies the sustained-duration + hysteresis gate described above to flip unrestActive.
+  _updateUnrest() {
+    if (this.currentTick % UNREST_INTERVAL_TICKS !== 0) return;
+
+    let aliveCount = 0, onBreakCount = 0;
+    for (let i = 0; i < this.citizens.count; i++) {
+      if (!this.citizens.isAliveAt(i)) continue;
+      aliveCount++;
+      if (this.citizens.isOnBreakAt(i)) onBreakCount++;
+    }
+    const onBreakFraction = aliveCount > 0 ? onBreakCount / aliveCount : 0;
+    const wellbeingDeficit = 1 - (this.grading?.wellbeing ?? 100) / 100;
+    const target = Math.max(0, Math.min(1, 0.65 * onBreakFraction + 0.35 * wellbeingDeficit));
+    this.unrestLevel += (target - this.unrestLevel) * UNREST_EASE;
+    this.unrestLevel = Math.max(0, Math.min(1, this.unrestLevel));
+
+    if (this.unrestLevel >= UNREST_TRIGGER_THRESHOLD) {
+      this._unrestAboveTicks += UNREST_INTERVAL_TICKS;
+    } else if (this.unrestLevel < UNREST_RESOLVE_THRESHOLD) {
+      this._unrestAboveTicks = 0;
+    }
+    // Between the resolve and trigger thresholds, _unrestAboveTicks is left alone -- neither
+    // building nor reset -- so a value oscillating right at the boundary doesn't get its
+    // sustained-duration progress wiped by a single throttle-step dip.
+
+    if (!this.unrestActive && this._unrestAboveTicks >= UNREST_SUSTAIN_TICKS) {
+      this.unrestActive = true;
+      const text = 'Unrest is spreading through the settlement';
+      this.milestoneLog.push({ tick: this.currentTick, text });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+      this.onRandomEvent?.(text);
+    } else if (this.unrestActive && this.unrestLevel < UNREST_RESOLVE_THRESHOLD) {
+      this.unrestActive = false;
+      this._unrestAboveTicks = 0;
+      const text = 'The settlement has calmed';
+      this.milestoneLog.push({ tick: this.currentTick, text });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+      this.onRandomEvent?.(text);
+    }
+  }
+
   tick() {
     if (this.paused || this.gameOver) return;
     this.currentTick++;
@@ -295,7 +381,7 @@ export class SimWorld {
     // -- unlike detectRooms' cell layout, a room's contents change far more often than its walls
     // do, so this can't be gated behind the wall-signature check below. Read by tickNeedsAndMood
     // just after, via roomContaining, to nudge a citizen's mood based on the room they're in.
-    computeRoomStats(this.rooms, this.grid, this.structures, this);
+    computeRoomStats(this.rooms, this.grid, this.structures, this, this.zones);
 
     tickNeedsAndMood(this.citizens, (i) => this.isStaffOnDutyAt(i), this.rng, this);
     // Off-duty check runs before tickJobs so a staff member whose fatigue/hunger just crossed
@@ -395,6 +481,32 @@ export class SimWorld {
     tickFireIgnition(this.structures, this.rng);
     tickFire(this.structures, this.rng);
 
+    // Power grid overload (Prison Architect's overload/explosion-risk mechanic, power.js): too
+    // many powered turrets/tesla/watchtowers wired to too few/weak generators strains a segment.
+    // hasPoweredBonus (siege.js's turret/tesla boost, watchtower's warning-window boost above)
+    // already stops applying the bonus on an overloaded segment on its own every tick it's read --
+    // the two things left to do here are (a) log a milestone the first tick a segment/nuclear
+    // radius actually crosses into overload, and (b) roll the rare fire-risk consequence, reusing
+    // fire.js's igniteStructure directly rather than a parallel damage system.
+    const overloadedNow = overloadedSupplyKeys(this.structures);
+    for (const key of overloadedNow) {
+      if (this._prevOverloadedSupply.has(key)) continue;
+      this.milestoneLog.push({
+        tick: this.currentTick,
+        text: 'Power grid overloaded -- powered consumers on that line lose their boost, and it now risks catching fire',
+      });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    }
+    this._prevOverloadedSupply = overloadedNow;
+    if (overloadedNow.size > 0) {
+      for (const s of this.structures) {
+        if (s.kind !== 'wire' && !s.kind.startsWith('generator')) continue;
+        if (s.destroyed || s.underConstruction || s.onFire) continue;
+        if (!isSegmentOverloadedAt(this.structures, s.x, s.y)) continue;
+        if (this.rng() < OVERLOAD_FIRE_CHANCE_PER_TICK) igniteStructure(s);
+      }
+    }
+
     // Conquest layer (worldmap.js): advances THIS region's control meter based on how the
     // settlement is doing, and trickles scrap in from every other region you already hold.
     // Strictly additive on top of the scrap economy above -- it adds income, never gates it.
@@ -480,6 +592,10 @@ export class SimWorld {
       });
       if (this.milestoneLog.length > 20) this.milestoneLog.shift();
       this.onWaveIncoming?.();
+      // metaprogress.js's cross-run achievements (see that module's header comment) -- checked
+      // right here rather than every tick, since a wave-complete is exactly the kind of milestone
+      // event the survive-N-ticks / reach-wave-N thresholds should be evaluated against.
+      checkWaveAchievements(this);
     }
 
     // Watchtowers (CCTV/early-warning analog, see FEATURE_RESEARCH.md) give advance notice of
@@ -500,7 +616,7 @@ export class SimWorld {
     // A powered watchtower (generator in range) sees further out in time, same pattern as the
     // powered-turret damage/range boost -- generators are now a real consumer-side upgrade
     // wherever they're built near, not just a pollution-producing decoration.
-    let warningWindow = watchtower ? (isPowered(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
+    let warningWindow = watchtower ? (hasPoweredBonus(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
     let warningSource = watchtower ? 'watchtower' : null;
     if (camera) {
       const cameraWindow = monitorStaffed ? 70 : 30;
@@ -522,9 +638,21 @@ export class SimWorld {
 
     let aliveCitizens = 0;
     for (let i = 0; i < this.citizens.count; i++) if (this.citizens.isAliveAt(i)) aliveCitizens++;
+    // metaprogress.js's "most citizens alive at once" lifetime stat + its Boomtown achievement --
+    // only actually calls into that module when this run's peak just increased (population holds
+    // steady or shrinks far more often than it grows), so this isn't a per-tick achievement check.
+    if (aliveCitizens > this.peakAliveCitizens) {
+      this.peakAliveCitizens = aliveCitizens;
+      checkPopulationAchievement(this.peakAliveCitizens);
+    }
     if (aliveCitizens === 0 && this.citizens.count > 0) {
       this.gameOver = true;
       this.milestoneLog.push({ tick: this.currentTick, text: 'GAME OVER -- the settlement has fallen' });
+      // Roll this run's final numbers into metaprogress.js's lifetime totals right as the run ends
+      // -- see that module's recordGameEnd doc comment for why this is the one authoritative
+      // "did this settlement finish" call site (main.js's recordGameAbandoned covers the other
+      // path, a run discarded while still alive).
+      recordGameEnd(this);
     }
 
     // Finance history snapshot (budget report trend/sparkline, see the constructor's finance
@@ -547,6 +675,11 @@ export class SimWorld {
     // resources.js's maybeSpawnNode/security.js's breed check above -- a modulo gate on
     // currentTick rather than every tick, since nothing downstream needs sub-second freshness.
     if (this.currentTick % GRADING_INTERVAL_TICKS === 0) computeGrading(this);
+
+    // Unrest (see UNREST_* constants above and the _updateUnrest doc comment): runs right after
+    // grading so it reads this tick's freshly-recomputed Wellbeing axis rather than a stale one
+    // from before the throttle window advanced.
+    this._updateUnrest();
   }
 
   serialize() {
@@ -557,6 +690,8 @@ export class SimWorld {
       startingCitizenCount: this.startingCitizenCount, nextRefugeeNameIndex: this._nextRefugeeNameIndex,
       pollution: this.pollution, nuclearWaste: this.nuclearWaste, ethanolPenaltyTimer: this.ethanolPenaltyTimer,
       storyteller: this.storyteller, timeOfDay: this.timeOfDay,
+      unrestLevel: this.unrestLevel, unrestActive: this.unrestActive, unrestAboveTicks: this._unrestAboveTicks,
+      peakAliveCitizens: this.peakAliveCitizens, attackersKilled: this.attackersKilled, scrapEarnedThisRun: this.scrapEarnedThisRun,
       research: serializeResearch(this.research),
       weather: this.weather, weatherTimer: this._weatherTimer,
       waveNumber: this.waveSpawner.waveNumber, nextWaveTick: this.waveSpawner.nextWaveTick,
@@ -622,6 +757,12 @@ export class SimWorld {
     w.pollution = json.pollution || 0;
     w.nuclearWaste = json.nuclearWaste || 0;
     w.ethanolPenaltyTimer = json.ethanolPenaltyTimer || 0;
+    w.unrestLevel = json.unrestLevel || 0;
+    w.unrestActive = json.unrestActive || false;
+    w._unrestAboveTicks = json.unrestAboveTicks || 0;
+    w.peakAliveCitizens = json.peakAliveCitizens || 0;
+    w.attackersKilled = json.attackersKilled || 0;
+    w.scrapEarnedThisRun = json.scrapEarnedThisRun || 0;
     w.storyteller = json.storyteller || 'Cassandra';
     // Pre-research saves have no `research` key -- deserializeResearch falls back to a fresh
     // state, so an old save loads with the survival core unlocked and 0 points rather than

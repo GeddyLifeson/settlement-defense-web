@@ -5,9 +5,10 @@
 import { StaffRoleKind, TerrainKind } from './core.js';
 import { ZONE_COLOR, ZoneKind } from './zones.js';
 import { JobState } from './jobs.js';
-import { isTileEnergized } from './power.js';
+import { isTileEnergized, isSegmentOverloadedAt } from './power.js';
 import { isTileWatered } from './water.js';
 import { isNuclearContained, NUCLEAR_HAZARD_RADIUS } from './siege.js';
+import { roomContaining, ROOM_ROLE_LABEL, RoomRole } from './rooms.js';
 
 const CELL = 24; // px per grid cell at zoom 1
 const OUTLINE = 'rgba(20,16,12,0.75)';
@@ -211,6 +212,7 @@ export class Renderer {
     if (input) {
       this._drawCursor(world, input);
       this._drawSelection(world, input);
+      this._drawRoomLabel(world, input);
     }
   }
 
@@ -374,6 +376,45 @@ export class Renderer {
     ctx.strokeStyle = input.tool ? '#ffffff' : 'rgba(255,255,255,0.3)';
     ctx.lineWidth = 2;
     ctx.strokeRect(px + 1, py + 1, size - 2, size - 2);
+  }
+
+  // Room-role hover label (rooms.js's computeRoomStats/classifyRoomRole, RimWorld/Prison
+  // Architect's "hover a room to see what it is" convention): only shown while no build tool is
+  // selected (so it doesn't fight with zone/structure placement feedback) and only when the
+  // cursor is actually over an enclosed room detectRooms found. Shows the role name, and -- if
+  // the room has a matching zone but is missing furniture -- what's missing, e.g.
+  // "Bedroom (needs a bed)"; a room with no matching zone at all just doesn't get a label
+  // (Unroofed Area is the quiet default, not something worth bannering over every plain room).
+  _drawRoomLabel(world, input) {
+    if (input.tool) return;
+    if (!input.hoverGridX && input.hoverGridX !== 0) return;
+    const room = roomContaining(world.rooms, world.grid, input.hoverGridX + 0.5, input.hoverGridY + 0.5);
+    if (!room || !room.role || room.role === RoomRole.None) return;
+
+    const label = ROOM_ROLE_LABEL[room.role] ?? 'Room';
+    const text = room.roleValid
+      ? label
+      : `${label} (needs ${room.missingRequirements.join(', ')})`;
+
+    const ctx = this.ctx;
+    const [px, py] = this.worldToScreen(input.hoverGridX, input.hoverGridY);
+    const size = CELL * this.zoom;
+    const x = px + size / 2;
+    const y = py - 6;
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+    const padX = 6, padY = 3;
+    const w = ctx.measureText(text).width;
+    ctx.fillStyle = room.roleValid ? 'rgba(24,22,20,0.85)' : 'rgba(90,30,20,0.85)';
+    ctx.fillRect(x - w / 2 - padX, y - 14 - padY, w + padX * 2, 14 + padY * 2);
+    ctx.strokeStyle = room.roleValid ? '#4a9e5f' : '#d95a3a';
+    ctx.lineWidth = 1;
+    ctx.strokeRect(x - w / 2 - padX, y - 14 - padY, w + padX * 2, 14 + padY * 2);
+    ctx.fillStyle = '#f0ece4';
+    ctx.fillText(text, x, y);
+    ctx.textAlign = 'left';
+    ctx.textBaseline = 'alphabetic';
   }
 
   // Ground is pre-rendered once into an offscreen canvas with smooth (bilinearly-interpolated)
@@ -649,6 +690,22 @@ export class Renderer {
   _drawStructureShape(ctx, s, sx, sy, size) {
     ctx.lineWidth = Math.max(1, size * 0.05);
     ctx.strokeStyle = OUTLINE;
+
+    // Overload warning ring (power.js's overload mechanic): drawn underneath the tile's own
+    // shape so it reads as a hazard glow around the wire/generator, not a replacement paint job.
+    // Pulses off the wall clock (same pattern as the boss threat-ring above) so it's still
+    // visible while the sim is paused.
+    if ((s.kind === 'wire' || s.kind.startsWith('generator')) && !s.destroyed && !s.underConstruction &&
+      isSegmentOverloadedAt(this._structuresForPower || [], s.x, s.y)) {
+      const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 180);
+      ctx.save();
+      ctx.strokeStyle = `rgba(230,40,30,${0.5 + 0.4 * pulse})`;
+      ctx.lineWidth = Math.max(2, size * 0.14);
+      ctx.beginPath();
+      ctx.arc(sx, sy, size * 0.62, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
 
     if (s.kind === 'wall') {
       ctx.fillStyle = '#413c34';

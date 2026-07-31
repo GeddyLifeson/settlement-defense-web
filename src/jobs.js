@@ -5,11 +5,12 @@
 // harvesting scrap nodes when nothing needs building (RimWorld-style raw-material gathering).
 import { ZoneKind } from './zones.js';
 import { findUndrivenVehicle, boardVehicle } from './vehicles.js';
-import { roomContaining } from './rooms.js';
+import { roomContaining, RoomRole } from './rooms.js';
 import { getScheduleBlock, ScheduleBlock } from './schedule.js';
 import { Passion, PASSION_GAIN_MULT } from './backstories.js';
 import { isWateredAt } from './water.js';
 import { TAME_CHANCE_PER_TICK, TAME_MAX_TICKS, DOG_POPULATION_CAP } from './security.js';
+import { checkTameAchievement } from './metaprogress.js';
 
 const ROOM_REFILL_BONUS = 1.3; // RimWorld/PA-style: an actually-enclosed room works better than open ground
 // Water grid payoff (water.js): a Food or Recreation zone tile fed by a pump/pipe run refills
@@ -38,6 +39,35 @@ export const JobState = Object.freeze({
   Taming: 14,
 });
 
+// Work Priorities (RimWorld Work-tab-style, see citizens.js's hasWorkPriorities/workPriority*
+// fields and main.js's Work Priorities panel). One category per non-needs JobState pair below --
+// deliberately no categories without a corresponding behavior. Order here doubles as the
+// legacy/default fixed priority ladder's order (Construction > Hauling > Harvesting > Animal),
+// so equal-priority ties in a citizen's custom order break the same way the untouched ladder
+// already does.
+export const WorkCategory = Object.freeze({
+  Construction: 0, // SeekingBuild / Building
+  Hauling: 1,       // SeekingVehicle / Driving
+  Harvesting: 2,    // SeekingScrap / Harvesting
+  Animal: 3,        // SeekingAnimal / Taming
+});
+export const WORK_CATEGORY_ORDER = [
+  WorkCategory.Construction, WorkCategory.Hauling, WorkCategory.Harvesting, WorkCategory.Animal,
+];
+export const WORK_CATEGORY_LABELS = {
+  [WorkCategory.Construction]: 'Construction',
+  [WorkCategory.Hauling]: 'Hauling',
+  [WorkCategory.Harvesting]: 'Harvesting',
+  [WorkCategory.Animal]: 'Animal Handling',
+};
+// Per-citizen priority field name for each category, matching citizens.js's CitizenStore fields.
+export const WORK_CATEGORY_FIELD = {
+  [WorkCategory.Construction]: 'workPriorityConstruction',
+  [WorkCategory.Hauling]: 'workPriorityHauling',
+  [WorkCategory.Harvesting]: 'workPriorityHarvesting',
+  [WorkCategory.Animal]: 'workPriorityAnimal',
+};
+
 const SEEK_SOCIAL_THRESHOLD = 0.35;
 const SEEK_HUNGER_THRESHOLD = 0.45;
 const SEEK_REST_THRESHOLD = 0.4;
@@ -64,10 +94,69 @@ const BUILD_SKILL_GAIN = 0.02;
 const HARVEST_RATE = 3; // scrap per tick pulled from a node
 const HARVEST_SKILL_GAIN = 0.01;
 const ON_BREAK_RATE_MULT = 0.5; // low-mood citizens work/harvest/build/travel at half speed
+// Unrest (world.js's UNREST_* constants/world.unrestActive -- Prison Architect's riot
+// state-machine reframed genre-neutral, see world.js's doc comment for the trigger/resolve
+// design): a COLONY-WIDE penalty distinct from ON_BREAK_RATE_MULT above -- applies to every
+// citizen's work/build/harvest/travel rate while world.unrestActive is true, not just the
+// citizens who happen to already be individually OnBreak. Stacks multiplicatively with
+// ON_BREAK_RATE_MULT for a citizen who's both (0.5 * 0.7 = 0.35x), which is intentional --
+// unrest hits hardest on top of an already-struggling citizen. Deliberately milder than the
+// per-citizen break penalty (0.7 vs 0.5) since this is colony-wide and stacks on top of it.
+const UNREST_RATE_MULT = 0.7;
 
 export function isOnJob(store, i) {
   return store.jobState[i] !== JobState.Idle;
 }
+
+// One try-to-claim helper per WorkCategory, each doing exactly what the original inline Idle-
+// branch code did for that job type (see the git history of tickJobs below) -- factored out so
+// both the legacy fixed-order ladder and a citizen's custom Work Priorities order can call the
+// same claim logic instead of drifting apart. Returns true (and mutates store/jobState/_jobRef)
+// only if a job of that category was actually available and claimed this tick.
+function tryClaimConstruction(store, i, structures, idOf) {
+  const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i));
+  if (!blueprint) return false;
+  blueprint.claimedBy = idOf(i);
+  store.jobState[i] = JobState.SeekingBuild;
+  store.targetX[i] = blueprint.x; store.targetY[i] = blueprint.y;
+  store._jobRef[i] = blueprint;
+  return true;
+}
+
+function tryClaimHauling(store, i, world) {
+  const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i]);
+  if (!vehicle) return false;
+  store.jobState[i] = JobState.SeekingVehicle;
+  store.targetX[i] = vehicle.x; store.targetY[i] = vehicle.y;
+  store._jobRef[i] = vehicle;
+  return true;
+}
+
+function tryClaimHarvesting(store, i, resourceNodes) {
+  const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
+  if (!node) return false;
+  store.jobState[i] = JobState.SeekingScrap;
+  store.targetX[i] = node.x; store.targetY[i] = node.y;
+  store._jobRef[i] = node;
+  return true;
+}
+
+function tryClaimAnimal(store, i, world, idOf) {
+  const animal = findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i]);
+  if (!animal) return false;
+  animal.claimedBy = idOf(i);
+  store.jobState[i] = JobState.SeekingAnimal;
+  store.targetX[i] = animal.x; store.targetY[i] = animal.y;
+  store._jobRef[i] = animal;
+  return true;
+}
+
+const WORK_CATEGORY_CLAIM = {
+  [WorkCategory.Construction]: (store, i, structures, resourceNodes, world, idOf) => tryClaimConstruction(store, i, structures, idOf),
+  [WorkCategory.Hauling]: (store, i, structures, resourceNodes, world, idOf) => tryClaimHauling(store, i, world),
+  [WorkCategory.Harvesting]: (store, i, structures, resourceNodes, world, idOf) => tryClaimHarvesting(store, i, resourceNodes),
+  [WorkCategory.Animal]: (store, i, structures, resourceNodes, world, idOf) => tryClaimAnimal(store, i, world, idOf),
+};
 
 function findNearestBlueprint(structures, x, y, excludeClaimedBy) {
   let best = null, bestDist = Infinity;
@@ -167,6 +256,24 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         if (rec) { store.jobState[i] = JobState.SeekingRec; store.targetX[i] = rec.x; store.targetY[i] = rec.y; continue; }
       }
 
+      // Work Priorities override (RimWorld Work-tab-style, see citizens.js's hasWorkPriorities/
+      // workPriority* fields and main.js's Work Priorities panel). Only a citizen the player has
+      // actually opened that panel for takes this branch; everyone else falls through to the
+      // original fixed ladder below completely untouched. Enabled categories (priority > 0) are
+      // tried in ascending priority-number order (lower = higher priority, ties broken by
+      // WORK_CATEGORY_ORDER, which is the same order the legacy ladder below uses), and a
+      // category set to 0 is skipped entirely -- that citizen will never claim that kind of job,
+      // even if it's the only thing available.
+      if (store.hasWorkPriorities[i]) {
+        const order = WORK_CATEGORY_ORDER
+          .filter(cat => store[WORK_CATEGORY_FIELD[cat]][i] > 0)
+          .sort((a, b) => store[WORK_CATEGORY_FIELD[a]][i] - store[WORK_CATEGORY_FIELD[b]][i]);
+        for (const cat of order) {
+          if (WORK_CATEGORY_CLAIM[cat](store, i, structures, resourceNodes, world, idOf)) break;
+        }
+        continue;
+      }
+
       const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i));
       if (blueprint) {
         blueprint.claimedBy = idOf(i);
@@ -249,7 +356,8 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
           : state === JobState.SeekingBuild ? JobState.Building
           : JobState.Harvesting;
       } else {
-        const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1) * (store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1);
+        const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1) * (store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1)
+          * (world?.unrestActive ? UNREST_RATE_MULT : 1);
         store.x[i] += (dx / dist) * speed;
         store.y[i] += (dy / dist) * speed;
       }
@@ -257,7 +365,12 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
     }
 
     if (state === JobState.Eating) {
-      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      const eatRoom = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      // Room-role gate (rooms.js's computeRoomStats/classifyRoomRole): the enclosed-room bonus
+      // only applies to a room actually validated as a Dining Room (Food zone + >=1 table) --
+      // an enclosed space with a Food zone but no table (or no room at all) still refills at the
+      // baseline rate, same as open ground, rather than getting the bonus for four walls alone.
+      const roomBonus = (eatRoom && eatRoom.role === RoomRole.DiningRoom && eatRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
       const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
       // Ethanol-fuel trucks (vehicles.js FUEL_TYPES.ethanol) brew clean fuel out of the
       // settlement's food surplus -- there's no bulk food-stockpile resource in this codebase
@@ -270,14 +383,21 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
     }
 
     if (state === JobState.Sleeping) {
-      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      const sleepRoom = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      // Same role gate as Eating above: only a validated Bedroom (Bedroom zone + >=1 bed) gets
+      // the enclosed-room refill bonus -- four walls around an empty Bedroom zone is not a bed.
+      const roomBonus = (sleepRoom && sleepRoom.role === RoomRole.Bedroom && sleepRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
       store.rest[i] = Math.min(1, store.rest[i] + REFILL_RATE * roomBonus);
       if (store.rest[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
 
     if (state === JobState.Recreating) {
-      const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      const recRoom = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      // Same role gate as Eating/Sleeping above: Recreation Room only requires the zone (see
+      // classifyRoomRole's doc comment -- no furniture kind exists for it), so this mostly just
+      // excludes an enclosed room with no Recreation zone at all from getting the bonus.
+      const roomBonus = (recRoom && recRoom.role === RoomRole.RecreationRoom && recRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
       const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
       store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * waterBonus * (store.trait[i]?.socialGainMult ?? 1));
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
@@ -287,7 +407,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
     if (state === JobState.Building) {
       const bp = store._jobRef?.[i];
       if (!bp || bp.destroyed || !bp.underConstruction) { store.jobState[i] = JobState.Idle; continue; }
-      const buildRateMult = store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1;
+      const buildRateMult = (store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1) * (world?.unrestActive ? UNREST_RATE_MULT : 1);
       bp.buildProgress = Math.min(1, (bp.buildProgress || 0) + BUILD_RATE * (1 + store.skillConstruction[i]) * buildRateMult);
       if (bp.buildProgress >= 1) {
         bp.underConstruction = false;
@@ -301,7 +421,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
     if (state === JobState.Harvesting) {
       const node = store._jobRef?.[i];
       if (!node || node.depleted) { store.jobState[i] = JobState.Idle; continue; }
-      const harvestRateMult = store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1;
+      const harvestRateMult = (store.isOnBreakAt(i) ? ON_BREAK_RATE_MULT : 1) * (world?.unrestActive ? UNREST_RATE_MULT : 1);
       const take = Math.min(HARVEST_RATE * harvestRateMult, node.amount);
       node.amount -= take;
       onScrapGain?.(take);
@@ -342,6 +462,15 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         // same as the starting dog in world.js's constructor.
         world.dogs.push({ ownerId: null, x: animal.x, y: animal.y, cooldown: 0 });
         store.jobState[i] = JobState.Idle;
+        // No milestone existed for a successful taming before this -- worth logging like every
+        // other "something notable just happened" event (refugee arrivals, region control, etc.
+        // in world.js/worldmap.js), and it's the natural event-driven hook point for
+        // metaprogress.js's Beast Tamer achievement rather than polling world.dogs every tick.
+        if (world?.milestoneLog) {
+          world.milestoneLog.push({ tick: world.currentTick, text: `${store.name[i]} tames a wild animal` });
+          if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+        }
+        checkTameAchievement();
         continue;
       }
       if (animal.tameTicks >= TAME_MAX_TICKS) {

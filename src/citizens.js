@@ -56,6 +56,22 @@ export class CitizenStore {
     this.backstory = new Array(capacity).fill(null); // see backstories.js -- childhood/adult flavor pair + skill nudge
     this.passionCombat = new Uint8Array(capacity); // Passion tier (backstories.js), biases skillCombat gain rate
     this.passionConstruction = new Uint8Array(capacity); // Passion tier, biases skillConstruction gain rate
+
+    // Work Priorities (RimWorld Work-tab-style, see jobs.js's WorkCategory/tickJobs). All four
+    // default to 0 (Uint8Array zero-init), but 0 in workPriority* means "disabled" while 0 in
+    // hasWorkPriorities means "no override at all" -- those are deliberately different questions,
+    // so hasWorkPriorities gates whether the workPriority* arrays are consulted. A citizen nobody
+    // has ever opened the Work Priorities panel for has hasWorkPriorities[i] === 0 and jobs.js's
+    // Idle branch runs its original fixed-order ladder for them, completely untouched. Only once
+    // a citizen has been customized (see main.js's Work Priorities panel) does hasWorkPriorities
+    // flip to 1 and these four arrays start mattering: each cell is 0 (never do this job) or a
+    // 1-3 priority tier, lower number = higher priority (RimWorld's inverted-number convention).
+    this.hasWorkPriorities = new Uint8Array(capacity);
+    this.workPriorityConstruction = new Uint8Array(capacity); // JobState SeekingBuild/Building
+    this.workPriorityHauling = new Uint8Array(capacity); // JobState SeekingVehicle/Driving
+    this.workPriorityHarvesting = new Uint8Array(capacity); // JobState SeekingScrap/Harvesting
+    this.workPriorityAnimal = new Uint8Array(capacity); // JobState SeekingAnimal/Taming
+
     this._nextId = 1;
   }
 
@@ -78,6 +94,15 @@ export class CitizenStore {
     const passions = randomPassions(rng, backstory);
     this.passionCombat[i] = passions.combat;
     this.passionConstruction[i] = passions.construction;
+    // Equal-tier defaults so that if the Work Priorities panel ever flips hasWorkPriorities on
+    // without the player touching every cell, the untouched cells tie-break in jobs.js's fixed
+    // array order (Construction, Hauling, Harvesting, Animal) -- the same order the legacy ladder
+    // already uses, so "just enabled overrides, changed nothing yet" reads as unchanged behavior.
+    this.hasWorkPriorities[i] = 0;
+    this.workPriorityConstruction[i] = 1;
+    this.workPriorityHauling[i] = 1;
+    this.workPriorityHarvesting[i] = 1;
+    this.workPriorityAnimal[i] = 1;
     return i;
   }
 

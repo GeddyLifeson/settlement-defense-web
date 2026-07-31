@@ -14,7 +14,7 @@ SRC = ROOT / "src"
 ORDER = [
     "core.js", "traits.js", "backstories.js", "grid.js", "zones.js", "economy.js", "research.js", "resources.js", "vehicles.js",
     "rooms.js", "power.js", "water.js", "citizens.js", "security.js", "siege.js", "relationships.js", "director.js",
-    "schedule.js", "jobs.js", "worldmap.js", "fire.js", "weather.js", "grading.js", "audio.js", "world.js", "render.js", "input.js", "tutorial.js", "main.js",
+    "schedule.js", "jobs.js", "worldmap.js", "fire.js", "weather.js", "grading.js", "audio.js", "metaprogress.js", "world.js", "render.js", "input.js", "tutorial.js", "main.js",
 ]
 
 IMPORT_RE = re.compile(r"^\s*import\s+[\s\S]*?from\s+['\"][^'\"]*['\"];?\s*$", re.MULTILINE)
