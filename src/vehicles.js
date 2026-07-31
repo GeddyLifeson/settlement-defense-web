@@ -123,7 +123,7 @@ export function tickVehicles(world) {
         world.pollution = Math.max(0, world.pollution + fuel.exhaustPollution);
         if (fuel.ethanolPenalty) world.ethanolPenaltyTimer = ETHANOL_PENALTY_TICKS;
         if (v.kind === 'recycling' && v.targetNode && !v.targetNode.depleted) {
-          world.addScrap(Math.round(v.targetNode.amount));
+          world.addScrap(Math.round(v.targetNode.amount), 'haul');
           v.targetNode.amount = 0;
           v.targetNode.depleted = true;
         } else {
@@ -131,7 +131,7 @@ export function tickVehicles(world) {
           // FEATURE_RESEARCH.md): a real pollution reduction plus a small scrap side-benefit
           // from whatever's recoverable, not primarily a scrap-generation vehicle.
           world.pollution = Math.max(0, world.pollution - (25 + world.rng() * 20));
-          world.addScrap(GARBAGE_BONUS_MIN + Math.floor(world.rng() * (GARBAGE_BONUS_MAX - GARBAGE_BONUS_MIN)));
+          world.addScrap(GARBAGE_BONUS_MIN + Math.floor(world.rng() * (GARBAGE_BONUS_MAX - GARBAGE_BONUS_MIN)), 'haul');
         }
         v.targetX = v.garageX; v.targetY = v.garageY;
         v.phase = 'outbound';

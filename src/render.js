@@ -6,6 +6,7 @@ import { StaffRoleKind, TerrainKind } from './core.js';
 import { ZONE_COLOR, ZoneKind } from './zones.js';
 import { JobState } from './jobs.js';
 import { isTileEnergized } from './power.js';
+import { isTileWatered } from './water.js';
 import { isNuclearContained, NUCLEAR_HAZARD_RADIUS } from './siege.js';
 
 const CELL = 24; // px per grid cell at zoom 1
@@ -196,6 +197,7 @@ export class Renderer {
     this._drawFire(world);
     this._drawCitizens(world);
     this._drawDogs(world);
+    this._drawWildAnimals(world);
     this._drawAttackers(world);
     this._drawVehicles(world);
     this._drawSmogHaze(world);
@@ -481,29 +483,105 @@ export class Renderer {
     }
   }
 
+  // Tamed dogs (world.dogs, roster-assignable/combat-capable) get a warm coat + a gold collar
+  // ring; wild untamed animals (world.wildAnimals, see security.js/jobs.js's Taming job) reuse
+  // the same silhouette in a duller, uncollared coat so "this one isn't yours yet" reads clearly
+  // at a glance without needing a whole separate sprite.
   _drawDogs(world) {
+    this._drawAnimal(world.dogs, '#7a5230', '#f2c026');
+  }
+
+  _drawWildAnimals(world) {
+    this._drawAnimal(world.wildAnimals, '#8f8a76', null);
+  }
+
+  _drawAnimal(list, coatColor, collarColor) {
     const ctx = this.ctx;
-    for (const dog of world.dogs || []) {
+    for (const dog of list || []) {
       const [sx, sy] = this.worldToScreen(dog.x, dog.y);
       const s = CELL * this.zoom * 0.4;
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.22, s * 0.34, s * 0.1, 0, 0, Math.PI * 2); ctx.fill();
       ctx.lineWidth = Math.max(1, s * 0.08);
       ctx.strokeStyle = OUTLINE;
-      ctx.fillStyle = '#7a5230';
+      ctx.fillStyle = coatColor;
       ctx.beginPath();
       ctx.ellipse(sx, sy, s * 0.32, s * 0.2, 0, 0, Math.PI * 2);
       ctx.fill(); ctx.stroke();
       ctx.beginPath();
       ctx.arc(sx + s * 0.28, sy - s * 0.05, s * 0.14, 0, Math.PI * 2);
       ctx.fill(); ctx.stroke();
+      if (collarColor) {
+        ctx.strokeStyle = collarColor;
+        ctx.lineWidth = Math.max(1, s * 0.1);
+        ctx.beginPath();
+        ctx.arc(sx + s * 0.28, sy - s * 0.05, s * 0.19, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
   }
 
+  // Per-archetype silhouettes (see siege.js's ATTACKER_ARCHETYPES): size and palette both shift
+  // so the roster is readable at a glance mid-siege without reading a single number.
+  //   Grunt      -- the original small dark-red raider (unchanged, the baseline)
+  //   Brute      -- noticeably larger, heavy slate-plated
+  //   Skirmisher -- smaller and lighter/oranger, reads as "fast and flimsy"
+  //   Boss       -- much larger, violet, plus a pulsing threat ring and a spiked crown
+  static ATTACKER_STYLES = [
+    { scale: 0.6,  body: '#8a1f1f', head: '#c76b4a' }, // Grunt
+    { scale: 0.85, body: '#4a4438', head: '#8f7a5c' }, // Brute
+    { scale: 0.48, body: '#b0521f', head: '#e0a06a' }, // Skirmisher
+    { scale: 1.25, body: '#4a1f5e', head: '#c469e0' }, // Boss
+  ];
+
   _drawAttackers(world) {
+    const ctx = this.ctx;
     for (let i = 0; i < world.attackers.count; i++) {
       if (!world.attackers.isAliveAt(i)) continue;
-      this._drawHumanoid(world.attackers.x[i], world.attackers.y[i], 0.6, '#8a1f1f', '#c76b4a', world.attackers.health[i]);
+      const kind = world.attackers.kind ? world.attackers.kind[i] : 0;
+      const style = Renderer.ATTACKER_STYLES[kind] || Renderer.ATTACKER_STYLES[0];
+      const isBoss = kind === 3;
+
+      if (isBoss) {
+        // Threat ring under the boss, pulsing off the wall clock so it's obvious even when the
+        // sim is paused. Drawn before the body so it reads as ground marking, not an outline.
+        const [bx, by] = this.worldToScreen(world.attackers.x[i], world.attackers.y[i]);
+        const s = CELL * this.zoom * style.scale;
+        const pulse = 0.75 + 0.25 * Math.sin(Date.now() / 220);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(200,90,235,0.85)';
+        ctx.lineWidth = Math.max(2, s * 0.09);
+        ctx.beginPath();
+        ctx.ellipse(bx, by + s * 0.42, s * 0.6 * pulse, s * 0.26 * pulse, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(150,40,190,0.18)';
+        ctx.fill();
+        ctx.restore();
+      }
+
+      this._drawHumanoid(world.attackers.x[i], world.attackers.y[i], style.scale,
+        style.body, style.head, world.attackers.health[i]);
+
+      if (isBoss) {
+        // Spiked crown on top of the head so the boss is distinguishable even in a dense crowd
+        // where the ground ring is occluded.
+        const [bx, by] = this.worldToScreen(world.attackers.x[i], world.attackers.y[i]);
+        const s = CELL * this.zoom * style.scale;
+        ctx.save();
+        ctx.fillStyle = '#f0c040';
+        ctx.strokeStyle = OUTLINE;
+        ctx.lineWidth = Math.max(1, s * 0.05);
+        ctx.beginPath();
+        const baseY = by - s * 0.46, w = s * 0.34;
+        ctx.moveTo(bx - w / 2, baseY);
+        for (let k = 0; k < 3; k++) {
+          ctx.lineTo(bx - w / 2 + w * (k + 0.5) / 3, baseY - s * 0.22);
+          ctx.lineTo(bx - w / 2 + w * (k + 1) / 3, baseY);
+        }
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
     }
   }
 
@@ -515,7 +593,7 @@ export class Renderer {
       const [sx, sy] = this.worldToScreen(s.x, s.y);
       const size = CELL * this.zoom * 0.85;
 
-      if (s.kind !== 'fence' && s.kind !== 'wire') {
+      if (s.kind !== 'fence' && s.kind !== 'wire' && s.kind !== 'pipe') {
         ctx.fillStyle = 'rgba(0,0,0,0.25)';
         ctx.beginPath();
         ctx.ellipse(sx, sy + size * 0.4, size * 0.35, size * 0.12, 0, 0, Math.PI * 2);
@@ -647,6 +725,38 @@ export class Renderer {
       ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill();
       return;
     }
+    if (s.kind === 'pipe') {
+      // Water's answer to 'wire' above -- same thin cross-conduit shape so a chain reads as one
+      // continuous run, but blue-tinted instead of wire's amber so the two grids never get
+      // visually confused when they're laid side by side. Lit only when actually carrying water
+      // back to a pump; dead segments stay a dull blue-grey.
+      const flowing = !s.destroyed && !s.underConstruction && isTileWatered(this._structuresForPower || [], s.x, s.y);
+      ctx.strokeStyle = flowing ? '#3ea0d9' : 'rgba(90,105,115,0.75)';
+      ctx.lineWidth = Math.max(1.5, size * 0.1);
+      ctx.beginPath();
+      ctx.moveTo(sx - size / 2, sy); ctx.lineTo(sx + size / 2, sy);
+      ctx.moveTo(sx, sy - size / 2); ctx.lineTo(sx, sy + size / 2);
+      ctx.stroke();
+      ctx.fillStyle = flowing ? '#9adcf5' : '#5f6d72';
+      ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
+    if (s.kind === 'pump') {
+      // Small well/tower silhouette -- a squat cylindrical drum with a raised spout, distinct
+      // from the generator's boxy housing so the two source buildings don't read as siblings.
+      const running = !s.destroyed && !s.underConstruction;
+      ctx.fillStyle = running ? '#2e5266' : 'rgba(46,60,68,0.6)';
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, size * 0.36, size * 0.4, 0, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = running ? '#3ea0d9' : '#5a6a70'; // water-level band
+      ctx.beginPath();
+      ctx.ellipse(sx, sy + size * 0.08, size * 0.28, size * 0.16, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = running ? '#8c949e' : 'rgba(120,120,120,0.6)';
+      ctx.fillRect(sx - size * 0.06, sy - size * 0.5, size * 0.12, size * 0.24); // spout
+      return;
+    }
     if (s.kind === 'generator') {
       const running = !s.destroyed && !s.underConstruction;
       ctx.fillStyle = running ? '#4a4a52' : 'rgba(60,60,64,0.6)';
@@ -680,6 +790,84 @@ export class Renderer {
       }
       ctx.fillStyle = running ? '#e8ffb0' : '#7a8570';
       ctx.beginPath(); ctx.arc(sx, sy, size * 0.08, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
+    if (s.kind === 'generator_coal') {
+      // "Worse plain generator": a squatter, dirtier housing than 'generator' -- a small coal pile
+      // out front and a dull red (not amber) core light so it visually reads as the cheaper, more
+      // polluting choice at a glance.
+      const running = !s.destroyed && !s.underConstruction;
+      ctx.fillStyle = running ? '#3a332c' : 'rgba(50,46,40,0.6)';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.36, size * 0.8, size * 0.72);
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.36, size * 0.8, size * 0.72);
+      ctx.fillStyle = running ? '#1a1a1a' : '#3a3a3a'; // coal pile
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.3, sy + size * 0.36);
+      ctx.lineTo(sx - size * 0.05, sy + size * 0.12);
+      ctx.lineTo(sx + size * 0.2, sy + size * 0.36);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = running ? '#c0492e' : '#5a4a44'; // dull red core, not the plain generator's amber
+      ctx.beginPath();
+      ctx.arc(sx + size * 0.18, sy - size * 0.12, size * 0.13, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    if (s.kind === 'generator_wind') {
+      // Turbine silhouette: a slim mast + three blades. _windSited (power.js's isWindSited,
+      // recomputed live off the current structures list) tints the blades pale blue when actually
+      // acting as a power source and rust-red when crowded/badly sited, so the siting tradeoff is
+      // visible on the map, not just in a tooltip.
+      const running = !s.destroyed && !s.underConstruction;
+      const sited = s._windSited !== false;
+      ctx.fillStyle = running ? '#5a5a5a' : 'rgba(70,70,70,0.6)';
+      ctx.fillRect(sx - size * 0.05, sy - size * 0.05, size * 0.1, size * 0.55); // mast
+      ctx.fillStyle = running ? (sited ? '#bfe6f5' : '#c76b4a') : '#6a6a6a';
+      for (let k = 0; k < 3; k++) {
+        const a = (k / 3) * Math.PI * 2;
+        ctx.save();
+        ctx.translate(sx, sy - size * 0.28);
+        ctx.rotate(a);
+        ctx.beginPath();
+        ctx.ellipse(0, -size * 0.24, size * 0.07, size * 0.24, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.fillStyle = running ? '#3a3a3a' : '#5a5a5a';
+      ctx.beginPath(); ctx.arc(sx, sy - size * 0.28, size * 0.06, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
+    if (s.kind === 'generator_solar') {
+      // Flat panel array in a grid pattern, tilted slightly (a parallelogram, not a square) so it
+      // reads as a solar panel rather than another generic box. Panel tint follows s._openSky
+      // (world.js's tick(), read back by power.js's isSource) the same sited/unsited color logic
+      // as the wind turbine above: bright blue when actually acting as a power source, dull grey
+      // when stuck inside an enclosed room.
+      const running = !s.destroyed && !s.underConstruction;
+      const openSky = s._openSky !== false;
+      ctx.fillStyle = running ? '#2a3038' : 'rgba(45,50,56,0.6)';
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.45, sy + size * 0.3);
+      ctx.lineTo(sx - size * 0.2, sy - size * 0.35);
+      ctx.lineTo(sx + size * 0.45, sy - size * 0.35);
+      ctx.lineTo(sx + size * 0.2, sy + size * 0.3);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      // Panel grid lines: interpolate between the bottom edge (bottomLeft -> bottomRight) and the
+      // top edge (topLeft -> topRight) so the divider lines stay parallel to the panel's tilt.
+      const blX = sx - size * 0.45, blY = sy + size * 0.3;
+      const brX = sx + size * 0.2, brY = sy + size * 0.3;
+      const tlX = sx - size * 0.2, tlY = sy - size * 0.35;
+      const trX = sx + size * 0.45, trY = sy - size * 0.35;
+      ctx.strokeStyle = running ? (openSky ? '#5aa0d9' : '#6a6e72') : 'rgba(90,95,100,0.5)';
+      ctx.lineWidth = Math.max(1, size * 0.03);
+      for (let k = 1; k < 3; k++) {
+        const t = k / 3;
+        ctx.beginPath();
+        ctx.moveTo(blX + (brX - blX) * t, blY + (brY - blY) * t);
+        ctx.lineTo(tlX + (trX - tlX) * t, tlY + (trY - tlY) * t);
+        ctx.stroke();
+      }
       return;
     }
     if (s.kind === 'waste_storage') {
@@ -726,6 +914,20 @@ export class Renderer {
       ctx.strokeStyle = s.destroyed ? 'rgba(120,140,220,0.3)' : '#a0c0ff';
       ctx.lineWidth = Math.max(1, size * 0.06);
       ctx.beginPath(); ctx.arc(sx, sy - size * 0.15, size * 0.16, 0, Math.PI * 2); ctx.stroke();
+      return;
+    }
+    if (s.kind === 'armory') {
+      ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#5a4a38';
+      ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+      ctx.strokeRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+      // Crossed-rifles glyph -- reads as "weapons issued here" at a glance, same idea as the
+      // recycling center's arrow icon just above.
+      ctx.strokeStyle = s.destroyed ? 'rgba(150,150,150,0.4)' : '#d8cba0';
+      ctx.lineWidth = Math.max(1, size * 0.07);
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.2, sy - size * 0.18); ctx.lineTo(sx + size * 0.2, sy + size * 0.18);
+      ctx.moveTo(sx - size * 0.2, sy + size * 0.18); ctx.lineTo(sx + size * 0.2, sy - size * 0.18);
+      ctx.stroke();
       return;
     }
     // turret (default)
@@ -830,7 +1032,13 @@ export class Renderer {
     ctx.fillStyle = '#ff3b30';
     for (let i = 0; i < world.attackers.count; i++) {
       if (!world.attackers.isAliveAt(i)) continue;
-      ctx.fillRect(world.attackers.x[i] * sx - 1.5, world.attackers.y[i] * sy - 1.5, 3, 3);
+      // Bosses get a fatter, brighter dot -- "there is a boss and it is HERE" is exactly the
+      // kind of thing the minimap exists to tell you.
+      const boss = world.attackers.kind && world.attackers.kind[i] === 3;
+      if (boss) ctx.fillStyle = '#e05aff';
+      const r = boss ? 3 : 1.5;
+      ctx.fillRect(world.attackers.x[i] * sx - r, world.attackers.y[i] * sy - r, r * 2, r * 2);
+      if (boss) ctx.fillStyle = '#ff3b30';
     }
 
     // viewport rectangle -- what the main camera currently frames
@@ -841,5 +1049,50 @@ export class Renderer {
       Math.round(x0 * sx) + 0.5, Math.round(y0 * sy) + 0.5,
       Math.max(1, (x1 - x0) * sx), Math.max(1, (y1 - y0) * sy),
     );
+  }
+
+  /** Budget report sparkline (Prison Architect's finance ledger, see world.js's finance comment
+   *  and FEATURE_RESEARCH.md's Prison Architect section): plain Canvas 2D bar chart of
+   *  world.finance.history, one bar per snapshot, green for a net-positive wave-cycle and red for
+   *  net-negative -- same "manual line/bar-plot in a small inline canvas" spirit as drawMinimap
+   *  above, just DOM-driven (called from main.js only while the budget overlay is open) rather
+   *  than every frame. */
+  drawFinanceChart(world, chartCanvas) {
+    const ctx = chartCanvas.getContext('2d');
+    const W = chartCanvas.width, H = chartCanvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#241f1a';
+    ctx.fillRect(0, 0, W, H);
+
+    const history = world.finance?.history || [];
+    if (history.length === 0) {
+      ctx.fillStyle = '#a89e90';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('No history yet -- first snapshot at tick 300', W / 2, H / 2);
+      return;
+    }
+
+    const maxAbs = Math.max(1, ...history.map(h => Math.abs(h.net)));
+    const midY = H / 2;
+    const slot = W / history.length;
+    const barW = Math.max(2, slot * 0.6);
+
+    // zero line
+    ctx.strokeStyle = '#4a4340';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, midY + 0.5);
+    ctx.lineTo(W, midY + 0.5);
+    ctx.stroke();
+
+    history.forEach((h, i) => {
+      const barH = (Math.abs(h.net) / maxAbs) * (H / 2 - 4);
+      const cx = i * slot + slot / 2;
+      ctx.fillStyle = h.net >= 0 ? '#6fbf6f' : '#d9534f';
+      if (h.net >= 0) ctx.fillRect(cx - barW / 2, midY - barH, barW, barH);
+      else ctx.fillRect(cx - barW / 2, midY, barW, barH);
+    });
   }
 }

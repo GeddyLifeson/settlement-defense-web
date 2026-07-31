@@ -4,11 +4,18 @@ import { SimWorld } from './world.js';
 import { Renderer } from './render.js';
 import { InputController, TOOLS } from './input.js';
 import { isNight } from './schedule.js';
+import { PASSION_ICON } from './backstories.js';
 import { worldMap } from './worldmap.js';
 import { playBuildComplete, playWaveAlert, playTurretFire, playKill, playCitizenDowned, isMuted, toggleMute } from './audio.js';
+import { WeatherKind, tryWandererEvent, tryBlightEvent } from './weather.js';
+import { WEAPON_TIERS } from './security.js';
+import {
+  RESEARCH_NODES, isNodeUnlocked, isToolUnlocked, researchBlockedReason, tryResearch,
+} from './research.js';
 
 const SECONDS_PER_TICK = 0.1;
 const SAVE_KEY = 'settlement-defense-save';
+const WEATHER_ICON = { Clear: '🌤', Rain: '🌧', Cold: '❄', Heatwave: '🔥' };
 
 const canvas = document.getElementById('game');
 const renderer = new Renderer(canvas);
@@ -25,6 +32,9 @@ function attachAudioHooks(w) {
   w.onTurretFire = () => playTurretFire();
   w.onKill = () => playKill();
   w.onCitizenDowned = () => playCitizenDowned();
+  // Weather changes + one-off random events (weather.js) surface as a toast, same mechanism as
+  // every other player-visible notification in this file.
+  w.onRandomEvent = (text) => showToast(text);
 }
 
 let world = new SimWorld(64, 64, 12345, 'Calm', 24);
@@ -48,7 +58,24 @@ window.__debug = {
   // conquest-layer handles for console verification (see SESSION_HANDOFF.md's verification pattern)
   toggleWorldMap: (v) => toggleWorldMap(v),
   expandTo: (id) => expandTo(id),
+  // Budget report overlay (world.js's finance ledger) -- same console-verification pattern as
+  // toggleWorldMap above.
+  toggleFinance: (v) => toggleFinance(v),
+  // Research/tech-tree handles (research.js) -- same console-verification pattern.
+  toggleResearch: (v) => toggleResearch(v),
+  research: () => world.research,
+  researchNodes: RESEARCH_NODES,
+  isToolUnlocked: (tool) => isToolUnlocked(world.research, tool),
+  doResearch: (id) => tryResearch(world.research, id),
   audio: { isMuted, toggleMute, playBuildComplete, playTurretFire, playKill, playWaveAlert, playCitizenDowned },
+  // weather.js verification handles: force a weather state directly, or force-roll a one-off
+  // event without waiting on its normal timer/odds.
+  weather: {
+    kinds: WeatherKind,
+    force: (kind) => { world.weather = kind; },
+    triggerWanderer: () => tryWandererEvent(world),
+    triggerBlight: () => tryBlightEvent(world),
+  },
 };
 
 // ---------------------------------------------------------------- toolbar (built once)
@@ -59,14 +86,32 @@ for (const t of TOOLS) {
   btn.dataset.tool = t.tool ?? '';
   btn.innerHTML = `<span><span class="key">[${t.key}]</span>${t.label}</span>` +
     (t.cost != null ? `<span class="cost">$${t.cost}</span>` : '');
-  btn.addEventListener('click', () => input.setTool(t.tool));
+  // Research gate (research.js): clicking a locked tool doesn't select it at all -- it says why
+  // and opens the Research panel, so the gate is discoverable rather than a dead button. The
+  // authoritative gate is still input.js's _place(), this is just the UI mirroring it.
+  btn.addEventListener('click', () => {
+    if (!isToolUnlocked(world.research, t.tool)) {
+      const node = researchNodeForToolLocal(t.tool);
+      showToast(`Locked -- research "${node ? node.name : 'unknown'}" first`);
+      toggleResearch(true);
+      return;
+    }
+    input.setTool(t.tool);
+  });
   toolbarEl.appendChild(btn);
+}
+
+// Local lookup rather than importing researchNodeForTool -- main.js only ever needs it for the
+// toast label above and this keeps the import list to the tree/state helpers.
+function researchNodeForToolLocal(tool) {
+  return RESEARCH_NODES.find(n => n.unlocks.includes(tool)) || null;
 }
 
 function syncToolbarHighlight() {
   for (const btn of toolbarEl.children) {
     const btnTool = btn.dataset.tool || null;
     btn.classList.toggle('active', btnTool === input.tool);
+    btn.classList.toggle('locked', !isToolUnlocked(world.research, btnTool));
   }
 }
 
@@ -82,6 +127,18 @@ document.getElementById('btn-restart-modal').addEventListener('click', () => res
 document.getElementById('btn-recenter').addEventListener('click', () => input.recenter());
 document.getElementById('btn-worldmap').addEventListener('click', () => toggleWorldMap());
 document.getElementById('btn-worldmap-close').addEventListener('click', () => toggleWorldMap(false));
+document.getElementById('btn-finance').addEventListener('click', () => toggleFinance());
+document.getElementById('btn-finance-close').addEventListener('click', () => toggleFinance(false));
+document.getElementById('btn-research').addEventListener('click', () => toggleResearch());
+document.getElementById('btn-research-close').addEventListener('click', () => toggleResearch(false));
+
+// ---------------------------------------------------------------- settlement grading popover
+// Non-carceral reframe of Prison Architect's 4-axis Grading tab (world.grading, see grading.js);
+// purely a read-only display -- clicking just toggles the popover, nothing here writes to world.
+const gradingPopoverEl = document.getElementById('grading-popover');
+document.getElementById('stat-grading-btn').addEventListener('click', () => {
+  gradingPopoverEl.classList.toggle('hidden');
+});
 
 const muteBtn = document.getElementById('btn-mute');
 function syncMuteButton() {
@@ -147,6 +204,99 @@ function toggleWorldMap(force) {
 }
 input.onToggleMap = () => toggleWorldMap();
 input.onCloseMap = () => toggleWorldMap(false);
+input.onToggleFinance = () => toggleFinance();
+input.onCloseFinance = () => toggleFinance(false);
+
+// ---------------------------------------------------------------- research / tech tree overlay
+// Same full-screen-overlay-with-a-toggle-button convention as the conquest map and budget report
+// above (DOM, not canvas -- it's pure UI, not part of the world's coordinate space).
+const researchEl = document.getElementById('research');
+const researchGridEl = document.getElementById('research-grid');
+const researchSubEl = document.getElementById('research-sub');
+
+// Bound here rather than at the overlay's definition to keep every input.on* hook together with
+// the map/finance ones above.
+function toggleResearch(force) {
+  const show = force != null ? force : researchEl.classList.contains('hidden');
+  researchEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-research').classList.toggle('active', show);
+  if (show) renderResearch();
+}
+input.onToggleResearch = () => toggleResearch();
+input.onCloseResearch = () => toggleResearch(false);
+
+/** Full rebuild of the node grid. ~13 cards, only while the overlay is open -- cheap enough that
+ *  diffing isn't worth it, but the live progress refresh below mutates in place so a rebuild on a
+ *  timer can't destroy a "Research" button mid-click (same reasoning as renderWorldMap). */
+function renderResearch() {
+  const state = world.research;
+  researchGridEl.innerHTML = '';
+  for (const node of RESEARCH_NODES) {
+    const done = isNodeUnlocked(state, node.id);
+    const blocked = done ? null : researchBlockedReason(state, node);
+    const affordableNow = !done && blocked === null;
+    const card = document.createElement('div');
+    card.className = 'node' + (done ? ' done' : affordableNow ? ' available' : ' blocked');
+    card.dataset.nodeId = node.id;
+
+    const badge = done ? (node.cost === 0 ? 'Innate' : 'Researched')
+      : affordableNow ? 'Ready to research' : blocked;
+    const pct = done ? 100 : node.cost === 0 ? 100 : Math.min(100, (state.points / node.cost) * 100);
+
+    card.innerHTML =
+      `<div class="rname">${node.name}</div>` +
+      `<div class="badge">${badge}</div>` +
+      `<div class="desc">${node.desc}</div>` +
+      (node.cost > 0
+        ? `<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>` +
+          `<div class="badge cost-line">${Math.floor(Math.min(state.points, node.cost))} / ${node.cost} pts</div>`
+        : '') +
+      `<div class="unlocks">Unlocks: ${node.unlocks.join(', ')}</div>`;
+
+    if (!done) {
+      const btn = document.createElement('button');
+      btn.textContent = `Research (${node.cost})`;
+      btn.disabled = !affordableNow;
+      btn.addEventListener('click', () => {
+        const res = tryResearch(world.research, node.id);
+        if (!res.ok) { showToast(res.reason); return; }
+        showToast(`Researched: ${node.name}`);
+        world.milestoneLog.push({ tick: world.currentTick, text: `Research complete: ${node.name}` });
+        if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+        renderResearch();
+      });
+      card.appendChild(btn);
+    }
+    researchGridEl.appendChild(card);
+  }
+  const doneCount = RESEARCH_NODES.filter(n => isNodeUnlocked(world.research, n.id)).length;
+  researchSubEl.textContent =
+    `${Math.floor(world.research.points)} research points banked · ` +
+    `${doneCount} of ${RESEARCH_NODES.length} technologies known`;
+}
+
+// Live progress while the overlay stays open. Structural rebuild only when the unlocked set
+// actually changes, so the in-flight "Research" buttons survive.
+let lastResearchSignature = '';
+function refreshResearchValues() {
+  if (researchEl.classList.contains('hidden')) return;
+  const sig = RESEARCH_NODES.map(n => (isNodeUnlocked(world.research, n.id) ? '1' : '0')).join('');
+  if (sig !== lastResearchSignature) { lastResearchSignature = sig; renderResearch(); return; }
+  const state = world.research;
+  researchSubEl.firstChild && (researchSubEl.textContent =
+    `${Math.floor(state.points)} research points banked · ` +
+    `${RESEARCH_NODES.filter(n => isNodeUnlocked(state, n.id)).length} of ${RESEARCH_NODES.length} technologies known`);
+  for (const card of researchGridEl.children) {
+    const node = RESEARCH_NODES.find(n => n.id === card.dataset.nodeId);
+    if (!node || node.cost === 0 || isNodeUnlocked(state, node.id)) continue;
+    const fill = card.querySelector('.bar-fill');
+    if (fill) fill.style.width = Math.min(100, (state.points / node.cost) * 100) + '%';
+    const costLine = card.querySelector('.cost-line');
+    if (costLine) costLine.textContent = `${Math.floor(Math.min(state.points, node.cost))} / ${node.cost} pts`;
+    const btn = card.querySelector('button');
+    if (btn) btn.disabled = researchBlockedReason(state, node) !== null;
+  }
+}
 
 /** Rebuild the region grid. Cheap enough (16 cards) to redraw wholesale rather than diff, and
  *  it only runs while the overlay is actually open. */
@@ -245,6 +395,58 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'r' || e.key === 'R') { restart(); }
 });
 
+// ---------------------------------------------------------------- finance / budget report overlay
+// DOM rows for the category breakdown (same reasoning as the world-map overlay above -- it's
+// pure UI, not part of the game world's coordinate space), plus a small inline Canvas 2D
+// sparkline (render.js's drawFinanceChart) for the rolling net-scrap-per-wave-cycle trend.
+const financeEl = document.getElementById('finance');
+const financeRowsEl = document.getElementById('finance-rows');
+const financeSubEl = document.getElementById('finance-sub');
+const financeChartRangeEl = document.getElementById('finance-chart-range');
+const financeChartEl = document.getElementById('finance-chart');
+
+function toggleFinance(force) {
+  const show = force != null ? force : financeEl.classList.contains('hidden');
+  financeEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-finance').classList.toggle('active', show);
+  if (show) renderFinance();
+}
+
+const FINANCE_CATEGORIES = [
+  ['killScrap', '☠ Kills (turrets/staff/traps/dogs)', 'income'],
+  ['harvestScrap', '⛏ Harvesting', 'income'],
+  ['haulScrap', '🚚 Vehicle hauls', 'income'],
+  ['recyclingScrap', '♻ Recycling Center', 'income'],
+  ['conquestScrap', '🗺 Conquest supply lines', 'income'],
+  ['otherScrap', '❓ Other', 'income'],
+  ['buildSpend', '🔨 Construction spend', 'expense'],
+];
+
+/** Rebuild the category rows + redraw the chart. Cheap enough (7 rows, one small canvas) to
+ *  redraw wholesale on every open/refresh rather than diff, and it only runs while the overlay
+ *  is actually open (see refreshFinance below). */
+function renderFinance() {
+  const f = world.finance;
+  if (!f) return;
+  const totalIncome = f.killScrap + f.harvestScrap + f.haulScrap + f.recyclingScrap + f.conquestScrap + f.otherScrap;
+  financeRowsEl.innerHTML = FINANCE_CATEGORIES.map(([key, label, cls]) =>
+    `<div class="fin-row"><span class="label">${label}</span><span class="val ${cls}">${cls === 'expense' ? '-' : '+'}${Math.round(f[key])}</span></div>`
+  ).join('') +
+    `<div class="fin-row total"><span class="label">Net lifetime</span><span class="val ${totalIncome - f.buildSpend >= 0 ? 'income' : 'expense'}">` +
+    `${Math.round(totalIncome - f.buildSpend)}</span></div>`;
+  financeSubEl.textContent = `${Math.round(world.scrap)} scrap on hand · tick ${world.currentTick}`;
+  const h = f.history;
+  financeChartRangeEl.textContent = h.length > 0 ? `tick ${h[0].tick} - ${h[h.length - 1].tick}` : '';
+  renderer.drawFinanceChart(world, financeChartEl);
+}
+
+// While the overlay is open the sim keeps running behind it, so the numbers need to move --
+// same "only redraw while visible" gate as refreshWorldMapValues above.
+function refreshFinance() {
+  if (financeEl.classList.contains('hidden')) return;
+  renderFinance();
+}
+
 // ---------------------------------------------------------------- inspector panel
 const inspectorEl = document.getElementById('inspector');
 function updateInspector() {
@@ -266,8 +468,22 @@ function updateInspector() {
   inspectorEl.classList.remove('hidden');
   const c = world.citizens;
   const role = world.roster.isStaff(c.id[sel]) ? world.roster.kindOf(c.id[sel]) : 'Citizen';
+  // Armory-issued weapon tier (security.js WEAPON_TIERS) -- only meaningful for Guard/Sniper,
+  // who are the only roles tickStaffCombat (siege.js) reads it for.
+  const weaponLabel = (role === 'Guard' || role === 'Sniper')
+    ? ` [${WEAPON_TIERS[world.roster.weaponOf(c.id[sel])]?.label ?? 'Sidearm'}]`
+    : '';
   document.getElementById('insp-name').textContent = c.name[sel];
-  document.getElementById('insp-role').textContent = `${role} · ${c.trait[sel]?.name ?? ''}`;
+  document.getElementById('insp-role').textContent = `${role}${weaponLabel} · ${c.trait[sel]?.name ?? ''}`;
+  const backstory = c.backstory[sel];
+  const backstoryEl = document.getElementById('insp-backstory');
+  if (backstory) {
+    backstoryEl.textContent = `${backstory.childhood} → ${backstory.adult}`;
+    backstoryEl.title = backstory.description;
+  } else {
+    backstoryEl.textContent = '';
+    backstoryEl.title = '';
+  }
   const statusEl = document.getElementById('insp-status');
   if (c.isDownedAt(sel)) {
     statusEl.textContent = 'Downed';
@@ -282,7 +498,8 @@ function updateInspector() {
   setBar('social', c.social[sel]);
   setBar('mood', c.mood[sel]);
   document.getElementById('insp-skill').textContent =
-    `Combat: ${skillLevel(c.skillCombat[sel])} · Construction: ${skillLevel(c.skillConstruction[sel])}`;
+    `Combat: ${skillLevel(c.skillCombat[sel])}${PASSION_ICON[c.passionCombat[sel]]} · ` +
+    `Construction: ${skillLevel(c.skillConstruction[sel])}${PASSION_ICON[c.passionConstruction[sel]]}`;
 }
 
 function updateInspectorMulti(indices) {
@@ -297,6 +514,7 @@ function updateInspectorMulti(indices) {
   document.getElementById('insp-name').textContent = `${alive.length} citizens selected`;
   const names = alive.slice(0, 5).map(i => c.name[i]).join(', ');
   document.getElementById('insp-role').textContent = names + (alive.length > 5 ? `, +${alive.length - 5} more` : '');
+  document.getElementById('insp-backstory').textContent = '';
   document.getElementById('insp-status').textContent = 'Group averages below';
   const avg = (arr) => alive.reduce((s, i) => s + arr[i], 0) / alive.length;
   setBar('hp', avg(c.health));
@@ -347,12 +565,15 @@ function updateTopbar() {
   document.getElementById('stat-citizens').textContent = countAlive(world.citizens.count, world.citizens.isAliveAt.bind(world.citizens));
   document.getElementById('stat-attackers').textContent = countAlive(world.attackers.count, world.attackers.isAliveAt.bind(world.attackers));
   document.getElementById('stat-wave').textContent = world.waveSpawner.waveNumber;
+  document.getElementById('stat-research').textContent = Math.floor(world.research.points);
   const pollutionEl = document.getElementById('stat-pollution');
   pollutionEl.textContent = Math.round(world.pollution);
   pollutionEl.classList.toggle('danger', world.pollution > 150);
   const night = isNight(world.timeOfDay);
   document.getElementById('stat-daynight-icon').textContent = night ? '🌙' : '☀';
   document.getElementById('stat-daynight').textContent = (night ? 'Night ' : 'Day ') + Math.round(world.timeOfDay * 100) + '%';
+  document.getElementById('stat-weather-icon').textContent = WEATHER_ICON[world.weather] || '🌤';
+  document.getElementById('stat-weather').textContent = world.weather;
   pauseBtn.textContent = world.paused ? '▶ Resume' : '⏸ Pause';
   pauseBtn.classList.toggle('active', world.paused);
   document.getElementById('speed-label').textContent = speedMultiplier + 'x';
@@ -362,6 +583,32 @@ function countAlive(count, isAliveAt) {
   let n = 0;
   for (let i = 0; i < count; i++) if (isAliveAt(i)) n++;
   return n;
+}
+
+// ---------------------------------------------------------------- settlement grading popover
+function setGradingBar(name, value) {
+  const pct = Math.max(0, Math.min(100, Math.round(value)));
+  const fillEl = document.getElementById(`grading-${name}`);
+  const pctEl = document.getElementById(`grading-${name}-pct`);
+  fillEl.style.width = pct + '%';
+  pctEl.textContent = pct;
+  fillEl.classList.toggle('low', pct < 40);
+  fillEl.classList.toggle('mid', pct >= 40 && pct < 70);
+}
+
+function updateGrading() {
+  const g = world.grading;
+  if (!g) return;
+  const avg = Math.round((g.safety + g.wellbeing + g.sustainability + g.cohesion) / 4);
+  document.getElementById('stat-grading').textContent = avg;
+  // Bars only need updating while the popover is actually open -- same "don't bother while
+  // hidden" pattern refreshWorldMapValues uses for the conquest overlay above.
+  if (!gradingPopoverEl.classList.contains('hidden')) {
+    setGradingBar('safety', g.safety);
+    setGradingBar('wellbeing', g.wellbeing);
+    setGradingBar('sustainability', g.sustainability);
+    setGradingBar('cohesion', g.cohesion);
+  }
 }
 
 let framesSinceReframe = 0;
@@ -385,6 +632,9 @@ function frame() {
   updateEventLog();
   updateGameOver();
   refreshWorldMapValues();
+  refreshResearchValues();
+  refreshFinance();
+  updateGrading();
 
   if (toastTimer > 0) { toastTimer--; if (toastTimer === 0) toastEl.classList.remove('show'); }
 }

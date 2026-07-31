@@ -33,8 +33,10 @@
     position: fixed; top: 10px; left: 10px; right: 10px;
     display: flex; align-items: center; gap: 14px;
     padding: 8px 14px; font-size: 14px;
+    overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
   }
-  #topbar .stat { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+  #topbar .stat { display: flex; align-items: center; gap: 5px; white-space: nowrap; flex-shrink: 0; }
+  #topbar button { flex-shrink: 0; }
   #topbar .stat .icon { font-size: 15px; }
   #topbar .stat .val { font-weight: 600; }
   #topbar .stat .val.danger { color: var(--danger); }
@@ -163,6 +165,104 @@
     border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
   }
 
+  /* ---- Finance / budget report overlay ---- */
+  #finance {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
+  }
+  #finance.hidden { display: none; }
+  #finance .box {
+    padding: 20px 24px; width: min(520px, 94vw); max-height: 92vh; overflow: auto;
+  }
+  #finance .fin-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  #finance h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #finance .fin-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
+  #finance .fin-head .spacer { flex: 1; }
+  #finance .fin-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+  #finance .fin-row {
+    display: flex; justify-content: space-between; align-items: center;
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 6px 10px; font-size: 12.5px;
+  }
+  #finance .fin-row .label { display: flex; align-items: center; gap: 6px; color: var(--text-dim); }
+  #finance .fin-row .val { font-weight: 600; }
+  #finance .fin-row .val.income { color: var(--good); }
+  #finance .fin-row .val.expense { color: var(--danger); }
+  #finance .fin-row.total { border-color: var(--accent); }
+  #finance .fin-chart-label {
+    display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 4px;
+  }
+  #finance-chart { display: block; width: 100%; height: 90px; background: #241f1a; border-radius: 6px; }
+  #finance .close-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+
+  /* ---- Settlement Grading popover (non-carceral reframe of Prison Architect's 4-axis Grading
+     tab -- Safety/Wellbeing/Sustainability/Cohesion, see grading.js). Click-to-expand from the
+     topbar icon; sits over free canvas space rather than any other panel's slot (toolbar ends
+     around x=170, inspector/minimap/eventlog/finance occupy the other corners). ---- */
+  #grading-popover {
+    position: fixed; left: 200px; top: 60px; width: 230px;
+    padding: 12px 14px; font-size: 13px; z-index: 15;
+  }
+  #grading-popover.hidden { display: none; }
+  #grading-popover h3 { margin: 0 0 8px 0; font-size: 14px; color: var(--accent); }
+  #grading-popover .stat-row { margin-bottom: 7px; }
+  #grading-popover .stat-row:last-child { margin-bottom: 0; }
+  #grading-popover .stat-row .label { display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 2px; }
+  #grading-popover .bar { height: 7px; background: #332e2a; border-radius: 4px; overflow: hidden; }
+  #grading-popover .bar-fill { height: 100%; border-radius: 4px; transition: width 0.2s; background: var(--good); }
+  #grading-popover .bar-fill.mid { background: #d9944f; }
+  #grading-popover .bar-fill.low { background: var(--danger); }
+
+  /* ---- Research / tech tree overlay ---- */
+  #research {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
+  }
+  #research.hidden { display: none; }
+  #research .box { padding: 20px 24px; width: min(880px, 94vw); max-height: 92vh; overflow: auto; }
+  #research .res-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  #research h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #research .res-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
+  #research .res-head .spacer { flex: 1; }
+  #research .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #research .node {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 5px;
+    min-height: 122px;
+  }
+  #research .node.done { border-color: var(--good); }
+  #research .node.available { border-color: var(--accent); border-style: dashed; }
+  #research .node.blocked { opacity: 0.5; }
+  #research .node .rname { font-weight: 600; font-size: 12.5px; line-height: 1.2; }
+  #research .node .badge {
+    font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+  }
+  #research .node.done .badge { color: var(--good); }
+  #research .node.available .badge { color: var(--accent); }
+  #research .node .desc { font-size: 10.5px; color: var(--text-dim); line-height: 1.35; }
+  #research .node .unlocks { font-size: 10px; color: var(--text-dim); margin-top: auto; }
+  #research .node .bar { height: 6px; background: #332e2a; border-radius: 4px; overflow: hidden; }
+  #research .node .bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+  #research .node.done .bar-fill { background: var(--good); }
+  #research .node button {
+    background: var(--accent); color: #201a10; border: none; border-radius: 4px;
+    padding: 4px 6px; font-size: 11px; font-weight: 600; cursor: pointer; width: 100%;
+  }
+  #research .node button:disabled { background: #3a342f; color: var(--text-dim); cursor: not-allowed; }
+  #research .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
+  #research .close-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  /* Locked buildables stay visible in the toolbar (so the player can see what's coming) but
+     read as unavailable and don't respond to hover. */
+  #toolbar .tool-btn.locked { opacity: 0.42; cursor: not-allowed; }
+  #toolbar .tool-btn.locked:hover { background: #2c2825; }
+  #toolbar .tool-btn.locked .cost::before { content: '🔒 '; }
+
   /* ---- Help hint ---- */
   #help-hint {
     position: fixed; right: 10px; bottom: 10px;
@@ -189,6 +289,15 @@
   <div class="stat" title="Duty Roster clock -- day/night cycle driving citizen sleep/work/recreation schedule">
     <span class="icon" id="stat-daynight-icon">☀</span><span class="val" id="stat-daynight">Day</span>
   </div>
+  <div class="stat" title="Current weather -- Rain slows citizens down, Cold/Heatwave add extra hunger/rest decay unless citizens are indoors">
+    <span class="icon" id="stat-weather-icon">🌤</span><span class="val" id="stat-weather">Clear</span>
+  </div>
+  <div class="stat" id="stat-grading-btn" style="cursor:pointer" title="Settlement quality -- Safety/Wellbeing/Sustainability/Cohesion, click for detail">
+    <span class="icon">🏛</span><span class="val" id="stat-grading">100</span>
+  </div>
+  <div class="stat" title="Research Points -- accrue passively, scaled by how many citizens are alive [Shift+T]">
+    <span class="icon">🔬</span><span class="val" id="stat-research">0</span>
+  </div>
   <div class="spacer"></div>
   <button id="btn-pause">⏸ Pause</button>
   <button id="btn-speed-down">−</button>
@@ -196,6 +305,8 @@
   <button id="btn-speed-up">+</button>
   <button id="btn-recenter" title="Snap the camera back to auto-follow the settlement">⛶ Recenter</button>
   <button id="btn-worldmap" title="Conquest map -- per-region control meters and expansion [Shift+M]">🗺 Map</button>
+  <button id="btn-finance" title="Budget report -- scrap income/expense breakdown and trend [Shift+B]">💰 Budget</button>
+  <button id="btn-research" title="Research -- tech tree unlocking advanced buildables [Shift+T]">🔬 Research</button>
   <button id="btn-mute" title="Mute/unmute procedurally-synthesized sound effects">🔊 Sound</button>
   <button id="btn-save">💾 Save</button>
   <button id="btn-load">📂 Load</button>
@@ -204,9 +315,18 @@
 
 <div id="toolbar" class="panel"></div>
 
+<div id="grading-popover" class="panel hidden">
+  <h3>Settlement Quality</h3>
+  <div class="stat-row"><div class="label"><span>Safety</span><span id="grading-safety-pct"></span></div><div class="bar"><div class="bar-fill" id="grading-safety"></div></div></div>
+  <div class="stat-row"><div class="label"><span>Wellbeing</span><span id="grading-wellbeing-pct"></span></div><div class="bar"><div class="bar-fill" id="grading-wellbeing"></div></div></div>
+  <div class="stat-row"><div class="label"><span>Sustainability</span><span id="grading-sustainability-pct"></span></div><div class="bar"><div class="bar-fill" id="grading-sustainability"></div></div></div>
+  <div class="stat-row"><div class="label"><span>Cohesion</span><span id="grading-cohesion-pct"></span></div><div class="bar"><div class="bar-fill" id="grading-cohesion"></div></div></div>
+</div>
+
 <div id="inspector" class="panel hidden">
   <h3 id="insp-name"></h3>
   <div class="subtitle" id="insp-role"></div>
+  <div class="subtitle" id="insp-backstory" title=""></div>
   <div class="subtitle" id="insp-status"></div>
   <div class="stat-row"><div class="label"><span>Health</span><span id="insp-hp-pct"></span></div><div class="bar"><div class="bar-fill hp" id="insp-hp"></div></div></div>
   <div class="stat-row"><div class="label"><span>Hunger</span><span id="insp-hunger-pct"></span></div><div class="bar"><div class="bar-fill hunger" id="insp-hunger"></div></div></div>
@@ -242,6 +362,39 @@
       banking scrap all push the meter. At 100% a region is yours for good and starts shipping scrap
       to whichever settlement you're currently running. Expanding moves your operation to a fresh
       settlement in the chosen region; the one you leave keeps its progress.
+    </div>
+  </div>
+</div>
+
+<div id="finance" class="hidden">
+  <div class="box panel">
+    <div class="fin-head">
+      <h2>Budget Report</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-finance-close">Close [Shift+B]</button>
+    </div>
+    <div class="fin-sub" id="finance-sub"></div>
+    <div class="fin-rows" id="finance-rows"></div>
+    <div class="fin-chart-label"><span>Net scrap per wave-cycle (last 20)</span><span id="finance-chart-range"></span></div>
+    <canvas id="finance-chart" width="472" height="90"></canvas>
+  </div>
+</div>
+
+<div id="research" class="hidden">
+  <div class="box panel">
+    <div class="res-head">
+      <h2>Research</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-research-close">Close [Shift+T]</button>
+    </div>
+    <div class="res-sub" id="research-sub"></div>
+    <div class="grid" id="research-grid"></div>
+    <div class="legend">
+      Research Points accrue passively, scaled by how many citizens are alive -- a settlement that
+      keeps its people alive advances, one that keeps burying them stalls. Shelter, basic defense
+      and scrap power are known from the start and can never be locked away; everything past that
+      is a force multiplier you have to earn. Locked buildables stay visible in the build toolbar,
+      greyed out, so you can see what's coming.
     </div>
   </div>
 </div>

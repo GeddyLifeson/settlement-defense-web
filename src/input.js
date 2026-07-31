@@ -2,6 +2,7 @@
 // actual game instead of a passive screensaver -- there was no player agency before this.
 import { ZoneKind } from './zones.js';
 import { BUILD_COST, spend, canAfford } from './economy.js';
+import { isToolUnlocked, researchNodeForTool } from './research.js';
 
 export const TOOLS = [
   { key: '0', tool: null, label: 'Select', cost: null },
@@ -17,6 +18,11 @@ export const TOOLS = [
   { key: 'y', tool: 'door', label: 'Door', cost: BUILD_COST.door },
   { key: 'g', tool: 'generator', label: 'Generator', cost: BUILD_COST.generator },
   { key: 'w', tool: 'wire', label: 'Wire', cost: BUILD_COST.wire },
+  // Water/plumbing grid (water.js): mirrors the generator/wire pair exactly -- a pump is the
+  // source, pipe is the conduit -- but feeds Food/Recreation zone refill rate and the Recycling
+  // Center's pollution-processing rate instead of turrets/tesla/watchtower.
+  { key: 'q', tool: 'pump', label: 'Water Pump', cost: BUILD_COST.pump },
+  { key: 'z', tool: 'pipe', label: 'Pipe', cost: BUILD_COST.pipe },
   // SEA:R truck fuel-type tradeoff (vehicles.js FUEL_TYPES): each garage now comes in 4 fuel
   // variants instead of one -- fossil (cheap/dirty), gas (best all-around), ethanol (clean,
   // temporarily saps Food zone refill per haul), electric (cleanest, needs the garage powered
@@ -38,6 +44,16 @@ export const TOOLS = [
   { key: 'm', tool: 'monitor_station', label: 'Monitor Station', cost: BUILD_COST.monitor_station },
   { key: 'u', tool: 'generator_nuclear', label: 'Nuclear Generator', cost: BUILD_COST.generator_nuclear },
   { key: 'j', tool: 'waste_storage', label: 'Waste Storage', cost: BUILD_COST.waste_storage },
+  // Armory (security.js WEAPON_TIERS/tickArmoryIssuance): once built, every Guard/Sniper on the
+  // roster is automatically issued Rifle tier (a second Armory unlocks Heavy) -- no per-citizen
+  // pick-a-tier UI, per FEATURE_RESEARCH.md's scoped version of the Prison Architect armory idea.
+  { key: 'a', tool: 'armory', label: 'Armory', cost: BUILD_COST.armory },
+  // SEA:R multi-source power economy (FEATURE_RESEARCH.md): coal/wind/solar generator variants,
+  // each a real siting/tradeoff decision instead of a strict upgrade over plain 'generator' --
+  // see economy.js's BUILD_COST comment and power.js's isSource for how each tradeoff is enforced.
+  { key: 'd', tool: 'generator_coal', label: 'Coal Generator', cost: BUILD_COST.generator_coal },
+  { key: 's', tool: 'generator_wind', label: 'Wind Turbine', cost: BUILD_COST.generator_wind },
+  { key: '8', tool: 'generator_solar', label: 'Solar Array', cost: BUILD_COST.generator_solar },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -200,6 +216,14 @@ export class InputController {
       if (!s.destroyed && Math.floor(s.x) === x && Math.floor(s.y) === y) { this.onToast?.('Already occupied'); return; }
     }
 
+    // Tech gate (research.js) -- checked BEFORE the scrap check so a locked buildable reports the
+    // real reason rather than a misleading "Not enough scrap". Fails open for ungated tools.
+    if (!isToolUnlocked(world.research, this.tool)) {
+      const node = researchNodeForTool(this.tool);
+      this.onToast?.(`Locked -- research "${node ? node.name : 'unknown'}" first`);
+      return;
+    }
+
     if (!canAfford(world, this.tool)) { this.onToast?.('Not enough scrap'); return; }
     spend(world, this.tool);
     // Every buildable -- including walls -- is placed as a blueprint that a citizen has to
@@ -223,7 +247,16 @@ export class InputController {
     // the uppercase variant and lets 'm' fall through to the tool table below. main.js supplies
     // onToggleMap.
     if (e.key === 'M') { this.onToggleMap?.(); return; }
+    // Budget report overlay (world.js's finance ledger, surfaced in main.js). SHIFT+B for the
+    // same reason as SHIFT+M above -- lowercase 'b' is already the Bed buildable's hotkey.
+    if (e.key === 'B') { this.onToggleFinance?.(); return; }
+    // Research/tech tree overlay (research.js, surfaced in main.js). SHIFT+T, same
+    // uppercase-only convention -- lowercase 't' is the Table buildable's hotkey. Note SHIFT+R
+    // is NOT available: main.js binds both 'r' and 'R' to restart().
+    if (e.key === 'T') { this.onToggleResearch?.(); return; }
     if (e.key === 'Escape' && this.onToggleMap) { this.onCloseMap?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleResearch) { this.onCloseResearch?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleFinance) { this.onCloseFinance?.(); /* falls through to clear tool */ }
     if (e.key in TOOL_KEYS) { this.setTool(TOOL_KEYS[e.key]); return; }
     if (e.key === ' ') { e.preventDefault(); this.togglePause(); return; }
     if (e.key === '+' || e.key === '=') { this.setSpeedIndex(this.speedIndex + 1); return; }

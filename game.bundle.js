@@ -73,6 +73,91 @@ function randomTrait(rng) {
 }
 
 
+// ---- backstories.js ----
+// RimWorld-style backstories: a childhood + adult flavor pair picked once at spawn, same spirit
+// as traits.js (flavor + a small numeric nudge, not a deep system) but focused on *skills*
+// rather than needs -- a starting skill nudge plus a "favored skill" that biases which skill(s)
+// this citizen is more likely to burn with Passion (see below). Complements traits.js, doesn't
+// replace it: a citizen has exactly one trait AND exactly one backstory.
+const BACKSTORIES = [
+  {
+    childhood: 'Farm Kid', adult: 'Ration Clerk',
+    description: 'Grew up rationing a failing harvest; now keeps the settlement\'s ledgers straight.',
+    favoredSkill: 'construction', skillConstructionStart: 0.1, skillCombatStart: 0,
+  },
+  {
+    childhood: 'Street Orphan', adult: 'Scrap Runner',
+    description: 'Learned to scavenge before they learned to read; still fastest hands on a resource node.',
+    favoredSkill: 'construction', skillConstructionStart: 0.15, skillCombatStart: 0,
+  },
+  {
+    childhood: 'Military Brat', adult: 'Militia Veteran',
+    description: 'Grew up on base housing and old war stories; picked up a rifle before they picked a trade.',
+    favoredSkill: 'combat', skillConstructionStart: 0, skillCombatStart: 0.15,
+  },
+  {
+    childhood: 'Gang Runner', adult: 'Reformed Enforcer',
+    description: 'Ran errands for a bad crowd as a kid; the violence stuck, the crowd didn\'t.',
+    favoredSkill: 'combat', skillConstructionStart: 0, skillCombatStart: 0.1,
+  },
+  {
+    childhood: 'Bookish Loner', adult: 'Machinist',
+    description: 'Took apart every appliance in the house growing up; now takes apart problems instead.',
+    favoredSkill: 'construction', skillConstructionStart: 0.1, skillCombatStart: 0,
+  },
+  {
+    childhood: 'Feral Child', adult: 'Perimeter Hunter',
+    description: 'Raised half-wild past the fence line; still most comfortable facing outward.',
+    favoredSkill: 'combat', skillConstructionStart: 0, skillCombatStart: 0.1,
+  },
+  {
+    childhood: 'Wanderer', adult: 'Settlement Trader',
+    description: 'Never stayed anywhere long enough to specialize; a generalist by necessity, not passion.',
+    favoredSkill: null, skillConstructionStart: 0.05, skillCombatStart: 0.05,
+  },
+  {
+    childhood: "Preacher's Kid", adult: 'Camp Medic',
+    description: 'Grew up patching up a congregation\'s hurts; steadier hands than most under pressure.',
+    favoredSkill: null, skillConstructionStart: 0.05, skillCombatStart: 0,
+  },
+];
+
+function randomBackstory(rng) {
+  return BACKSTORIES[Math.floor(rng() * BACKSTORIES.length)];
+}
+
+// Passion (RimWorld): a per-skill bias on top of the backstory's one-time starting nudge above --
+// it doesn't change what a citizen *can* do, only (a) how fast that skill grows while doing it
+// (see PASSION_GAIN_MULT, applied in jobs.js's BUILD_SKILL_GAIN/HARVEST_SKILL_GAIN and siege.js's
+// tickStaffCombat) and (b) a very slight tie-break in jobs.js's idle-priority checks when a
+// citizen has a genuine choice between two available jobs.
+const Passion = Object.freeze({ None: 0, Minor: 1, Burning: 2 });
+
+const PASSION_GAIN_MULT = [1, 1.5, 2.5]; // indexed by Passion tier
+const PASSION_ICON = ['', ' ·', ' 🔥']; // none / minor (dot) / burning (fire), indexed by Passion tier
+
+// Independent per-skill roll, base weights skewed toward None so Burning stays a real standout
+// rather than the common case; a backstory's favoredSkill shifts its own skill's weights toward
+// Burning without guaranteeing it (still meant to read as "this person's history", not a hard rule).
+const BASE_WEIGHTS = [0.6, 0.25, 0.15]; // None, Minor, Burning
+const FAVORED_WEIGHTS = [0.35, 0.3, 0.35];
+
+function rollPassion(rng, favored) {
+  const weights = favored ? FAVORED_WEIGHTS : BASE_WEIGHTS;
+  const r = rng();
+  if (r < weights[0]) return Passion.None;
+  if (r < weights[0] + weights[1]) return Passion.Minor;
+  return Passion.Burning;
+}
+
+function randomPassions(rng, backstory) {
+  return {
+    combat: rollPassion(rng, backstory?.favoredSkill === 'combat'),
+    construction: rollPassion(rng, backstory?.favoredSkill === 'construction'),
+  };
+}
+
+
 // ---- grid.js ----
 // Ported from SD.Facility/SettlementGrid.cs.
 
@@ -167,6 +252,8 @@ class ZoneGrid {
 const BUILD_COST = {
   wall: 2,
   wire: 1, // power conduit -- deliberately near-free so long runs are a layout problem, not a cost one
+  pump: 28, // water source, see water.js -- priced close to generator since it's the analogous grid root
+  pipe: 1, // water conduit, mirrors wire's near-free long-run pricing, see water.js
   fence: 3,
   trap: 15,
   turret: 25,
@@ -175,6 +262,12 @@ const BUILD_COST = {
   door: 5,
   generator: 30,
   generator_nuclear: 90, // expensive: high-reward wireless power radius, but risks the waste hazard, see siege.js
+  // SEA:R multi-source power economy (FEATURE_RESEARCH.md): each variant trades cost/pollution/
+  // siting against the plain generator instead of being a strict upgrade -- see world.js's
+  // pollution tick and power.js's isSource for how each one's tradeoff is actually enforced.
+  generator_coal: 18, // cheapest of the bunch -- "worse plain generator", see its higher pollution-per-tick in world.js
+  generator_wind: 35, // zero pollution, but only acts as a power source when sited on open ground (power.js)
+  generator_solar: 40, // zero pollution, but only acts as a power source in open sky, not inside an enclosed room (power.js)
   waste_storage: 15, // cheap containment building -- keep nuclear generators worth building near it
   garage_recycling: 45, // bare kind kept for save-compat; defaults to 'gas' fuel, same cost as garage_recycling_gas
   garage_garbage: 35, // bare kind kept for save-compat; defaults to 'gas' fuel, same cost as garage_garbage_gas
@@ -195,6 +288,11 @@ const BUILD_COST = {
   recycling_center: 55,
   camera: 8,
   monitor_station: 12,
+  // Armory (FEATURE_RESEARCH.md's Prison Architect section, see security.js WEAPON_TIERS):
+  // unlocks Rifle-tier issuance for every Guard/Sniper on the roster; a second Armory unlocks
+  // Heavy tier. Priced between a turret (25) and a garage (35+) since it's a force multiplier
+  // on personnel you've already paid upkeep for, not a direct combat structure of its own.
+  armory: 32,
 };
 
 const SCRAP_PER_KILL = 4;
@@ -207,7 +305,207 @@ function spend(world, kind) {
   const cost = BUILD_COST[kind] || 0;
   if (world.scrap < cost) return false;
   world.scrap -= cost;
+  if (world.finance) world.finance.buildSpend += cost; // budget-report ledger, see world.js's finance comment
   return true;
+}
+
+
+// ---- research.js ----
+// In-campaign tech unlock gating -- SEA:R's research progression (see FEATURE_RESEARCH.md's
+// SEA:R section) crossed with RimWorld's research tree. Before this, every single buildable in
+// input.js's TOOLS array was placeable at tick 0, so a settlement's whole tech ceiling was just
+// "how much scrap do you have" -- there was no sense of a campaign advancing.
+//
+// Design notes:
+//  - The SURVIVAL CORE stays free forever (walls/fences/doors/beds/tables/turrets/traps/
+//    generator/wire/zones). A fresh colony must never be helpless: gating a turret behind
+//    research would just be a slow death sentence on wave 1, which isn't progression, it's a
+//    difficulty bug. Those live here as `startsUnlocked` nodes purely so the panel can show the
+//    player what they already have rather than presenting a tree with mystery gaps in it.
+//  - Everything GATED is a force-multiplier or a late-game system (surveillance, plumbing,
+//    truck fuel tiers, tesla, recycling, nuclear, armory). Losing access to them at tick 0 costs
+//    you optimisation, never viability.
+//  - The conquest/world-map layer (worldmap.js) is deliberately NOT part of this tree. It's a
+//    separate meta-progression axis and entangling the two would make expansion feel like a tech
+//    unlock rather than a strategic choice.
+
+// Passive trickle, per alive citizen per tick. Alive-citizen count is the readily-available
+// existing signal (world.tick already computes it for the game-over check), and scaling by it
+// gives research the right pressure: a colony that keeps people alive advances, a colony
+// bleeding citizens stalls out. At the 24-citizen starting roster this is 0.06 points/tick, so
+// the cheapest node lands ~500 ticks in and the whole tree is ~13k ticks of uninterrupted
+// survival -- deliberately longer than a typical run, so choices in the tree actually matter.
+const RESEARCH_PER_CITIZEN_TICK = 0.0025;
+
+/** @type {{id:string,name:string,cost:number,desc:string,unlocks:string[],requires:string[],startsUnlocked?:boolean}[]} */
+const RESEARCH_NODES = [
+  // ---- always-available core (cost 0, unlocked from tick 0, shown for legibility) ----
+  {
+    id: 'settlement_basics', name: 'Settlement Basics', cost: 0, startsUnlocked: true,
+    desc: 'Shelter and furnishing. Known from the day you arrived.',
+    unlocks: ['wall', 'fence', 'door', 'bed', 'table'], requires: [],
+  },
+  {
+    id: 'field_defense', name: 'Field Defense', cost: 0, startsUnlocked: true,
+    desc: 'Improvised perimeter weapons. Known from the day you arrived.',
+    unlocks: ['turret', 'trap'], requires: [],
+  },
+  {
+    id: 'scrap_power', name: 'Scrap Power', cost: 0, startsUnlocked: true,
+    desc: 'Dirty combustion generators and hand-run conduit. Known from the day you arrived.',
+    unlocks: ['generator', 'wire'], requires: [],
+  },
+
+  // ---- gated tier 1 ----
+  {
+    id: 'perimeter_lighting', name: 'Perimeter Lighting', cost: 30,
+    desc: 'Floodlights that hold back the dark and the things moving in it.',
+    unlocks: ['floodlight'], requires: [],
+  },
+  {
+    id: 'early_warning', name: 'Early Warning', cost: 45,
+    desc: 'Elevated spotting posts. Raiders stop being a surprise.',
+    unlocks: ['watchtower'], requires: [],
+  },
+  {
+    id: 'plumbing', name: 'Plumbing', cost: 50,
+    desc: 'Pumps and pipe runs -- a water grid to feed zones and processing.',
+    unlocks: ['pump', 'pipe'], requires: [],
+  },
+  {
+    id: 'motor_pool', name: 'Motor Pool', cost: 60,
+    desc: 'Fossil-burning haul trucks. Cheap, filthy, and better than carrying it yourself.',
+    unlocks: ['garage_recycling_fossil', 'garage_garbage_fossil', 'garage_recycling', 'garage_garbage'],
+    requires: [],
+  },
+
+  // ---- gated tier 2 ----
+  {
+    id: 'small_arms_doctrine', name: 'Small Arms Doctrine', cost: 70,
+    desc: 'An armory: standardised weapons issued to the duty roster instead of whatever they found.',
+    unlocks: ['armory'], requires: ['field_defense'],
+  },
+  {
+    id: 'surveillance', name: 'Surveillance', cost: 80,
+    desc: 'CCTV cameras and a monitor station to man them.',
+    unlocks: ['camera', 'monitor_station'], requires: ['early_warning'],
+  },
+  {
+    id: 'refined_fuels', name: 'Refined Fuels', cost: 90,
+    desc: 'Gas and ethanol drivetrains -- faster hauls, or cleaner ones.',
+    unlocks: [
+      'garage_recycling_gas', 'garage_garbage_gas',
+      'garage_recycling_ethanol', 'garage_garbage_ethanol',
+    ],
+    requires: ['motor_pool'],
+  },
+  {
+    id: 'waste_reclamation', name: 'Waste Reclamation', cost: 110,
+    desc: 'A recycling center that eats pollution and pays it back as scrap.',
+    unlocks: ['recycling_center'], requires: ['plumbing'],
+  },
+  {
+    id: 'alternative_power', name: 'Alternative Power', cost: 85,
+    desc: 'Coal, wind, and solar generators -- each a real siting/cost tradeoff against the plain combustion generator, not a strict upgrade.',
+    unlocks: ['generator_coal', 'generator_wind', 'generator_solar'], requires: ['scrap_power'],
+  },
+
+  // ---- gated tier 3 ----
+  {
+    id: 'high_voltage', name: 'High-Voltage Defense', cost: 130,
+    desc: 'Tesla coils. Arc discharge across anything that gets close.',
+    unlocks: ['tesla'], requires: ['perimeter_lighting', 'scrap_power'],
+  },
+  {
+    id: 'electric_drivetrain', name: 'Electric Drivetrain', cost: 140,
+    desc: 'Battery haul trucks. Zero-emission, but they want a powered garage.',
+    unlocks: ['garage_recycling_electric', 'garage_garbage_electric'], requires: ['refined_fuels', 'high_voltage'],
+  },
+  {
+    id: 'fission', name: 'Nuclear Fission', cost: 200,
+    desc: 'A reactor and the shielded storage it needs. Enormous power, one very bad failure mode.',
+    unlocks: ['generator_nuclear', 'waste_storage'], requires: ['high_voltage', 'waste_reclamation'],
+  },
+];
+
+const RESEARCH_BY_ID = Object.fromEntries(RESEARCH_NODES.map(n => [n.id, n]));
+
+// tool kind -> node that unlocks it. Any tool NOT in this map (zones, Select, and anything a
+// future agent adds without touching this file) is ungated by default -- fail-open, so a new
+// buildable never becomes silently unplaceable just because nobody remembered research.js.
+const RESEARCH_GATE_BY_TOOL = (() => {
+  const m = {};
+  for (const n of RESEARCH_NODES) for (const t of n.unlocks) m[t] = n.id;
+  return m;
+})();
+
+function createResearchState() {
+  const unlocked = {};
+  for (const n of RESEARCH_NODES) if (n.startsUnlocked) unlocked[n.id] = true;
+  return { points: 0, unlocked };
+}
+
+function isNodeUnlocked(state, nodeId) {
+  return !!(state && state.unlocked && state.unlocked[nodeId]);
+}
+
+/** The gating node for a build tool, or null if the tool is ungated. */
+function researchNodeForTool(tool) {
+  const id = RESEARCH_GATE_BY_TOOL[tool];
+  return id ? RESEARCH_BY_ID[id] : null;
+}
+
+/** Fail-open: unknown/ungated tools are always placeable. */
+function isToolUnlocked(state, tool) {
+  if (!tool) return true;
+  const id = RESEARCH_GATE_BY_TOOL[tool];
+  if (!id) return true;
+  return isNodeUnlocked(state, id);
+}
+
+function researchPrereqsMet(state, node) {
+  return node.requires.every(r => isNodeUnlocked(state, r));
+}
+
+/** Why a node can't be researched right now, or null if it can. */
+function researchBlockedReason(state, node) {
+  if (isNodeUnlocked(state, node.id)) return 'Already researched';
+  if (!researchPrereqsMet(state, node)) {
+    const missing = node.requires.filter(r => !isNodeUnlocked(state, r)).map(r => RESEARCH_BY_ID[r].name);
+    return `Requires ${missing.join(' + ')}`;
+  }
+  if (state.points < node.cost) return `Needs ${Math.ceil(node.cost - state.points)} more points`;
+  return null;
+}
+
+/** Spend points to unlock a node. Returns { ok, reason }. */
+function tryResearch(state, nodeId) {
+  const node = RESEARCH_BY_ID[nodeId];
+  if (!node) return { ok: false, reason: 'No such research' };
+  const blocked = researchBlockedReason(state, node);
+  if (blocked) return { ok: false, reason: blocked };
+  state.points -= node.cost;
+  state.unlocked[node.id] = true;
+  return { ok: true, node };
+}
+
+/** Passive accrual. Called once per world tick from world.js's tick(). */
+function tickResearch(world) {
+  let alive = 0;
+  for (let i = 0; i < world.citizens.count; i++) if (world.citizens.isAliveAt(i)) alive++;
+  world.research.points += alive * RESEARCH_PER_CITIZEN_TICK;
+}
+
+function serializeResearch(state) {
+  return { points: state.points, unlocked: Object.keys(state.unlocked).filter(k => state.unlocked[k]) };
+}
+
+function deserializeResearch(json) {
+  const state = createResearchState();
+  if (!json) return state;
+  state.points = json.points || 0;
+  for (const id of json.unlocked || []) if (RESEARCH_BY_ID[id]) state.unlocked[id] = true;
+  return state;
 }
 
 
@@ -378,7 +676,7 @@ function tickVehicles(world) {
         world.pollution = Math.max(0, world.pollution + fuel.exhaustPollution);
         if (fuel.ethanolPenalty) world.ethanolPenaltyTimer = ETHANOL_PENALTY_TICKS;
         if (v.kind === 'recycling' && v.targetNode && !v.targetNode.depleted) {
-          world.addScrap(Math.round(v.targetNode.amount));
+          world.addScrap(Math.round(v.targetNode.amount), 'haul');
           v.targetNode.amount = 0;
           v.targetNode.depleted = true;
         } else {
@@ -386,7 +684,7 @@ function tickVehicles(world) {
           // FEATURE_RESEARCH.md): a real pollution reduction plus a small scrap side-benefit
           // from whatever's recoverable, not primarily a scrap-generation vehicle.
           world.pollution = Math.max(0, world.pollution - (25 + world.rng() * 20));
-          world.addScrap(GARBAGE_BONUS_MIN + Math.floor(world.rng() * (GARBAGE_BONUS_MAX - GARBAGE_BONUS_MIN)));
+          world.addScrap(GARBAGE_BONUS_MIN + Math.floor(world.rng() * (GARBAGE_BONUS_MAX - GARBAGE_BONUS_MIN)), 'haul');
         }
         v.targetX = v.garageX; v.targetY = v.garageY;
         v.phase = 'outbound';
@@ -416,6 +714,11 @@ function tickVehicles(world) {
 // FEATURE_RESEARCH.md): a "room" is a connected passable area that does NOT touch the map
 // edge -- i.e., it's actually enclosed by walls, not just open ground. Recomputed only when
 // the wall layout changes (rare), not every tick.
+// clamp01 is core.js's exported helper -- reused here (rather than a second local copy) so this
+// file and core.js don't both declare a same-named top-level binding once build.py flattens
+// everything into one classic script (import lines are stripped there, but the identifier still
+// has to resolve to something real).
+
 const NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
 const MIN_ROOM_SIZE = 2;
 const MAX_ROOM_SIZE = 400; // discourage "the whole map" from ever counting as one room
@@ -462,6 +765,82 @@ function roomContaining(rooms, grid, x, y) {
   return null;
 }
 
+// Room stats (RimWorld-style beauty/cleanliness/impressiveness, see FEATURE_RESEARCH.md's
+// "Room detection + room roles/stats" priority item). Deliberately kept separate from
+// detectRooms above: detectRooms only re-runs when the *wall layout* changes (rare), but a
+// room's contents (furniture built/destroyed, a fire breaking out, pollution drifting) change
+// far more often, so computeRoomStats is meant to be called every tick against whatever `rooms`
+// currently holds -- it mutates each room object in place rather than rebuilding the list.
+//
+// Beauty contribution per Structure kind (see siege.js's Structure class for the full kind
+// list). Positive = "nice"/intentional furniture, negative = utilitarian/industrial/hazardous
+// equipment that reads as ugly sitting inside a room a citizen actually lives in. Values are
+// judgment calls, not ported from any single source game's exact numbers.
+const BEAUTY_BY_KIND = {
+  table: 2.5,      // sit-down furniture -- the clearest "nice" signal
+  bed: 1.5,        // functional but still a deliberate furnishing choice
+  door: 0.5,       // mild positive -- a room with a proper door reads as "finished"
+  wire: -0.5,      // exposed wiring, mildly utilitarian
+  turret: -2,      // a gun bolted to the floor of your room is not cozy
+  fence: -1,
+  trap: -2,
+  tesla: -2,       // arcing electrical hazard
+  floodlight: -1,  // stark industrial lighting
+  watchtower: -1.5,
+  camera: -0.5,
+  monitor_station: -0.5,
+  recycling_center: -2, // waste-processing machinery
+  generator: -3,        // loud, utilitarian power equipment
+  generator_nuclear: -6, // as above, worse -- also the nuclearWaste hazard below
+  generator_coal: -4,    // dirtier than the plain generator, reads as worse to have indoors too
+  generator_wind: -1,    // a turbine outdoors is far less obtrusive than boxy generator housing
+  generator_solar: -1,   // same -- a panel array reads as mild infrastructure, not an eyesore
+  waste_storage: -4,     // hazardous-waste containment, definitionally ugly
+};
+
+const CLEANLINESS_POLLUTION_DIVISOR = 20; // world.pollution this high alone fully tanks cleanliness
+const CLEANLINESS_NUCLEAR_DIVISOR = 10;   // world.nuclearWaste this high alone fully tanks cleanliness
+const CLEANLINESS_FIRE_PENALTY = 0.6;     // any structure actively on fire inside the room
+
+// Call once per tick (world.js) with the *current* rooms/grid/structures/world state. Mutates
+// each room with .beauty (raw sum, informational), .cleanliness, .impressiveness, and the
+// combined .quality score (0..1) that citizens.js's tickNeedsAndMood reads to nudge mood.
+function computeRoomStats(rooms, grid, structures, world) {
+  for (const room of rooms) {
+    let beauty = 0;
+    let niceCount = 0;
+    let onFireInside = false;
+
+    for (const s of structures) {
+      if (s.destroyed || s.underConstruction) continue;
+      const sx = Math.floor(s.x), sy = Math.floor(s.y);
+      if (!grid.inBounds(sx, sy)) continue;
+      if (!room.cells.has(grid.index(sx, sy))) continue;
+
+      const contribution = BEAUTY_BY_KIND[s.kind] ?? 0;
+      beauty += contribution;
+      if (contribution > 0) niceCount++;
+      if (s.onFire) onFireInside = true;
+    }
+
+    const pollution = world?.pollution ?? 0;
+    const nuclearWaste = world?.nuclearWaste ?? 0;
+    let cleanliness = 1 - pollution / CLEANLINESS_POLLUTION_DIVISOR - nuclearWaste / CLEANLINESS_NUCLEAR_DIVISOR;
+    if (onFireInside) cleanliness -= CLEANLINESS_FIRE_PENALTY;
+    cleanliness = clamp01(cleanliness);
+
+    // Impressiveness: RimWorld's third room stat, driven by sheer scale + amount of positive
+    // ("nice") furniture rather than the beauty/ugly balance -- a big hall full of tables reads
+    // as impressive even before accounting for any ugly equipment dragging beauty down.
+    const impressiveness = clamp01(room.size / MAX_ROOM_SIZE * 0.4 + niceCount * 0.1);
+
+    room.beauty = beauty;
+    room.cleanliness = cleanliness;
+    room.impressiveness = impressiveness;
+    room.quality = clamp01(0.5 + beauty * 0.05 + (impressiveness - 0.5) * 0.2) * cleanliness;
+  }
+}
+
 
 // ---- power.js ----
 // Power as a real connected wire graph, ported from Prison Architect's utilities grid (see
@@ -480,24 +859,64 @@ function powerTileKey(x, y) {
   return Math.floor(x) * TILE_STRIDE + Math.floor(y);
 }
 
+// SEA:R multi-source power economy (FEATURE_RESEARCH.md): coal is a straight cost/pollution
+// tradeoff (see economy.js/world.js) and plugs into the grid exactly like a plain generator --
+// no siting condition. Wind and solar DO carry a real siting condition though, and this codebase
+// has no elevation or roof/indoor concept to check against (see grid.js's TerrainKind -- just
+// Bare/Soil/Rock/Water -- and rooms.js's enclosed-room flood-fill, which is the closest thing to
+// "indoors" that exists). Rather than invent fake elevation/roof data, each substitutes the
+// honest nearest equivalent already in the sim:
+//   - Wind ("needs high ground"): substituted with "needs open, unobstructed ground" -- no other
+//     structure within WIND_CLEARANCE_RADIUS (wires/pipes excluded, since a turbine still needs a
+//     wire run out to actually deliver anywhere; it's other buildings crowding the site that
+//     count as the obstruction). Sited badly, it simply doesn't act as a power source at all this
+//     tick -- a stark but honest and easily-verified stand-in for "reduced output", given this
+//     engine's power model is a binary source/no-source graph (power.js has no notion of partial
+//     wattage to reduce).
+//   - Solar ("needs open sky"): substituted with "not built inside a detected enclosed room" (see
+//     rooms.js's detectRooms -- a room is by definition walled-in on every side, the closest
+//     analog to "roofed/indoors" this codebase has). world.js's tick() stamps s._openSky onto
+//     every generator_solar structure each tick (mirroring the s._staffed pattern already used
+//     for monitor_station); isSource below just reads it back. Same binary source/no-source
+//     tradeoff as wind above, for the same reason.
+const WIND_CLEARANCE_RADIUS = 2.5;
+
+// Exported (rather than kept private like isSource/isConductor) so world.js's tick() can stamp
+// s._windSited onto each generator_wind structure purely for render.js to read back and tint the
+// turbine blades -- the power graph itself (isSource below) always recomputes this live and never
+// depends on the stamped flag, so there's no lag in what actually gets powered, only in the paint.
+function isWindSited(s, structures) {
+  for (const other of structures) {
+    if (other === s || other.kind === 'wire' || other.kind === 'pipe' || other.destroyed) continue;
+    if (Math.hypot(other.x - s.x, other.y - s.y) <= WIND_CLEARANCE_RADIUS) return false;
+  }
+  return true;
+}
+
 // Any generator variant counts as a source (plain 'generator', 'generator_nuclear', ...) so new
-// generator types plug into the grid without needing to be listed here.
-function isSource(s) {
+// generator types plug into the grid without needing to be listed here -- except wind/solar,
+// which are only sources when their siting condition (above) actually holds.
+function isSource(s, structures) {
+  if (s.kind === 'generator_wind') return isWindSited(s, structures);
+  if (s.kind === 'generator_solar') return s._openSky !== false; // see world.js's tick(), defaults true until the first room pass
   return s.kind === 'generator' || s.kind.startsWith('generator_');
 }
 
-function isConductor(s) {
-  return (s.kind === 'wire' || isSource(s)) && !s.destroyed && !s.underConstruction;
+function isConductor(s, structures) {
+  return (s.kind === 'wire' || isSource(s, structures)) && !s.destroyed && !s.underConstruction;
 }
 
 // Cheap order-sensitive hash of every live conductor's tile+kind, so the O(n) rebuild only runs
-// when a wire/generator is built, finished, or destroyed -- not every tick for every turret.
+// when a wire/generator is built, finished, or destroyed -- not every tick for every turret. Also
+// changes whenever a wind/solar generator's siting eligibility flips (isSource reads live state
+// for those two), so a turbine losing its clearance or a solar array losing open sky correctly
+// triggers a recompute instead of coasting on a stale cached graph.
 function layoutSignature(structures) {
   let h = 17;
   for (let i = 0; i < structures.length; i++) {
     const s = structures[i];
-    if (!isConductor(s)) continue;
-    h = (Math.imul(h, 31) + powerTileKey(s.x, s.y) + (isSource(s) ? 7 : 3)) | 0;
+    if (!isConductor(s, structures)) continue;
+    h = (Math.imul(h, 31) + powerTileKey(s.x, s.y) + (isSource(s, structures) ? 7 : 3)) | 0;
   }
   return h;
 }
@@ -509,10 +928,10 @@ function computeEnergized(structures) {
   const conductors = new Set();
   const sources = [];
   for (const s of structures) {
-    if (!isConductor(s)) continue;
+    if (!isConductor(s, structures)) continue;
     const k = powerTileKey(s.x, s.y);
     conductors.add(k);
-    if (isSource(s)) sources.push(k);
+    if (isSource(s, structures)) sources.push(k);
   }
 
   const energized = new Set();
@@ -582,9 +1001,114 @@ function isPoweredAt(structures, x, y) {
 }
 
 
+// ---- water.js ----
+// Water/plumbing as a real connected pipe graph, mirroring power.js's wire grid exactly (see
+// FEATURE_RESEARCH.md: "Power/water as a real wired-graph network" -- power got built first,
+// this is the water half). Same PA-derived rule: a pump pushes water out along pipe conduits,
+// and anything not physically on the pipe run gets nothing no matter how close it is to the
+// pump -- adjacency to the network, not proximity to the source, is what matters.
+//
+// The graph is a flood-fill over orthogonally-adjacent conductor tiles (pumps + pipes), same
+// shape as power.js's energizedTiles/rooms.js's detectRooms, and is recomputed only when the
+// conductor layout actually changes -- mirroring power.js's water_layoutSignature check.
+const WATER_NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+const WATER_TILE_STRIDE = 100000; // packs (tx, ty) into one integer key; maps are far smaller than this
+
+function waterTileKey(x, y) {
+  return Math.floor(x) * WATER_TILE_STRIDE + Math.floor(y);
+}
+
+function water_isSource(s) {
+  return s.kind === 'pump';
+}
+
+function water_isConductor(s) {
+  return (s.kind === 'pipe' || water_isSource(s)) && !s.destroyed && !s.underConstruction;
+}
+
+// Cheap order-sensitive hash of every live conductor's tile+kind, so the O(n) rebuild only runs
+// when a pipe/pump is built, finished, or destroyed -- not every tick for every zone/consumer.
+function water_layoutSignature(structures) {
+  let h = 19;
+  for (let i = 0; i < structures.length; i++) {
+    const s = structures[i];
+    if (!water_isConductor(s)) continue;
+    h = (Math.imul(h, 31) + waterTileKey(s.x, s.y) + (water_isSource(s) ? 11 : 5)) | 0;
+  }
+  return h;
+}
+
+let _water_cachedSignature = null;
+let _cachedWatered = new Set();
+
+function computeWatered(structures) {
+  const conductors = new Set();
+  const sources = [];
+  for (const s of structures) {
+    if (!water_isConductor(s)) continue;
+    const k = waterTileKey(s.x, s.y);
+    conductors.add(k);
+    if (water_isSource(s)) sources.push(k);
+  }
+
+  const watered = new Set();
+  const queue = [];
+  for (const k of sources) {
+    if (watered.has(k)) continue;
+    watered.add(k);
+    queue.push(k);
+  }
+  while (queue.length) {
+    const k = queue.pop();
+    const tx = Math.floor(k / WATER_TILE_STRIDE);
+    const ty = k - tx * WATER_TILE_STRIDE;
+    for (const [dx, dy] of WATER_NEIGHBORS) {
+      const nk = (tx + dx) * WATER_TILE_STRIDE + (ty + dy);
+      if (watered.has(nk) || !conductors.has(nk)) continue;
+      watered.add(nk);
+      queue.push(nk);
+    }
+  }
+  return watered;
+}
+
+// Set of tile keys actually carrying water right now: every pump, plus every pipe with an
+// unbroken pipe path back to one. Cut the chain and the far half runs dry.
+function wateredTiles(structures) {
+  const sig = water_layoutSignature(structures);
+  if (sig !== _water_cachedSignature) {
+    _water_cachedSignature = sig;
+    _cachedWatered = computeWatered(structures);
+  }
+  return _cachedWatered;
+}
+
+// True if this tile is itself watered (i.e. it holds a live pipe/pump).
+function isTileWatered(structures, x, y) {
+  return wateredTiles(structures).has(waterTileKey(x, y));
+}
+
+// A consumer is watered if it sits on, or orthogonally touches, a watered tile -- so a Food/
+// Recreation zone tile or the Recycling Center can either hug the pump directly or be fed by a
+// pipe run from across the map. No wireless-radius exception here (unlike power.js's nuclear
+// generator) -- water has no equivalent "riskier source, bigger payoff" building yet.
+function isWateredAt(structures, x, y) {
+  const watered = wateredTiles(structures);
+  if (watered.size === 0) return false;
+  const tx = Math.floor(x), ty = Math.floor(y);
+  if (watered.has(tx * WATER_TILE_STRIDE + ty)) return true;
+  for (const [dx, dy] of WATER_NEIGHBORS) {
+    if (watered.has((tx + dx) * WATER_TILE_STRIDE + (ty + dy))) return true;
+  }
+  return false;
+}
+
+
 // ---- citizens.js ----
 // Ported/condensed from SD.Sim (CitizenStore, NeedsDecaySystem, NeedsMoodBreakTickGroup,
 // SocialInteractionSystem). Struct-of-arrays store, same shape as the C# CitizenStore.
+
+
 
 const CitizenFlags = Object.freeze({
   None: 0,
@@ -596,11 +1120,21 @@ const CitizenFlags = Object.freeze({
 const DOWNED_RECOVERY_RATE = 0.0015; // per tick, passive -- no dedicated first-aid job yet
 const DOWNED_RECOVER_THRESHOLD = 0.3;
 
+// Exported so weather.js can scale its extra Cold/Heatwave decay proportionally to these base
+// rates rather than hardcoding a second copy of the numbers.
 const HUNGER_DECAY = 0.0005;   // per tick (10 Hz), matches ARCHITECTURE.md "100ms/tick"
 const REST_DECAY = 0.0003;
 const SOCIAL_DECAY = 0.0002;
 const ON_DUTY_SOCIAL_FULFILLMENT = 0.6; // guards/snipers get partial social fulfillment on duty
 const BREAK_MOOD_THRESHOLD = 0.12;
+
+// Room quality -> mood (rooms.js's computeRoomStats, RimWorld-style beauty/cleanliness/
+// impressiveness -> a 0..1 "quality" score). 0.5 is the neutral "no room / average room"
+// baseline, so this term is signed: a genuinely nice room (quality near 1) gives a steady small
+// positive nudge each tick, a bare/ugly one (quality near 0) gives a steady small negative nudge.
+// Kept deliberately gentle -- this should read as a slow trend over many ticks in a soak test,
+// not something that swamps the existing hunger/rest/social-driven mood swing in one tick.
+const ROOM_MOOD_INFLUENCE = 0.02;
 
 class CitizenStore {
   constructor(capacity) {
@@ -625,6 +1159,9 @@ class CitizenStore {
     this._staffCooldown = new Float32Array(capacity); // used by siege.js tickStaffCombat
     this._jobRef = {}; // used by jobs.js: index -> blueprint/resource-node object currently targeted
     this.trait = new Array(capacity).fill(null);
+    this.backstory = new Array(capacity).fill(null); // see backstories.js -- childhood/adult flavor pair + skill nudge
+    this.passionCombat = new Uint8Array(capacity); // Passion tier (backstories.js), biases skillCombat gain rate
+    this.passionConstruction = new Uint8Array(capacity); // Passion tier, biases skillConstruction gain rate
     this._nextId = 1;
   }
 
@@ -640,6 +1177,13 @@ class CitizenStore {
     this.flags[i] = CitizenFlags.None;
     this.alive[i] = 1;
     this.trait[i] = randomTrait(rng);
+    const backstory = randomBackstory(rng);
+    this.backstory[i] = backstory;
+    this.skillCombat[i] = backstory.skillCombatStart ?? 0;
+    this.skillConstruction[i] = backstory.skillConstructionStart ?? 0;
+    const passions = randomPassions(rng, backstory);
+    this.passionCombat[i] = passions.combat;
+    this.passionConstruction[i] = passions.construction;
     return i;
   }
 
@@ -658,7 +1202,10 @@ class CitizenStore {
 
 // isStaffAt(i) -> bool, used to decide on-duty social fulfillment (guards/snipers don't
 // need to be near others to stay socially fulfilled while working).
-function tickNeedsAndMood(store, isStaffAt, rng) {
+// world (optional, 5th arg) -- passed by world.js as `this` so a citizen's current room quality
+// (rooms.js's roomContaining + computeRoomStats) can nudge their mood; omit it (e.g. in tests)
+// and this term is simply skipped, matching the rest of this function's null-safe style.
+function tickNeedsAndMood(store, isStaffAt, rng, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
 
@@ -682,6 +1229,15 @@ function tickNeedsAndMood(store, isStaffAt, rng) {
     // Mood eases toward the current need average rather than snapping, so a single bad tick
     // doesn't cause a break.
     store.mood[i] += (avgNeed - store.mood[i]) * 0.05;
+
+    // Room quality (see ROOM_MOOD_INFLUENCE doc comment above): one roomContaining lookup per
+    // citizen per tick, same cost/pattern as the ROOM_REFILL_BONUS lookups already done per
+    // citizen per tick in jobs.js's Eating/Sleeping/Recreating states.
+    if (world) {
+      const room = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      if (room) store.mood[i] += (room.quality - 0.5) * ROOM_MOOD_INFLUENCE;
+    }
+    store.mood[i] = Math.min(1, Math.max(0, store.mood[i]));
 
     if (store.mood[i] < BREAK_MOOD_THRESHOLD) {
       store.flags[i] |= CitizenFlags.OnBreak;
@@ -728,21 +1284,70 @@ function tickWander(store, grid, rng, speed = 0.04, skipIf = null) {
 // Monitor just needs an assign(citizenId, StaffRoleKind.Monitor, {x, y}) at a Monitor Station's
 // location; no combat behavior of its own, it's read passively by world.js's staffed-check.
 
+// Damage-type plumbing lives in siege.js; K9 bites are Kinetic like a guard sidearm, so dogs are
+// good at running down Skirmishers and poor at chewing through a Brute's plate.
+
+
+
 const AlertLevel = Object.freeze({
   Calm: 0,
   Alert: 1,
   Combat: 2,
 });
 
+// Armory weapon tiers (FEATURE_RESEARCH.md's Prison Architect section): a civilian defense
+// force issuing weapons from an armory needs no reframing at all, it's already the game's
+// premise. Each tier is a multiplier on a role's baseline GUARD_*/SNIPER_* stats (siege.js) --
+// Sidearm is exactly that baseline (1x everywhere), so a roster with no Armory built plays
+// identically to the old flat-constant behavior. Rifle and Heavy are real tradeoffs, not strict
+// upgrades: more damage costs range and/or cooldown, matching the turret/tesla and dog/guard
+// tradeoff framing already used elsewhere in siege.js.
+const WeaponTier = Object.freeze({
+  Sidearm: 'Sidearm',
+  Rifle: 'Rifle',
+  Heavy: 'Heavy',
+});
+
+const WEAPON_TIERS = Object.freeze({
+  [WeaponTier.Sidearm]: Object.freeze({ label: 'Sidearm', damageMult: 1,    rangeMult: 1,    cooldownMult: 1 }),
+  [WeaponTier.Rifle]:   Object.freeze({ label: 'Rifle',   damageMult: 1.6,  rangeMult: 1.15, cooldownMult: 1.15 }),
+  [WeaponTier.Heavy]:   Object.freeze({ label: 'Heavy',   damageMult: 2.4,  rangeMult: 0.8,  cooldownMult: 1.75 }),
+});
+
+// Weakest -> strongest; how far up this list a guard/sniper can be issued is gated by how many
+// Armories the settlement has actually built (see tickArmoryIssuance).
+const WEAPON_TIER_ORDER = [WeaponTier.Sidearm, WeaponTier.Rifle, WeaponTier.Heavy];
+
+// Patrol routes + staff fatigue (FEATURE_RESEARCH.md's Prison Architect section): `post` may be
+// a single {x, y} (static hold-position, unchanged behavior / old save-file shape) or an ordered
+// array of 2-4 waypoints a guard/sniper/monitor cycles through, pausing briefly at each -- see
+// tickStaffDuty. Staff also carry a real off-duty cycle: tickStaffOffDuty below flips
+// roster.isOffDuty when a staff member's hunger/rest (same CitizenStore fields every citizen
+// has) crosses a threshold, at which point tickStaffDuty stops walking them and jobs.js's normal
+// Eat/Sleep job states take over for them, same as any off-shift citizen, until they recover.
+const PATROL_PAUSE_TICKS = 15; // dwell at each waypoint so a patrol reads as a beat, not a jitter
+const OFFDUTY_REST_THRESHOLD = 0.35; // fatigue this low sends staff off duty to recover
+const OFFDUTY_HUNGER_THRESHOLD = 0.35;
+
 class StaffRoster {
   constructor() {
     this._roleById = new Map(); // citizenId -> StaffRoleKind
-    this._postById = new Map(); // citizenId -> {x, y}
+    this._postById = new Map(); // citizenId -> array of 1-4 {x, y} waypoints (1 = static post)
+    this._weaponById = new Map(); // citizenId -> WeaponTier, see tickArmoryIssuance
+    this._patrolIndexById = new Map(); // citizenId -> index of the waypoint currently being walked to
+    this._patrolPauseById = new Map(); // citizenId -> ticks spent paused at the current waypoint
+    this._offDutyById = new Set(); // citizenId currently clocked off, recovering hunger/rest like a normal citizen
   }
 
+  // post may be a single {x, y} (backward compat / old save shape) or an array of 2-4 {x, y}
+  // points defining a patrol loop.
   assign(citizenId, kind, post) {
     this._roleById.set(citizenId, kind);
-    if (post) this._postById.set(citizenId, post);
+    if (post) {
+      this._postById.set(citizenId, Array.isArray(post) ? post : [post]);
+      this._patrolIndexById.set(citizenId, 0);
+      this._patrolPauseById.set(citizenId, 0);
+    }
   }
 
   isStaff(citizenId) {
@@ -753,31 +1358,164 @@ class StaffRoster {
     return this._roleById.get(citizenId) || StaffRoleKind.None;
   }
 
+  // Full waypoint list assigned to this staff member (length 1 for a static post), or undefined.
   postOf(citizenId) {
     return this._postById.get(citizenId);
   }
+
+  // The single waypoint tickStaffDuty is walking this staff member toward right now.
+  currentWaypoint(citizenId) {
+    const points = this._postById.get(citizenId);
+    if (!points || points.length === 0) return null;
+    const idx = this._patrolIndexById.get(citizenId) || 0;
+    return points[idx % points.length];
+  }
+
+  advancePatrol(citizenId) {
+    const points = this._postById.get(citizenId);
+    if (!points || points.length <= 1) return; // static post, nothing to cycle
+    const idx = (this._patrolIndexById.get(citizenId) || 0) + 1;
+    this._patrolIndexById.set(citizenId, idx % points.length);
+  }
+
+  isOffDuty(citizenId) {
+    return this._offDutyById.has(citizenId);
+  }
+
+  setOffDuty(citizenId, offDuty) {
+    if (offDuty) this._offDutyById.add(citizenId);
+    else this._offDutyById.delete(citizenId);
+  }
+
+  // Sidearm is the implicit default for any Guard/Sniper who hasn't been issued anything yet
+  // (or ever will be, if no Armory gets built) -- never null, so siege.js's tickStaffCombat
+  // always has real tier stats to read.
+  weaponOf(citizenId) {
+    return this._weaponById.get(citizenId) || WeaponTier.Sidearm;
+  }
+
+  equip(citizenId, tier) {
+    this._weaponById.set(citizenId, tier);
+  }
 }
 
-// Guards/snipers walk to their assigned post and stay there (matches the Unity build's
-// "hold position" staff behavior); everyone else uses the general wander tick.
+// Armory issuance (scoped version per FEATURE_RESEARCH.md: no per-citizen pick-a-tier UI --
+// simply, once assigned to Guard/Sniper AND an Armory exists, they're equipped with whatever
+// tier the settlement's Armory count supports). Every built (not destroyed/under-construction)
+// Armory unlocks one more rung of WEAPON_TIER_ORDER, so a second Armory is a real strategic
+// payoff, not just a cosmetic duplicate. Runs every tick (world.js) so a freshly-assigned guard
+// or a freshly-completed Armory both propagate immediately, and a destroyed Armory correctly
+// downgrades everyone back rather than leaving them permanently over-equipped.
+function tickArmoryIssuance(roster, structures) {
+  let armoryCount = 0;
+  for (const s of structures) {
+    if (s.kind === 'armory' && !s.destroyed && !s.underConstruction) armoryCount++;
+  }
+  const tierIndex = Math.min(WEAPON_TIER_ORDER.length - 1, armoryCount);
+  const tier = WEAPON_TIER_ORDER[tierIndex];
+  for (const [citizenId, kind] of roster._roleById.entries()) {
+    if (kind !== StaffRoleKind.Guard && kind !== StaffRoleKind.Sniper) continue;
+    roster.equip(citizenId, tier);
+  }
+}
+
+// Guards/snipers/monitors walk their assigned route -- a single point holds position (matches
+// the Unity build's "hold position" staff behavior); 2-4 points cycle as a patrol loop, pausing
+// PATROL_PAUSE_TICKS at each stop before moving to the next. Off-duty staff (see
+// tickStaffOffDuty) are skipped entirely -- jobs.js drives their Eat/Sleep trip that tick
+// instead. Everyone else uses the general wander tick.
 function tickStaffDuty(store, roster, idOf, speed = 0.05) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
     if (store.isDownedAt(i)) continue; // downed staff can't hold their post
     const id = idOf(i);
     if (!roster.isStaff(id)) continue;
-    const post = roster.postOf(id);
-    if (!post) continue;
+    if (roster.isOffDuty(id)) continue; // clocked off recovering a need -- see tickStaffOffDuty
 
-    const dx = post.x - store.x[i];
-    const dy = post.y - store.y[i];
+    const waypoint = roster.currentWaypoint(id);
+    if (!waypoint) continue;
+
+    const dx = waypoint.x - store.x[i];
+    const dy = waypoint.y - store.y[i];
     const dist = Math.hypot(dx, dy);
     if (dist > 0.1) {
       store.x[i] += (dx / dist) * speed;
       store.y[i] += (dy / dist) * speed;
+      roster._patrolPauseById.set(id, 0);
+    } else {
+      const pause = (roster._patrolPauseById.get(id) || 0) + 1;
+      if (pause >= PATROL_PAUSE_TICKS) {
+        roster.advancePatrol(id);
+        roster._patrolPauseById.set(id, 0);
+      } else {
+        roster._patrolPauseById.set(id, pause);
+      }
     }
     store.targetX[i] = store.x[i];
     store.targetY[i] = store.y[i];
+  }
+}
+
+// Staff fatigue: guards/snipers/monitors carry the same hunger/rest fields as any citizen (see
+// citizens.js tickNeedsAndMood, which decays them for staff same as everyone), but previously had
+// no way to actually respond to it -- jobs.js's tickJobs unconditionally skips anyone
+// roster.isStaff() covers, so staff would silently decay to 0 forever with zero recovery and zero
+// gameplay consequence. This flips roster's off-duty flag when fatigue/hunger crosses a
+// threshold and dispatches them straight to the nearest Food/Bedroom zone itself (see below);
+// while off duty, world.js's staffOnDuty callback reports them as NOT on duty, so jobs.js's normal
+// SeekingFood/Eating/SeekingBed/Sleeping state machine carries out that trip for them exactly
+// like any citizen's, and tickStaffDuty (above) leaves them alone instead of walking them back to
+// post.
+//
+// Dispatch is done directly here rather than just flipping the flag and letting jobs.js's own
+// Idle branch notice the low need on its own: that branch's thresholds are deliberately narrowed
+// during the Work schedule block (see jobs.js SCHEDULE_WORK_THRESHOLD_MULT) so a citizen mid-task
+// doesn't break off for anything short of near-critical -- sensible for someone protecting an
+// in-progress build/harvest job, but a guard/sniper has no such job to protect, just a post to
+// leave, so that narrowing should never apply to them. Left to the generic Idle branch, an
+// off-duty guard whose needs dipped moderately (not narrow-threshold-critical) would fall through
+// past the food/bed checks entirely and pick up a blueprint/harvest job instead, wandering off
+// indefinitely rather than taking the short break this feature intends -- caught in soak testing
+// before this was changed to a direct dispatch.
+// Sends citizen index i directly into jobs.js's SeekingFood/SeekingBed travel state, bypassing
+// the Idle branch's own (schedule-narrowed) threshold checks entirely -- see the doc comment
+// above. Returns false (and leaves the roster on-duty flag alone for the caller to reconsider) if
+// no matching zone exists to send them to, so an off-duty citizen can't get stuck forever with
+// nowhere to go.
+function dispatchStaffToNeed(store, i, zones, wantFood) {
+  const zone = zones.nearestOfKind(wantFood ? ZoneKind.Food : ZoneKind.Bedroom, store.x[i], store.y[i]);
+  if (!zone) return false;
+  store.jobState[i] = wantFood ? JobState.SeekingFood : JobState.SeekingBed;
+  store.targetX[i] = zone.x; store.targetY[i] = zone.y;
+  return true;
+}
+
+function tickStaffOffDuty(store, roster, idOf, zones) {
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i)) continue;
+    if (store.isDownedAt(i)) continue;
+    const id = idOf(i);
+    if (!roster.isStaff(id)) continue;
+
+    const needsFood = store.hunger[i] < OFFDUTY_HUNGER_THRESHOLD;
+    const needsRest = store.rest[i] < OFFDUTY_REST_THRESHOLD;
+
+    if (!roster.isOffDuty(id)) {
+      if (needsFood || needsRest) {
+        roster.setOffDuty(id, true);
+        // Whichever need is more urgent (lower current value) wins the first trip; the other
+        // gets a second trip below once the first one completes, if it's still low by then.
+        const wantFood = needsFood && (!needsRest || store.hunger[i] <= store.rest[i]);
+        if (!dispatchStaffToNeed(store, i, zones, wantFood)) roster.setOffDuty(id, false);
+      }
+    } else if (store.jobState[i] === JobState.Idle) {
+      // jobs.js's Eating/Sleeping loop ran the trip we dispatched to completion -- if the other
+      // need is also still low, send a second trip before fully resuming, same as a citizen
+      // handling one need at a time; otherwise, back to post/patrol.
+      if (needsFood) { if (!dispatchStaffToNeed(store, i, zones, true)) roster.setOffDuty(id, false); }
+      else if (needsRest) { if (!dispatchStaffToNeed(store, i, zones, false)) roster.setOffDuty(id, false); }
+      else roster.setOffDuty(id, false);
+    }
   }
 }
 
@@ -814,9 +1552,8 @@ function tickDogs(dogs, citizens, roster, attackers, onScrap) {
       if (d < bestDist) { bestDist = d; bestI = i; }
     }
     if (bestI >= 0) {
-      attackers.health[bestI] -= DOG_DAMAGE;
       dog.cooldown = DOG_COOLDOWN;
-      if (attackers.health[bestI] <= 0) { attackers.alive[bestI] = 0; onScrap?.(4); }
+      if (damageAttacker(attackers, bestI, DOG_DAMAGE, DamageType.Kinetic)) onScrap?.(4);
     }
   }
 }
@@ -826,12 +1563,166 @@ function findCitizenIndexById(citizens, id) {
   return -1;
 }
 
+// Wires a tamed/bred dog (already in world.dogs) to a citizen the same way the starting dog is
+// wired in world.js's constructor -- both the roster assignment (so tickStaffDuty/UI treat them
+// as K9Handler and walk them to a post) and the dog's own ownerId (so tickDogs above knows who
+// to follow) are needed; the roster system itself needs no changes to support a second dog.
+function assignDogHandler(roster, dog, citizenId, post) {
+  roster.assign(citizenId, StaffRoleKind.K9Handler, post);
+  dog.ownerId = citizenId;
+}
+
+// --- RimWorld-style taming/breeding (see FEATURE_RESEARCH.md's Animals section) ---
+// A wild animal shares the dog's {x,y} shape but stays outside world.dogs (and outside the K9
+// roster/combat loop entirely) until jobs.js's Taming job succeeds -- kept as a distinct array
+// rather than a `tamed: false` flag on world.dogs, since dogs is specifically the
+// roster-assignable/combat-ticked collection and a wild animal is neither of those things yet.
+const WILD_ANIMAL_SPAWN_INTERVAL = 500; // ticks between spawn rolls -- cadence mirrors resources.js's maybeSpawnNode
+const MAX_WILD_ANIMALS = 3; // concurrent untamed animals on the map at once
+const WILD_ANIMAL_SPEED = 0.03;
+
+function maybeSpawnWildAnimal(wildAnimals, grid, rng, currentTick, avoidX, avoidY) {
+  if (currentTick % WILD_ANIMAL_SPAWN_INTERVAL !== 0) return;
+  if (wildAnimals.length >= MAX_WILD_ANIMALS) return;
+  let tries = 0;
+  while (tries < 30) {
+    tries++;
+    const x = Math.floor(rng() * grid.width);
+    const y = Math.floor(rng() * grid.height);
+    if (Math.hypot(x - avoidX, y - avoidY) < 8) continue;
+    if (grid.isBlocked(x, y)) continue;
+    wildAnimals.push({ x: x + 0.5, y: y + 0.5, targetX: x + 0.5, targetY: y + 0.5, claimedBy: null, tameTicks: 0 });
+    return;
+  }
+}
+
+// Wild animals wander like an idle citizen (see citizens.js tickWander) but freeze in place while
+// a citizen is actively taming them (claimedBy set) -- otherwise jobs.js's Taming job could never
+// get a stable "arrived" check, since the target would keep drifting mid-approach.
+function tickWildAnimals(wildAnimals, grid, rng, speed = WILD_ANIMAL_SPEED) {
+  for (const animal of wildAnimals) {
+    if (animal.claimedBy != null) continue;
+    const dx = animal.targetX - animal.x;
+    const dy = animal.targetY - animal.y;
+    const dist = Math.hypot(dx, dy);
+    if (dist < 0.15) {
+      let tx, ty, tries = 0;
+      do {
+        tx = Math.max(1, Math.min(grid.width - 2, animal.x + (rng() - 0.5) * 6));
+        ty = Math.max(1, Math.min(grid.height - 2, animal.y + (rng() - 0.5) * 6));
+        tries++;
+      } while (grid.isBlocked(tx | 0, ty | 0) && tries < 8);
+      animal.targetX = tx; animal.targetY = ty;
+    } else {
+      animal.x += (dx / dist) * speed;
+      animal.y += (dy / dist) * speed;
+    }
+  }
+}
+
+// Flat per-tick taming chance -- no dedicated "Animals" skill exists yet (FEATURE_RESEARCH.md
+// explicitly says not to add one just for this), so this is the "just a flat rate" option it
+// calls out as acceptable. TAME_MAX_TICKS bounds how long a citizen will stick with a no-luck
+// animal before it flees, so a job can't get permanently stuck.
+const TAME_CHANCE_PER_TICK = 0.004;
+const TAME_MAX_TICKS = 400;
+
+// Bounds total world.dogs population so neither breeding nor ongoing taming can spiral --
+// jobs.js's Taming success check reads this too (not just tickDogBreeding below), since a long
+// soak session can otherwise keep taming freshly-spawned wild animals past any breeding-only cap.
+const DOG_POPULATION_CAP = 8;
+const BREED_CHECK_INTERVAL = 300;
+const BREED_CHANCE = 0.12;
+
+// Two tamed animals occasionally produce a pup, no citizen action required beyond having tamed
+// the initial pair -- deliberately simple (flat chance-per-check against a hard population cap)
+// rather than a full needs/pregnancy model, matching the scope the task called for.
+function tickDogBreeding(dogs, rng, currentTick) {
+  if (currentTick % BREED_CHECK_INTERVAL !== 0) return;
+  if (dogs.length < 2 || dogs.length >= DOG_POPULATION_CAP) return;
+  if (rng() >= BREED_CHANCE) return;
+  const aIdx = rngInt(rng, 0, dogs.length);
+  let bIdx = rngInt(rng, 0, dogs.length);
+  let tries = 0;
+  while (bIdx === aIdx && tries < 5) { bIdx = rngInt(rng, 0, dogs.length); tries++; }
+  const a = dogs[aIdx], b = dogs[bIdx];
+  dogs.push({ ownerId: null, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, cooldown: 0 });
+}
+
 
 // ---- siege.js ----
 // Ported/condensed from SD.Siege (wave spawner, AttackerStore, turret/fence/trap placement +
 // combat resolution, scrap rewards).
 
 
+
+
+
+// ---------------------------------------------------------------- enemy archetypes
+// RimWorld/SEA:R-style raider roster: every attacker used to be identical except for a flat
+// health multiplier scaled by wave number, so no defense layout was ever better or worse than
+// another. Four archetypes with genuinely different stat shapes give waves texture and make the
+// damage-type table below actually matter.
+const AttackerKind = Object.freeze({
+  Grunt: 0,
+  Brute: 1,
+  Skirmisher: 2,
+  Boss: 3,
+});
+
+// healthMult/speedMult/damageMult multiply the baseline constants further down this file.
+// contactRange: a Boss reaches further than everyone else, which (because tickAttackerVsCitizens
+// damages EVERY citizen inside contact range) reads as a cleaving area attack rather than the
+// single-target poke a Grunt makes -- that's the Boss's "unique attack".
+//
+// BALANCE-CRITICAL, soak-tested. A first pass at (Brute 2.6hp/0.5-kinetic, Boss 9.0hp, 12% boss
+// roll) dropped hands-off survival ~28% below the same-build baseline and put a Boss in over half
+// of all waves. These numbers were swept until three-seed mean survival matched the pre-archetype
+// baseline of the same build almost exactly (21.0k vs 21.0k ticks). Retune only against a fresh
+// A/B soak -- the effective toughness of a Brute is healthMult x its kinetic RESISTANCE below,
+// not healthMult alone, so the two tables have to move together.
+const ATTACKER_ARCHETYPES = Object.freeze([
+  { name: 'Grunt',      healthMult: 1.0,  speedMult: 1.0, damageMult: 1.0, contactRange: 0.5 },
+  { name: 'Brute',      healthMult: 1.8,  speedMult: 0.5, damageMult: 1.4, contactRange: 0.6 },
+  { name: 'Skirmisher', healthMult: 0.45, speedMult: 1.9, damageMult: 0.7, contactRange: 0.5 },
+  { name: 'Boss',       healthMult: 5.0,  speedMult: 0.7, damageMult: 2.2, contactRange: 1.3 },
+]);
+
+function archetypeOf(kind) {
+  return ATTACKER_ARCHETYPES[kind] || ATTACKER_ARCHETYPES[AttackerKind.Grunt];
+}
+
+// ---------------------------------------------------------------- weapon / armor damage types
+// RimWorld's weapon-vs-armor system, condensed to three legible types instead of RimWorld's full
+// sharp/blunt/heat matrix. The point is a real rock-paper-scissors, not flat multipliers on
+// everything: exactly one archetype is the intended answer for each damage type, and the Grunt is
+// a deliberate all-1.0 baseline so the table stays readable.
+//
+//   Kinetic   -- turrets, guard sidearms, K9 bites (the bread-and-butter defense)
+//   Explosive -- traps (one-shot burst placements)
+//   Energy    -- tesla coils, sniper rifles (expensive/slow, but shreds heavy armor)
+const DamageType = Object.freeze({
+  Kinetic: 0,
+  Explosive: 1,
+  Energy: 2,
+});
+
+// [kind][damageType] -> incoming-damage multiplier. >1 = vulnerable, <1 = resistant.
+// Brute: heavy plate shrugs off bullets, but it's slow and can't avoid a mine -> bring traps.
+// Skirmisher: no armor at all so bullets tear it up, but it's fast enough to run out of blasts.
+// Boss: the armor answer is energy weapons (tesla/snipers), not more turrets.
+const RESISTANCE = Object.freeze([
+  /* Grunt      */ Object.freeze([1.0,  1.0,  1.0]),
+  /* Brute      */ Object.freeze([0.65, 1.75, 1.0]),
+  /* Skirmisher */ Object.freeze([1.35, 0.6,  1.0]),
+  /* Boss       */ Object.freeze([0.7,  0.9,  1.5]),
+]);
+
+function resistanceMult(kind, damageType) {
+  const row = RESISTANCE[kind] || RESISTANCE[AttackerKind.Grunt];
+  const m = row[damageType];
+  return m === undefined ? 1 : m;
+}
 
 class AttackerStore {
   constructor(capacity) {
@@ -841,33 +1732,54 @@ class AttackerStore {
     this.y = new Float32Array(capacity);
     this.health = new Float32Array(capacity);
     this.alive = new Uint8Array(capacity);
+    this.kind = new Uint8Array(capacity); // AttackerKind enum, same SoA style as the rest
   }
 
-  spawn(x, y, health = 1) {
+  // `health` is the wave-scaled base health; the archetype's own healthMult is applied here so
+  // callers (WaveSpawner, tests, console pokes) never have to remember to do it themselves.
+  spawn(x, y, health = 1, kind = AttackerKind.Grunt) {
+    const hp = health * archetypeOf(kind).healthMult;
     if (this.count >= this.capacity) {
       // recycle a dead slot rather than growing, matches the fixed-capacity C# store
       for (let i = 0; i < this.count; i++) {
         if (!this.alive[i]) {
-          this.x[i] = x; this.y[i] = y; this.health[i] = health; this.alive[i] = 1;
+          this.x[i] = x; this.y[i] = y; this.health[i] = hp; this.alive[i] = 1; this.kind[i] = kind;
           return i;
         }
       }
       return -1;
     }
     const i = this.count++;
-    this.x[i] = x; this.y[i] = y; this.health[i] = health; this.alive[i] = 1;
+    this.x[i] = x; this.y[i] = y; this.health[i] = hp; this.alive[i] = 1; this.kind[i] = kind;
     return i;
   }
 
   isAliveAt(i) {
     return this.alive[i] === 1;
   }
+
+  archetypeAt(i) {
+    return archetypeOf(this.kind[i]);
+  }
+}
+
+// Single choke point for every "something hurt an attacker" site in the codebase, so the
+// resistance lookup can never be forgotten at one of them. Returns true if this hit killed.
+function damageAttacker(attackers, i, amount, damageType = DamageType.Kinetic) {
+  if (!attackers.isAliveAt(i)) return false;
+  attackers.health[i] -= amount * resistanceMult(attackers.kind[i], damageType);
+  if (attackers.health[i] <= 0) {
+    attackers.alive[i] = 0;
+    return true;
+  }
+  return false;
 }
 
 class Structure {
   constructor(kind, x, y, opts = {}) {
     this.kind = kind; // 'turret' | 'fence' | 'trap' | 'bed' | 'table' | 'door' | 'generator' | 'wire' | 'wall' |
-                      // 'generator_nuclear' | 'waste_storage'
+                      // 'generator_nuclear' | 'waste_storage' | 'generator_coal' | 'generator_wind' |
+                      // 'generator_solar' (SEA:R multi-source power economy, see power.js's isSource)
     this.x = x; this.y = y;
     this.health = kind === 'fence' ? 0.6 : 1;
     this.destroyed = false;
@@ -887,6 +1799,27 @@ class Structure {
   }
 }
 
+// RimWorld's raid "arrival methods": the same raid points spent a different way. Edge is the
+// original walk-in-from-off-map behaviour; Tunnel drops the raiders straight into the settlement
+// interior, bypassing the whole perimeter of fences/traps/turret kill-boxes.
+const ArrivalMethod = Object.freeze({
+  Edge: 0,
+  Tunnel: 1,
+});
+
+// Roster-composition rates, soak-tested alongside ATTACKER_ARCHETYPES/RESISTANCE -- see the
+// balance note on ATTACKER_ARCHETYPES before touching any of these.
+const BRUTE_RATE = 0.15;
+const SKIRMISHER_RATE = 0.35;
+const BOSS_MIN_WAVE = 8;
+const BOSS_WAVE_GAP = 5;   // minimum waves between two Bosses
+const BOSS_CHANCE = 0.05;  // per-attacker roll, only once the two gates above pass
+
+const TUNNEL_MIN_WAVE = 4;          // no burrowing before the colony has had a chance to build anything
+const TUNNEL_BASE_CHANCE = 0.08;
+const TUNNEL_MAX_CHANCE = 0.35;
+const TUNNEL_CLUSTER_RADIUS = 2.2;  // how tightly the emerging group is packed around the mouth
+
 class WaveSpawner {
   constructor(grid) {
     this.grid = grid;
@@ -895,11 +1828,42 @@ class WaveSpawner {
     this.strengthFactor = 1; // set by director.js each tick
     this.cycleMult = 1; // storyteller-personality breather-length multiplier
     this.doubleChance = 0.1; // odds of immediately queuing a second wave close behind
+    this.lastArrival = ArrivalMethod.Edge; // for the event log / debug inspection
+    this.lastTunnelPoint = null; // {x,y} of the most recent tunnel mouth, used by render.js
+  }
+
+  waveCount() {
+    return Math.round((2 + Math.min(10, this.waveNumber * 1.5)) * this.strengthFactor);
+  }
+
+  waveBaseHealth() {
+    return (1 + this.waveNumber * 0.1) * Math.max(0.7, this.strengthFactor);
+  }
+
+  // Roster composition by wave: pure Grunts early, Skirmishers join at wave 2, Brutes at 3, and a
+  // single rare Boss becomes possible from wave 8 onward. Bosses are gated three ways -- at most
+  // one per wave, a low per-attacker roll, AND a minimum gap of BOSS_WAVE_GAP waves since the last
+  // one -- because with waves this frequent, "12% per attacker, one per wave" alone put a Boss in
+  // over half of all waves in soak-testing. A Boss is meant to be an event.
+  rollKind(rng, bossAllowed) {
+    const bossReady = this.waveNumber >= BOSS_MIN_WAVE &&
+      (this._lastBossWave == null || this.waveNumber - this._lastBossWave >= BOSS_WAVE_GAP);
+    if (bossAllowed && bossReady && rng() < BOSS_CHANCE) {
+      this._lastBossWave = this.waveNumber;
+      return AttackerKind.Boss;
+    }
+    const r = rng();
+    if (this.waveNumber >= 3 && r < BRUTE_RATE) return AttackerKind.Brute;
+    if (this.waveNumber >= 2 && r < BRUTE_RATE + SKIRMISHER_RATE) return AttackerKind.Skirmisher;
+    return AttackerKind.Grunt;
   }
 
   spawnOneWave(currentTick, attackers, rng) {
     this.waveNumber++;
-    const count = Math.round((2 + Math.min(10, this.waveNumber * 1.5)) * this.strengthFactor);
+    this.lastArrival = ArrivalMethod.Edge;
+    const count = this.waveCount();
+    const baseHealth = this.waveBaseHealth();
+    let bossAllowed = true;
     for (let n = 0; n < count; n++) {
       const edge = Math.floor(rng() * 4);
       let x, y;
@@ -907,14 +1871,68 @@ class WaveSpawner {
       else if (edge === 1) { x = this.grid.width - 1; y = rng() * this.grid.height; }
       else if (edge === 2) { x = rng() * this.grid.width; y = 0; }
       else { x = rng() * this.grid.width; y = this.grid.height - 1; }
-      attackers.spawn(x, y, (1 + this.waveNumber * 0.1) * Math.max(0.7, this.strengthFactor));
+      const kind = this.rollKind(rng, bossAllowed);
+      if (kind === AttackerKind.Boss) bossAllowed = false;
+      attackers.spawn(x, y, baseHealth, kind);
     }
   }
 
-  tick(currentTick, attackers, rng) {
+  // Picks an unblocked interior cell somewhere between the settlement core and the midpoint to
+  // the map edge -- far enough in that the raiders are already past any perimeter line, but not
+  // literally on top of the citizen huddle every single time.
+  pickTunnelPoint(rng) {
+    const cx = this.grid.width / 2, cy = this.grid.height / 2;
+    const maxR = Math.min(this.grid.width, this.grid.height) * 0.28;
+    for (let attempt = 0; attempt < 24; attempt++) {
+      const ang = rng() * Math.PI * 2;
+      const r = 2 + rng() * maxR;
+      const x = cx + Math.cos(ang) * r;
+      const y = cy + Math.sin(ang) * r;
+      if (!this.grid.inBounds(Math.floor(x), Math.floor(y))) continue;
+      if (this.grid.isBlocked(Math.floor(x), Math.floor(y))) continue;
+      return { x, y };
+    }
+    return { x: cx, y: cy };
+  }
+
+  // Tunnel arrival: one mouth, one tight cluster, no perimeter to chew through. Slightly smaller
+  // headcount than an equivalent edge wave because it skips every layer of defense on the way in.
+  spawnTunnelWave(currentTick, attackers, rng) {
+    this.waveNumber++;
+    this.lastArrival = ArrivalMethod.Tunnel;
+    const mouth = this.pickTunnelPoint(rng);
+    this.lastTunnelPoint = mouth;
+    const count = Math.max(2, Math.round(this.waveCount() * 0.7));
+    const baseHealth = this.waveBaseHealth();
+    let bossAllowed = true;
+    for (let n = 0; n < count; n++) {
+      const ang = rng() * Math.PI * 2;
+      const r = rng() * TUNNEL_CLUSTER_RADIUS;
+      const x = Math.max(0, Math.min(this.grid.width - 1, mouth.x + Math.cos(ang) * r));
+      const y = Math.max(0, Math.min(this.grid.height - 1, mouth.y + Math.sin(ang) * r));
+      const kind = this.rollKind(rng, bossAllowed);
+      if (kind === AttackerKind.Boss) bossAllowed = false;
+      attackers.spawn(x, y, baseHealth, kind);
+    }
+  }
+
+  // Hazard-scaled tunnel odds, mirroring director.js's pollution-makes-waves-worse pattern
+  // (read-only use of world.pollution/world.nuclearWaste -- colonyStrength() is untouched).
+  tunnelChance(world) {
+    if (this.waveNumber < TUNNEL_MIN_WAVE) return 0;
+    const hazard = (world?.pollution || 0) + (world?.nuclearWaste || 0) * 2;
+    return Math.min(TUNNEL_MAX_CHANCE, TUNNEL_BASE_CHANCE + hazard / 900);
+  }
+
+  _spawnWithArrival(currentTick, attackers, rng, world) {
+    if (rng() < this.tunnelChance(world)) this.spawnTunnelWave(currentTick, attackers, rng);
+    else this.spawnOneWave(currentTick, attackers, rng);
+  }
+
+  tick(currentTick, attackers, rng, world = null) {
     if (currentTick < this.nextWaveTick) return;
-    this.spawnOneWave(currentTick, attackers, rng);
-    if (rng() < this.doubleChance) this.spawnOneWave(currentTick, attackers, rng); // Cassandra-style back-to-back
+    this._spawnWithArrival(currentTick, attackers, rng, world);
+    if (rng() < this.doubleChance) this._spawnWithArrival(currentTick, attackers, rng, world); // Cassandra-style back-to-back
 
     const delay = (600 - Math.min(300, this.waveNumber * 15)) * this.cycleMult;
     this.nextWaveTick = currentTick + Math.round(delay / this.strengthFactor);
@@ -1021,9 +2039,11 @@ function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, 
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
 
+    const arch = attackers.archetypeAt(i);
+
     const blocker = findBlockingFence(structures, attackers.x[i], attackers.y[i]);
     if (blocker) {
-      blocker.health -= FENCE_DAMAGE_PER_TICK;
+      blocker.health -= FENCE_DAMAGE_PER_TICK * arch.damageMult; // a Brute tears through fencing
       if (blocker.health <= 0) blocker.destroyed = true;
       continue;
     }
@@ -1037,7 +2057,7 @@ function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, 
     if (dist > ATTACKER_CONTACT_RANGE * 0.6) {
       const inFloodlight = structures.some(s => s.kind === 'floodlight' && !s.destroyed && !s.underConstruction &&
         Math.hypot(attackers.x[i] - s.x, attackers.y[i] - s.y) <= FLOODLIGHT_RANGE);
-      const speed = ATTACKER_SPEED * (inFloodlight ? FLOODLIGHT_SLOW_MULT : 1);
+      const speed = ATTACKER_SPEED * arch.speedMult * (inFloodlight ? FLOODLIGHT_SLOW_MULT : 1);
       attackers.x[i] += (dx / dist) * speed;
       attackers.y[i] += (dy / dist) * speed;
     }
@@ -1045,9 +2065,10 @@ function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, 
     for (const t of structures) {
       if (t.kind !== 'trap' || t.triggered || t.underConstruction) continue;
       if (Math.hypot(attackers.x[i] - t.x, attackers.y[i] - t.y) < TRAP_TRIGGER_RANGE) {
-        attackers.health[i] -= TRAP_DAMAGE;
         t.triggered = true; t.destroyed = true;
-        if (attackers.health[i] <= 0) { attackers.alive[i] = 0; onScrap?.(SCRAP_PER_KILL); onKill?.(); }
+        // Traps are the game's Explosive source: the counter to armored Brutes, wasted on
+        // Skirmishers (who mostly run clear of the blast).
+        if (damageAttacker(attackers, i, TRAP_DAMAGE, DamageType.Explosive)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
       }
     }
   }
@@ -1071,6 +2092,9 @@ function tickTurrets(structures, attackers, onScrap, onFire, onKill) {
     const isTesla = s.kind === 'tesla';
     const range = (isTesla ? TESLA_RANGE : TURRET_RANGE) * (powered ? POWERED_RANGE_MULT : 1);
     const damage = (isTesla ? TESLA_DAMAGE : TURRET_DAMAGE) * (powered ? POWERED_DAMAGE_MULT : 1);
+    // Tesla coils are the Energy source (armor-piercing, the answer to a Boss); plain turrets
+    // are Kinetic (great against unarmored Skirmishers, poor against a Brute's plate).
+    const dtype = isTesla ? DamageType.Energy : DamageType.Kinetic;
 
     if (isTesla) {
       // Chains to every attacker in range instead of picking one -- Tesla's SEA:R niche is
@@ -1080,8 +2104,7 @@ function tickTurrets(structures, attackers, onScrap, onFire, onKill) {
         if (!attackers.isAliveAt(i)) continue;
         if (Math.hypot(attackers.x[i] - s.x, attackers.y[i] - s.y) > range) continue;
         hitAny = true;
-        attackers.health[i] -= damage;
-        if (attackers.health[i] <= 0) { attackers.alive[i] = 0; onScrap?.(SCRAP_PER_KILL); onKill?.(); }
+        if (damageAttacker(attackers, i, damage, dtype)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
       }
       if (hitAny) { s.cooldown = TESLA_COOLDOWN_TICKS; onFire?.(s); }
       continue;
@@ -1089,8 +2112,7 @@ function tickTurrets(structures, attackers, onScrap, onFire, onKill) {
 
     const bestI = nearestAliveAttacker(attackers, s.x, s.y, range);
     if (bestI >= 0) {
-      attackers.health[bestI] -= damage;
-      if (attackers.health[bestI] <= 0) { attackers.alive[bestI] = 0; onScrap?.(SCRAP_PER_KILL); onKill?.(); }
+      if (damageAttacker(attackers, bestI, damage, dtype)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
       s.cooldown = TURRET_COOLDOWN_TICKS;
       onFire?.(s);
     }
@@ -1116,9 +2138,13 @@ function nearestAliveAttacker(attackers, x, y, maxRange) {
 function tickAttackerVsCitizens(attackers, citizens, onDowned) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
+    // Per-archetype reach: a Boss's contactRange is wide enough that it hits every citizen in a
+    // small area each tick (this loop damages everyone in range), which is its cleave attack.
+    const arch = attackers.archetypeAt(i);
+    const reach = arch.contactRange ?? ATTACKER_CONTACT_RANGE;
     for (let c = 0; c < citizens.count; c++) {
       if (!citizens.isAliveAt(c)) continue;
-      if (Math.hypot(attackers.x[i] - citizens.x[c], attackers.y[i] - citizens.y[c]) > ATTACKER_CONTACT_RANGE) continue;
+      if (Math.hypot(attackers.x[i] - citizens.x[c], attackers.y[i] - citizens.y[c]) > reach) continue;
 
       if (citizens.isDownedAt(c)) {
         citizens.flags[c] |= CitizenFlags.Dead;
@@ -1128,7 +2154,7 @@ function tickAttackerVsCitizens(attackers, citizens, onDowned) {
       }
 
       const healthMult = citizens.trait[c]?.healthMult ?? 1;
-      citizens.health[c] -= ATTACKER_CITIZEN_DAMAGE / healthMult;
+      citizens.health[c] -= (ATTACKER_CITIZEN_DAMAGE * arch.damageMult) / healthMult;
       if (citizens.health[c] <= 0) {
         citizens.health[c] = 0.05;
         citizens.flags[c] |= CitizenFlags.Downed;
@@ -1149,17 +2175,22 @@ function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKill) {
 
     if (citizens._staffCooldown[i] > 0) { citizens._staffCooldown[i]--; continue; }
 
-    const range = kind === 'Sniper' ? SNIPER_RANGE : GUARD_RANGE;
-    const damage = kind === 'Sniper' ? SNIPER_DAMAGE : GUARD_DAMAGE;
-    const cooldown = kind === 'Sniper' ? SNIPER_COOLDOWN : GUARD_COOLDOWN;
+    // Armory-issued weapon tier (security.js WEAPON_TIERS/tickArmoryIssuance) multiplies the
+    // role's baseline stats -- Sidearm is 1x everywhere (identical to the old flat constants) for
+    // any guard/sniper nobody's built an Armory for yet.
+    const tier = WEAPON_TIERS[roster.weaponOf(idOf(i))] || WEAPON_TIERS.Sidearm;
+    const range = (kind === 'Sniper' ? SNIPER_RANGE : GUARD_RANGE) * tier.rangeMult;
+    const damage = (kind === 'Sniper' ? SNIPER_DAMAGE : GUARD_DAMAGE) * tier.damageMult;
+    const cooldown = Math.round((kind === 'Sniper' ? SNIPER_COOLDOWN : GUARD_COOLDOWN) * tier.cooldownMult);
+    // Guards carry conventional sidearms (Kinetic); snipers carry the long-range armor-piercing
+    // rifle (Energy), so a sniper line is the personnel answer to Brutes/Bosses.
+    const dtype = kind === 'Sniper' ? DamageType.Energy : DamageType.Kinetic;
 
     const targetI = nearestAliveAttacker(attackers, citizens.x[i], citizens.y[i], range);
     if (targetI >= 0) {
-      attackers.health[targetI] -= damage;
       citizens._staffCooldown[i] = cooldown;
-      if (attackers.health[targetI] <= 0) {
-        attackers.alive[targetI] = 0;
-        citizens.skillCombat[i] += 0.05;
+      if (damageAttacker(attackers, targetI, damage, dtype)) {
+        citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]];
         onScrap?.(SCRAP_PER_KILL);
         onKill?.();
       }
@@ -1322,7 +2353,17 @@ function isNight(timeOfDay) {
 
 
 
+
+
+
 const ROOM_REFILL_BONUS = 1.3; // RimWorld/PA-style: an actually-enclosed room works better than open ground
+// Water grid payoff (water.js): a Food or Recreation zone tile fed by a pump/pipe run refills
+// hunger/social faster, same "provisioned area works better" precedent as ROOM_REFILL_BONUS
+// above -- running water on top of four walls stacks multiplicatively with it, it doesn't
+// replace it. No Bedroom bonus: rest isn't naturally a "running water" need the way eating/
+// recreating are, and power.js's turret/tesla/watchtower trio didn't need a bedroom analogue
+// either -- every consumer type doesn't have to take every utility.
+const WATER_REFILL_BONUS = 1.25;
 
 const JobState = Object.freeze({
   Idle: 0,
@@ -1338,6 +2379,8 @@ const JobState = Object.freeze({
   Harvesting: 10,
   SeekingVehicle: 11,
   Driving: 12,
+  SeekingAnimal: 13, // RimWorld-style taming, see security.js's wild-animal helpers and FEATURE_RESEARCH.md
+  Taming: 14,
 });
 
 const SEEK_SOCIAL_THRESHOLD = 0.35;
@@ -1392,6 +2435,16 @@ function findNearestNode(nodes, x, y) {
   return best;
 }
 
+function findNearestTameableAnimal(wildAnimals, x, y) {
+  let best = null, bestDist = Infinity;
+  for (const a of wildAnimals) {
+    if (a.claimedBy != null) continue; // someone's already taming this one
+    const d = Math.hypot(a.x - x, a.y - y);
+    if (d < bestDist) { bestDist = d; best = a; }
+  }
+  return best;
+}
+
 function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, onScrapGain, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
@@ -1412,6 +2465,10 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
         store.jobState[i] = JobState.Idle;
       } else if (interruptible === JobState.Harvesting || interruptible === JobState.SeekingScrap
         || interruptible === JobState.SeekingVehicle) {
+        store.jobState[i] = JobState.Idle;
+      } else if (interruptible === JobState.SeekingAnimal || interruptible === JobState.Taming) {
+        const animal = store._jobRef?.[i];
+        if (animal) animal.claimedBy = null; // release it so someone else (or the same citizen later) can try again
         store.jobState[i] = JobState.Idle;
       }
     }
@@ -1470,6 +2527,20 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       // after harvesting meant no citizen ever reached it in testing -- a real bug, not a
       // priority nuance.
       const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i]);
+      const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
+
+      // Passion tie-break (RimWorld-style): only when there's a genuine choice -- both an idle
+      // truck and a harvestable node are actually available this tick -- a citizen who burns for
+      // construction-adjacent work (harvesting gains skillConstruction, see below) very slightly
+      // prefers picking at the node over driving. Doesn't touch the needs-first checks above, and
+      // doesn't apply when only one option exists (that's not a "choice").
+      if (vehicle && node && store.passionConstruction[i] === Passion.Burning) {
+        store.jobState[i] = JobState.SeekingScrap;
+        store.targetX[i] = node.x; store.targetY[i] = node.y;
+        store._jobRef[i] = node;
+        continue;
+      }
+
       if (vehicle) {
         store.jobState[i] = JobState.SeekingVehicle;
         store.targetX[i] = vehicle.x; store.targetY[i] = vehicle.y;
@@ -1477,18 +2548,31 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
         continue;
       }
 
-      const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
       if (node) {
         store.jobState[i] = JobState.SeekingScrap;
         store.targetX[i] = node.x; store.targetY[i] = node.y;
         store._jobRef[i] = node;
         continue;
       }
+
+      // Taming (RimWorld-style, see security.js and FEATURE_RESEARCH.md): lowest-priority of all
+      // the idle-fallback jobs -- an idle wild animal to approach only matters once there's
+      // nothing else productive to do, same reasoning as vehicle/node above but one rung further
+      // down, since taming doesn't feed the scrap economy the way those two do.
+      const animal = findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i]);
+      if (animal) {
+        animal.claimedBy = idOf(i);
+        store.jobState[i] = JobState.SeekingAnimal;
+        store.targetX[i] = animal.x; store.targetY[i] = animal.y;
+        store._jobRef[i] = animal;
+        continue;
+      }
       continue;
     }
 
     if (state === JobState.SeekingFood || state === JobState.SeekingBed || state === JobState.SeekingRec
-      || state === JobState.SeekingBuild || state === JobState.SeekingScrap || state === JobState.SeekingVehicle) {
+      || state === JobState.SeekingBuild || state === JobState.SeekingScrap || state === JobState.SeekingVehicle
+      || state === JobState.SeekingAnimal) {
       const dx = store.targetX[i] - store.x[i];
       const dy = store.targetY[i] - store.y[i];
       const dist = Math.hypot(dx, dy);
@@ -1498,6 +2582,10 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
           if (vehicle.driverId != null) { store.jobState[i] = JobState.Idle; continue; } // beaten to it
           boardVehicle(world, vehicle, idOf(i));
           store.jobState[i] = JobState.Driving;
+          continue;
+        }
+        if (state === JobState.SeekingAnimal) {
+          store.jobState[i] = JobState.Taming;
           continue;
         }
         store.jobState[i] = state === JobState.SeekingFood ? JobState.Eating
@@ -1515,12 +2603,13 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
 
     if (state === JobState.Eating) {
       const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
       // Ethanol-fuel trucks (vehicles.js FUEL_TYPES.ethanol) brew clean fuel out of the
       // settlement's food surplus -- there's no bulk food-stockpile resource in this codebase
       // to drain directly, so the honest portable stand-in is a temporary hit to how fast the
       // Food zone actually refills hunger after each ethanol haul completes.
       const ethanolMult = world.ethanolPenaltyTimer > 0 ? ETHANOL_FOOD_REFILL_MULT : 1;
-      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus * ethanolMult);
+      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus * waterBonus * ethanolMult);
       if (store.hunger[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
@@ -1534,7 +2623,8 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
 
     if (state === JobState.Recreating) {
       const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
-      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * (store.trait[i]?.socialGainMult ?? 1));
+      const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
+      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * waterBonus * (store.trait[i]?.socialGainMult ?? 1));
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
@@ -1547,7 +2637,7 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       if (bp.buildProgress >= 1) {
         bp.underConstruction = false;
         bp.claimedBy = null;
-        store.skillConstruction[i] += BUILD_SKILL_GAIN;
+        store.skillConstruction[i] += BUILD_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]];
         store.jobState[i] = JobState.Idle;
       }
       continue;
@@ -1560,7 +2650,7 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       const take = Math.min(HARVEST_RATE * harvestRateMult, node.amount);
       node.amount -= take;
       onScrapGain?.(take);
-      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2;
+      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2 * PASSION_GAIN_MULT[store.passionConstruction[i]];
       if (node.amount <= 0) node.depleted = true;
       if (node.depleted) store.jobState[i] = JobState.Idle;
       continue;
@@ -1576,6 +2666,36 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
         continue;
       }
       store.x[i] = vehicle.x; store.y[i] = vehicle.y; // riding along, hidden (render.js skips Driving citizens)
+      continue;
+    }
+
+    if (state === JobState.Taming) {
+      const animal = store._jobRef?.[i];
+      if (!animal) { store.jobState[i] = JobState.Idle; continue; }
+      animal.tameTicks = (animal.tameTicks || 0) + 1;
+      // Flat per-tick roll (see security.js's TAME_CHANCE_PER_TICK doc comment for why this isn't
+      // scaled by a skill -- no "Animals" skill exists and FEATURE_RESEARCH.md says not to add
+      // one just for this). world.rng keeps this reproducible under the same seed as everything
+      // else in the sim. Gated on the same DOG_POPULATION_CAP tickDogBreeding respects -- a long
+      // soak session could otherwise keep taming freshly-spawned wild animals past the cap even
+      // with zero breeding, which defeats the point of having one at all.
+      if (world.dogs.length < DOG_POPULATION_CAP && world?.rng && world.rng() < TAME_CHANCE_PER_TICK) {
+        const idx = world.wildAnimals.indexOf(animal);
+        if (idx >= 0) world.wildAnimals.splice(idx, 1);
+        // Joins world.dogs unowned -- exactly like a bred pup (security.js's tickDogBreeding),
+        // it just sits until assigned to a K9Handler via the existing roster.assign() system,
+        // same as the starting dog in world.js's constructor.
+        world.dogs.push({ ownerId: null, x: animal.x, y: animal.y, cooldown: 0 });
+        store.jobState[i] = JobState.Idle;
+        continue;
+      }
+      if (animal.tameTicks >= TAME_MAX_TICKS) {
+        // Gave up -- the animal flees rather than staying claimed (and tameable) forever.
+        const idx = world.wildAnimals.indexOf(animal);
+        if (idx >= 0) world.wildAnimals.splice(idx, 1);
+        store.jobState[i] = JobState.Idle;
+        continue;
+      }
       continue;
     }
   }
@@ -1771,7 +2891,7 @@ function tickWorldMap(world) {
   // Supply lines: every other region you hold ships scrap to wherever you're currently standing.
   let others = 0;
   for (const o of wm.regions) if (o.owned && o.id !== r.id) others++;
-  if (others > 0) world.scrap += others * TRICKLE_PER_OWNED_REGION;
+  if (others > 0) world.addScrap(others * TRICKLE_PER_OWNED_REGION, 'conquest');
 
   // Keep the map's view of the active region fresh so the overlay shows live numbers.
   if ((world.currentTick & 15) === 0) r.snapshot = summarize(world);
@@ -1819,6 +2939,11 @@ const FLAMMABLE_KINDS = new Set(['bed', 'table', 'door']);
 // in world.js tick(). At 10 Hz, one generator rolls roughly once every ~9 real-world minutes on
 // average before it sparks, and even then only catches if something flammable is nearby.
 const IGNITION_CHANCE_PER_GENERATOR = 0.00003;
+// Coal (SEA:R multi-source power economy): combustion-based like the plain generator, but
+// dirtier -- rolls at roughly double the plain generator's spark chance, consistent with it also
+// producing roughly double the pollution-per-tick in world.js. Wind/solar have no combustion
+// process at all and deliberately never appear in tickFireIgnition below.
+const IGNITION_CHANCE_PER_COAL_GENERATOR = 0.00006;
 const IGNITION_SEARCH_RADIUS = 4; // generator sparks something flammable within this range
 
 const FIRE_DAMAGE_PER_TICK = 0.01; // burning structure's health drains at this rate until destroyed
@@ -1839,8 +2964,10 @@ function igniteStructure(s) {
 // structure. Call once per tick from SimWorld.tick().
 function tickFireIgnition(structures, rng) {
   for (const g of structures) {
-    if (g.kind !== 'generator' || g.destroyed || g.underConstruction) continue;
-    if (rng() >= IGNITION_CHANCE_PER_GENERATOR) continue;
+    if (g.kind !== 'generator' && g.kind !== 'generator_coal') continue;
+    if (g.destroyed || g.underConstruction) continue;
+    const chance = g.kind === 'generator_coal' ? IGNITION_CHANCE_PER_COAL_GENERATOR : IGNITION_CHANCE_PER_GENERATOR;
+    if (rng() >= chance) continue;
 
     let target = null;
     let candidateCount = 0;
@@ -1881,6 +3008,333 @@ function tickFire(structures, rng) {
       }
     }
   }
+}
+
+
+// ---- weather.js ----
+// RimWorld-style weather + one-off random events (see FEATURE_RESEARCH.md's RimWorld section,
+// "Events" category: weather, extreme weather, wanderers, blight, infestation -- all called out
+// there as genre-neutral simulation tech, same "port the mechanism, not the flavor" framing as
+// room detection/fire). Weather cycles on a simple weighted random timer; each state hooks into
+// an existing numeric knob rather than adding a parallel system, same philosophy as fire.js's
+// "modest, real, not dominating" tuning. Events are one-off rolls that post to
+// world.milestoneLog (existing event log, see world.js) and fire world.onRandomEvent (the same
+// optional-callback pattern as onBuildComplete/onWaveIncoming) so main.js can also surface them
+// as a toast.
+
+
+const WeatherKind = Object.freeze({
+  Clear: 'Clear', Rain: 'Rain', Cold: 'Cold', Heatwave: 'Heatwave',
+});
+
+// Weighted so Clear is the common case -- weather is flavor + a modest modifier, not a constant
+// stream of debuffs.
+const WEATHER_WEIGHTS = [
+  [WeatherKind.Clear, 5],
+  [WeatherKind.Rain, 2],
+  [WeatherKind.Cold, 1.5],
+  [WeatherKind.Heatwave, 1.5],
+];
+
+const MIN_WEATHER_TICKS = 600;  // ~1 min at 10Hz
+const MAX_WEATHER_TICKS = 1800; // ~3 min at 10Hz
+
+function rollDuration(rng) {
+  return MIN_WEATHER_TICKS + Math.floor(rng() * (MAX_WEATHER_TICKS - MIN_WEATHER_TICKS));
+}
+
+function pickWeather(rng, exclude) {
+  const pool = WEATHER_WEIGHTS.filter(([k]) => k !== exclude);
+  const total = pool.reduce((sum, [, w]) => sum + w, 0);
+  let roll = rng() * total;
+  for (const [k, w] of pool) {
+    roll -= w;
+    if (roll <= 0) return k;
+  }
+  return pool[pool.length - 1][0];
+}
+
+/** Call once from SimWorld's constructor to seed initial state. */
+function initWeather(world) {
+  world.weather = WeatherKind.Clear;
+  world._weatherTimer = rollDuration(world.rng);
+}
+
+// Rain: citizens amble slower underfoot -- hooks into tickWander's existing speed parameter
+// (world.js passes this straight through), rather than a parallel movement system.
+const RAIN_WANDER_SPEED_MULT = 0.8;
+
+function weatherWanderSpeedMult(weather) {
+  return weather === WeatherKind.Rain ? RAIN_WANDER_SPEED_MULT : 1;
+}
+
+// Cold/Heatwave: modest *extra* need decay on top of whatever tickNeedsAndMood already applied
+// this tick, asymmetric by axis (cold -> hungrier faster burning calories to stay warm; heat ->
+// harder to rest) so the two extremes read as mechanically distinct, not just palette swaps of
+// each other. Being indoors in any enclosed room (rooms.js flood-fill) cuts the penalty most of
+// the way back to normal, same "shelter matters" logic either direction -- this is the promised
+// "reduce it if citizens are indoors" behavior, extended symmetrically to heat since a roof is
+// shelter from both extremes.
+const COLD_HUNGER_EXTRA_OUTDOOR = 0.8; // fraction of HUNGER_DECAY added on top, outdoors
+const COLD_HUNGER_EXTRA_INDOOR = 0.15;
+const HEAT_REST_EXTRA_OUTDOOR = 0.8; // fraction of REST_DECAY added on top, outdoors
+const HEAT_REST_EXTRA_INDOOR = 0.15;
+
+function tickWeatherCitizenEffects(world) {
+  const weather = world.weather;
+  if (weather !== WeatherKind.Cold && weather !== WeatherKind.Heatwave) return;
+
+  const store = world.citizens;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i) || store.isDownedAt(i)) continue;
+    const indoors = !!roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+
+    if (weather === WeatherKind.Cold) {
+      const extra = HUNGER_DECAY * (indoors ? COLD_HUNGER_EXTRA_INDOOR : COLD_HUNGER_EXTRA_OUTDOOR);
+      store.hunger[i] = Math.max(0, store.hunger[i] - extra);
+    } else {
+      const extra = REST_DECAY * (indoors ? HEAT_REST_EXTRA_INDOOR : HEAT_REST_EXTRA_OUTDOOR);
+      store.rest[i] = Math.max(0, store.rest[i] - extra);
+    }
+  }
+}
+
+/** Advances the weather timer and, on expiry, rolls a new (different) weather state; then
+ *  applies the current weather's per-tick citizen effect (every tick, not just on change --
+ *  Cold/Heatwave's extra decay is a continuous effect for as long as that state holds). Call
+ *  once per tick from SimWorld.tick(), same pattern as the other periodic systems there. */
+function tickWeather(world) {
+  if (world._weatherTimer == null) initWeather(world);
+  world._weatherTimer--;
+  if (world._weatherTimer <= 0) {
+    const next = pickWeather(world.rng, world.weather);
+    world.weather = next;
+    world._weatherTimer = rollDuration(world.rng);
+    const text = `Weather turns to ${next}`;
+    world.milestoneLog.push({ tick: world.currentTick, text });
+    if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    world.onRandomEvent?.(text);
+  }
+
+  tickWeatherCitizenEffects(world);
+}
+
+// ---------------------------------------------------------------- one-off random events
+// Wanderer-joins and blight, per FEATURE_RESEARCH.md's RimWorld "Events" list. Infestation's
+// genre-neutral equivalent (a burst of wild resource-guarding creatures) was scoped out of this
+// pass -- it would need a new attacker-adjacent entity type wired through siege.js/render.js,
+// which is a much bigger surface than a numeric-knob event, and this pass prioritized doing a
+// solid job on the other two over a half-built third. Left as a natural follow-up.
+
+const EVENT_CHECK_INTERVAL = 500; // ticks between event rolls
+const EVENT_CHANCE = 0.06; // odds per check that *some* event fires -- rare, not spammy
+const EVENT_WEIGHTS = [
+  ['wanderer', 1],
+  ['blight', 1],
+];
+
+function tickRandomEvents(world) {
+  if (world.currentTick % EVENT_CHECK_INTERVAL !== 0) return;
+  if (world.rng() >= EVENT_CHANCE) return;
+
+  const total = EVENT_WEIGHTS.reduce((sum, [, w]) => sum + w, 0);
+  let roll = world.rng() * total;
+  let kind = EVENT_WEIGHTS[0][0];
+  for (const [k, w] of EVENT_WEIGHTS) {
+    roll -= w;
+    if (roll <= 0) { kind = k; break; }
+  }
+
+  if (kind === 'wanderer') tryWandererEvent(world);
+  else tryBlightEvent(world);
+}
+
+/** Spawns a new citizen near the settlement center using an unused name from the shared name
+ *  pool (world._namePool -- see world.js's STARTER_NAMES, extended with extra names beyond the
+ *  starting 24 so a long soak test doesn't run out). Returns true if a wanderer actually joined. */
+// Population cap, distinct from the raw CitizenStore capacity check below: this event was
+// firing with no ceiling of its own and, stacked with world.js's separate Refugee Wagon
+// mechanic (which IS gated, only replenishing losses back up to ~90% of starting population),
+// drove hands-off soak tests from 24 to 40+ citizens in ~10k ticks with zero combat losses --
+// a real regression, since colonyStrength() scales directly off alive citizen count and no
+// other system was scaling up to match. Cap wanderers to keep a healthy colony from ballooning;
+// Refugee Wagon remains the mechanism for recovering from actual losses.
+const WANDERER_POPULATION_CAP_MULT = 1.15;
+
+function tryWandererEvent(world) {
+  const cap = (world.startingCitizenCount || 24) * WANDERER_POPULATION_CAP_MULT;
+  if (world.citizens.count >= cap) return false;
+
+  const pool = world._namePool || [];
+  const used = new Set();
+  for (let i = 0; i < world.citizens.count; i++) used.add(world.citizens.name[i]);
+  const available = pool.filter(n => !used.has(n));
+  if (available.length === 0) return false;
+
+  const name = available[Math.floor(world.rng() * available.length)];
+  const cx = Math.max(1, Math.min(world.width - 2, world.width / 2 + (world.rng() - 0.5) * 6));
+  const cy = Math.max(1, Math.min(world.height - 2, world.height / 2 + (world.rng() - 0.5) * 6));
+  const idx = world.citizens.spawn(name, cx, cy, world.rng);
+  if (idx < 0) return false; // at capacity
+
+  world._citizenIds.push(world.citizens.id[idx]);
+  const text = `A wanderer named ${name} joins the settlement`;
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+  return true;
+}
+
+const BLIGHT_LOSS_MIN = 0.4; // fraction of remaining yield destroyed
+const BLIGHT_LOSS_MAX = 0.7;
+
+/** Picks a random non-depleted resource node and destroys a chunk of its remaining yield (can
+ *  fully deplete it). Returns true if a node was actually hit. */
+function tryBlightEvent(world) {
+  const candidates = world.resourceNodes.filter(n => !n.depleted && n.amount > 0);
+  if (candidates.length === 0) return false;
+
+  const node = candidates[Math.floor(world.rng() * candidates.length)];
+  const frac = BLIGHT_LOSS_MIN + world.rng() * (BLIGHT_LOSS_MAX - BLIGHT_LOSS_MIN);
+  node.amount = Math.max(0, node.amount - node.amount * frac);
+  if (node.amount < 1) { node.amount = 0; node.depleted = true; }
+
+  const text = node.depleted
+    ? 'Blight wipes out a resource node'
+    : "Blight reduces a resource node's yield";
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+  return true;
+}
+
+
+// ---- grading.js ----
+// Non-carceral reframe of Prison Architect's 4-axis Grading tab (Punishment/Reform/Security/
+// Health), per FEATURE_RESEARCH.md's synthesis note: same aggregate-scoring pattern, axes
+// renamed to fit a settlement that isn't a prison -- Safety/Wellbeing/Sustainability/Cohesion.
+//
+// Purely a read-only reporting layer: computed periodically (see GRADING_INTERVAL_TICKS) and
+// stored on world.grading for the UI to read. Every axis is derived from state the sim already
+// tracks elsewhere (citizens.js/siege.js/relationships.js/world.js) -- nothing new is simulated
+// here. Never feeds back into director.js's colonyStrength()/wave difficulty; if you're tempted
+// to read world.grading from director.js, don't -- that would make this a balance lever instead
+// of a reporting layer.
+
+const GRADING_INTERVAL_TICKS = 30; // ~3s at 10Hz -- feels live without recomputing every tick
+
+const DEFENSE_KINDS = new Set(['turret', 'fence', 'trap']);
+const RECENT_EVENT_WINDOW_TICKS = 3000; // ~5 min at 10Hz -- "recent" friendship-event frequency for Cohesion
+
+function clampScore(v) {
+  if (!Number.isFinite(v)) return 0;
+  return Math.max(0, Math.min(100, v));
+}
+
+// Safety: functional defenses (turret/fence/trap, powered turrets count extra) offset by
+// cumulative citizen losses, currently-downed citizens, and how many attackers are on the field
+// right now -- the same signals siege.js/world.js already track, just recombined for reporting.
+function computeSafety(world) {
+  let functionalDefense = 0;
+  for (const s of world.structures) {
+    if (s.destroyed || s.underConstruction) continue;
+    if (!DEFENSE_KINDS.has(s.kind)) continue;
+    functionalDefense += isPowered(world.structures, s.x, s.y) ? 1.2 : 1;
+  }
+  const defenseCoverage = Math.min(1, functionalDefense / 10);
+
+  let aliveCitizens = 0, downedCitizens = 0;
+  for (let i = 0; i < world.citizens.count; i++) {
+    if (!world.citizens.isAliveAt(i)) continue;
+    aliveCitizens++;
+    if (world.citizens.isDownedAt(i)) downedCitizens++;
+  }
+  const totalEver = Math.max(1, world.citizens.count);
+  const deathRatio = Math.max(0, (totalEver - aliveCitizens) / totalEver);
+  const downedRatio = aliveCitizens > 0 ? downedCitizens / aliveCitizens : 0;
+
+  let aliveAttackers = 0;
+  for (let i = 0; i < world.attackers.count; i++) if (world.attackers.isAliveAt(i)) aliveAttackers++;
+  const attackerPenalty = Math.min(40, aliveAttackers * 3);
+
+  return clampScore(45 * defenseCoverage + 35 * (1 - deathRatio) + 20 * (1 - downedRatio) - attackerPenalty);
+}
+
+// Wellbeing: straight average of hunger/rest/social/mood across the living population
+// (citizens.js's CitizenStore fields) -- no derived signal needed, this is the axis the data
+// most directly supports.
+function computeWellbeing(world) {
+  const c = world.citizens;
+  let aliveCount = 0, sum = 0;
+  for (let i = 0; i < c.count; i++) {
+    if (!c.isAliveAt(i)) continue;
+    aliveCount++;
+    sum += (c.hunger[i] + c.rest[i] + c.social[i] + c.mood[i]) / 4;
+  }
+  if (aliveCount === 0) return 0;
+  return clampScore((sum / aliveCount) * 100);
+}
+
+// Sustainability: world.pollution and world.nuclearWaste each mapped through a saturating curve
+// (100 at 0, asymptoting toward 0 as the hazard grows without bound -- both accrue unboundedly
+// per tick per siege.js/world.js, so a hard-clamped linear score would floor out almost
+// immediately), blended with a banked-scrap trend term so a settlement whose economy is
+// currently shrinking scores worse than one that's merely sitting still.
+function computeSustainability(world) {
+  const pollutionScore = 100 / (1 + world.pollution / 50);
+  const nuclearScore = 100 / (1 + (world.nuclearWaste || 0) / 20);
+
+  const prevScrap = world._gradingPrevScrap ?? world.scrap;
+  const delta = world.scrap - prevScrap;
+  world._gradingPrevScrap = world.scrap;
+  const trendScore = clampScore(50 + delta);
+
+  return clampScore(0.4 * pollutionScore + 0.3 * nuclearScore + 0.3 * trendScore);
+}
+
+// Cohesion: relationships.js's RelationshipWeb tracks a friendship value per proximate pair and
+// logs an event when a pair crosses the "friends" threshold -- averaged here, plus how many such
+// events landed recently. Blended with average social need (citizens.js) rather than gated
+// behind a nonempty friendship map, so a brand-new colony (no friendships formed yet) still
+// reports a meaningful score instead of a hard 0.
+function computeCohesion(world, avgSocialNeed) {
+  const web = world.relationships;
+  let friendshipSum = 0, friendshipCount = 0;
+  for (const v of web.friendship.values()) { friendshipSum += v; friendshipCount++; }
+  const avgFriendship = friendshipCount > 0 ? friendshipSum / friendshipCount : 0;
+
+  // events is append-ordered ascending by tick, so walking from the end and stopping at the
+  // first too-old entry is enough -- no need to scan the whole log every time this runs.
+  let recentEvents = 0;
+  for (let i = web.events.length - 1; i >= 0; i--) {
+    if (world.currentTick - web.events[i].tick > RECENT_EVENT_WINDOW_TICKS) break;
+    recentEvents++;
+  }
+  const eventScore = Math.min(1, recentEvents / 6);
+
+  return clampScore(40 * avgFriendship + 30 * eventScore + 30 * avgSocialNeed);
+}
+
+/** Recompute world.grading = {safety, wellbeing, sustainability, cohesion}, each 0-100. Called
+ *  from world.js's tick() every GRADING_INTERVAL_TICKS -- cheap (single pass over citizens/
+ *  structures/attackers, same cost class as the room-detection wall-signature gate) but still
+ *  not worth doing every single tick for a number nothing else reads synchronously. */
+function computeGrading(world) {
+  const c = world.citizens;
+  let aliveCount = 0, socialSum = 0;
+  for (let i = 0; i < c.count; i++) {
+    if (!c.isAliveAt(i)) continue;
+    aliveCount++;
+    socialSum += c.social[i];
+  }
+  const avgSocialNeed = aliveCount > 0 ? socialSum / aliveCount : 0;
+
+  world.grading = {
+    safety: computeSafety(world),
+    wellbeing: computeWellbeing(world),
+    sustainability: computeSustainability(world),
+    cohesion: computeCohesion(world, avgSocialNeed),
+  };
 }
 
 
@@ -2062,11 +3516,46 @@ function playCitizenDowned() {
 
 
 
+
+
+
+
+
+// Exported: weather.js's wanderer-joins event draws from this same pool (via world._namePool)
+// rather than importing it directly, to avoid a circular import (world.js already imports
+// weather.js). Extended with 12 extra names beyond the starting 24 -- the default colony uses
+// all 24 starter names immediately, so a wanderer event needs names past that to hand out,
+// and a long soak test can see more than one join.
 const STARTER_NAMES = [
   'Marlon', 'Aisling', 'Niamh', 'Reeli', 'Cascade', 'Orrery', 'Motoko',
   'Briar', 'Ansel', 'Sable', 'Quinn', 'Vesper', 'Rowan', 'Isolde', 'Callan',
   'Freya', 'Bram', 'Elowen', 'Tavish', 'Maren', 'Cormac', 'Sorcha', 'Declan', 'Aoife',
+  'Fintan', 'Saoirse', 'Eamon', 'Niall', 'Grainne', 'Cian', 'Roisin', 'Tadhg',
+  'Aileen', 'Cathal', 'Brigid', 'Ruairi',
 ];
+
+const RECYCLING_WATER_BONUS = 1.4; // see the pump/pipe check in the pollution tick below
+
+// Refugee Wagon (SEA:R's "Prisoner Bus" analog -- see FEATURE_RESEARCH.md's RETHINK/omit list:
+// "Prisoner Bus (no equivalent, omit -- optional 'Refugee Wagon' analog if population-growth-
+// via-arrivals is wanted)"). Distinct from weather.js's wanderer-joins event: that one is a flat
+// rare roll regardless of population and adds one citizen near the core; this one is *reactive*
+// -- it only turns on once losses have actually thinned the settlement below its starting size,
+// arrives as a small group at the map edge (like a wave, but obviously friendly -- see siege.js's
+// WaveSpawner edge-picking for the precedent), and has its own name pool (cycling with a numeric
+// suffix once exhausted) so it never contends with the wanderer event's shared world._namePool.
+const REFUGEE_NAMES = [
+  'Torin', 'Wren', 'Iona', 'Faolan', 'Brynn', 'Saoirse', 'Eamon', 'Fintan',
+  'Nessa', 'Cian', 'Aideen', 'Ruarc', 'Meara', 'Lorcan', 'Siobhan', 'Odhran',
+];
+const REFUGEE_GRACE_TICKS = 300;    // no wagon before the first wave's own grace period has passed
+const REFUGEE_CHECK_INTERVAL = 500; // same order of magnitude as resources.js's maybeSpawnNode
+const REFUGEE_CHANCE = 0.35;        // rolled once per check, only when the population gate below allows it
+const REFUGEE_POP_FRACTION = 0.9;   // gate: only arrives while alive population is below this fraction of the starting count
+const REFUGEE_MIN_GROUP = 1;
+const REFUGEE_MAX_GROUP = 3;
+const FINANCE_SNAPSHOT_INTERVAL = 300; // ticks between budget-report history snapshots, see finance comment below
+const FINANCE_HISTORY_MAX = 20; // capped rolling window of finance snapshots kept for the trend sparkline
 
 class SimWorld {
   constructor(width, height, seed, aggression = AggressionPreset.Calm, startingCitizens = 24) {
@@ -2086,6 +3575,7 @@ class SimWorld {
     this.storyteller = 'Cassandra'; // Cassandra | Phoebe | Randy, see director.js STORYTELLERS
     this.rooms = []; // enclosed-room flood-fill, see rooms.js -- recomputed only when walls change
     this._roomsWallSignature = null;
+    this._namePool = STARTER_NAMES; // weather.js's wanderer event draws unused names from here
 
     this.grid = new SettlementGrid(width, height);
     this.zones = new ZoneGrid(width, height);
@@ -2096,7 +3586,41 @@ class SimWorld {
     this.waveSpawner = new WaveSpawner(this.grid);
     this.relationships = new RelationshipWeb();
     this.scrap = 50;
+    // Tech-unlock progression (research.js): passive Research Points, plus the set of unlocked
+    // nodes. The survival-core buildables are unlocked in createResearchState, so a brand new
+    // colony can still wall up and put down turrets on tick 0.
+    this.research = createResearchState();
     this._lastWaveLogged = 0;
+
+    // Budget/finance ledger (Prison Architect's budget report, see FEATURE_RESEARCH.md): the
+    // scrap economy itself is unchanged (still just world.scrap, a single running total) -- this
+    // is purely a reporting layer on top, tallying WHERE scrap came from/went so a UI can show a
+    // breakdown instead of just the bare number. Deliberately per-category running totals, not a
+    // full itemized transaction log -- much cheaper to maintain given how many call sites feed
+    // scrap in (siege.js kills, jobs.js harvesting, vehicles.js hauls, the recycling-center
+    // trickle and conquest-layer trickle in this file, worldmap.js's supply lines) and plenty for
+    // a budget report / trend sparkline.
+    this.finance = {
+      killScrap: 0,       // attacker kills: turrets, staff combat, traps, dogs (siege.js/security.js)
+      harvestScrap: 0,    // citizens hand-harvesting resource nodes (jobs.js)
+      haulScrap: 0,       // recycling/garbage truck completed hauls (vehicles.js)
+      recyclingScrap: 0,  // passive Recycling Center trickle (this file, tick())
+      conquestScrap: 0,   // held-region supply lines trickling scrap in (worldmap.js)
+      otherScrap: 0,      // catch-all for any future/uncategorized income source
+      buildSpend: 0,      // total scrap spent on construction (economy.js spend())
+      history: [],        // rolling snapshots of net scrap change, one per FINANCE_SNAPSHOT_INTERVAL
+                           // ticks, capped at FINANCE_HISTORY_MAX entries -- enough for a trend sparkline
+    };
+    this._financeLastIncome = 0; // sum of all *Scrap categories as of the last snapshot
+    this._financeLastExpense = 0; // buildSpend as of the last snapshot
+
+    // Settlement Grading (non-carceral reframe of Prison Architect's 4-axis Grading tab, see
+    // grading.js's header comment): purely a read-only reporting layer, recomputed periodically
+    // in tick() below. Seeded with an optimistic default so the UI has something sane to show
+    // before the first GRADING_INTERVAL_TICKS elapses; computeGrading() is also called once here
+    // so a fresh colony shows its real scores immediately rather than placeholder 100s.
+    this.grading = { safety: 100, wellbeing: 100, sustainability: 100, cohesion: 100 };
+    this._gradingPrevScrap = this.scrap;
 
     // Presentation-layer audio hooks (see audio.js) -- optional callbacks the host app (main.js)
     // can assign after construction. Left null by default so world.js/siege.js never need to
@@ -2106,8 +3630,13 @@ class SimWorld {
     this.onTurretFire = null;    // (structure) => void, fires when a turret/tesla actually shoots
     this.onKill = null;          // () => void, fires whenever an attacker is killed
     this.onCitizenDowned = null; // () => void, fires when a citizen goes down or dies to an attacker
+    this.onRandomEvent = null;   // (text) => void, fires on a weather change or a one-off random event (weather.js)
+
+    initWeather(this); // sets this.weather / this._weatherTimer, see weather.js
 
     const count = Math.min(startingCitizens, STARTER_NAMES.length);
+    this.startingCitizenCount = count; // Refugee Wagon's population gate below reacts to losses relative to this
+    this._nextRefugeeNameIndex = 0;    // Refugee Wagon's own name-pool cursor, independent of _namePool above
     this._citizenIds = [];
     for (let n = 0; n < count; n++) {
       const x = 15 + (n % 8) * 2;
@@ -2117,11 +3646,15 @@ class SimWorld {
     }
 
     this.dogs = [];
+    this.wildAnimals = []; // untamed animals, distinct from world.dogs until jobs.js's Taming job succeeds -- see security.js
     if (count > 3) {
-      this.roster.assign(this._citizenIds[0], StaffRoleKind.Sniper, { x: 13, y: 20 });
-      this.roster.assign(this._citizenIds[1], StaffRoleKind.Sniper, { x: 29, y: 20 });
-      this.roster.assign(this._citizenIds[2], StaffRoleKind.Guard, { x: 21, y: 13 });
-      this.roster.assign(this._citizenIds[3], StaffRoleKind.Guard, { x: 21, y: 27 });
+      // Small patrol loops (security.js's patrol-route support) rather than a single fixed
+      // point -- each guard/sniper paces a couple tiles either side of their original post, still
+      // well within GUARD_RANGE/SNIPER_RANGE (siege.js) so combat effectiveness is unchanged.
+      this.roster.assign(this._citizenIds[0], StaffRoleKind.Sniper, [{ x: 12, y: 20 }, { x: 14, y: 20 }]);
+      this.roster.assign(this._citizenIds[1], StaffRoleKind.Sniper, [{ x: 28, y: 20 }, { x: 30, y: 20 }]);
+      this.roster.assign(this._citizenIds[2], StaffRoleKind.Guard, [{ x: 20, y: 13 }, { x: 22, y: 13 }]);
+      this.roster.assign(this._citizenIds[3], StaffRoleKind.Guard, [{ x: 20, y: 27 }, { x: 22, y: 27 }]);
     }
     if (count > 4) {
       this.roster.assign(this._citizenIds[4], StaffRoleKind.K9Handler, { x: 21, y: 20 });
@@ -2140,10 +3673,16 @@ class SimWorld {
     this.resourceNodes = scatterNodes(this.grid, this.rng, 16, 14, this.width / 2, this.height / 2);
     this.vehicles = [];
     this._nextVehicleTick = 200;
+
+    computeGrading(this); // real scores from tick 0, not the placeholder defaults set above
   }
 
   idOf(i) { return this.citizens.id[i]; }
   isStaffAt(i) { return this.roster.isStaff(this.citizens.id[i]); }
+  // A staff member currently clocked off (security.js's fatigue cycle) isn't "on duty" for the
+  // purposes of holding a post/patrol, the on-duty social-fulfillment bonus, or jobs.js's
+  // staff-skip check -- they're on an Eat/Sleep trip like any citizen until they recover.
+  isStaffOnDutyAt(i) { return this.isStaffAt(i) && !this.roster.isOffDuty(this.citizens.id[i]); }
 
   // "Manned" means a live, non-downed citizen with StaffRoleKind.Monitor is actually standing at
   // the Monitor Station post, not just assigned on paper -- same physical-presence requirement
@@ -2159,10 +3698,86 @@ class SimWorld {
     return false;
   }
 
-  addScrap(amount) { this.scrap += amount; }
+  // `kind` buckets the change into world.finance's running totals for the budget report (see the
+  // constructor comment above) -- purely additive bookkeeping, never affects the actual amount
+  // applied to world.scrap. Callers that don't care (or a negative/zero amount, which shouldn't
+  // happen here but would double-count if it did) just fall through uncategorized.
+  addScrap(amount, kind) {
+    this.scrap += amount;
+    if (amount > 0 && this.finance) {
+      if (kind === 'kill') this.finance.killScrap += amount;
+      else if (kind === 'harvest') this.finance.harvestScrap += amount;
+      else if (kind === 'haul') this.finance.haulScrap += amount;
+      else if (kind === 'recycling') this.finance.recyclingScrap += amount;
+      else if (kind === 'conquest') this.finance.conquestScrap += amount;
+      else this.finance.otherScrap += amount;
+    }
+  }
 
   build(kind, x, y) {
     this.structures.push(new Structure(kind, x, y));
+  }
+
+  // Refugee Wagon's own name-pool cursor: cycles REFUGEE_NAMES, appending " 2", " 3", etc. once
+  // it wraps so a very long soak test still gets distinct names instead of exact repeats.
+  _nextRefugeeName() {
+    const idx = this._nextRefugeeNameIndex++;
+    const base = REFUGEE_NAMES[idx % REFUGEE_NAMES.length];
+    const cycle = Math.floor(idx / REFUGEE_NAMES.length);
+    return cycle > 0 ? `${base} ${cycle + 1}` : base;
+  }
+
+  // Refugee Wagon (see the REFUGEE_* constants' doc comment above): periodic, reactive
+  // population-growth-via-arrivals. Gated three ways so it can't spam or overflow --
+  // (1) currentTick % REFUGEE_CHECK_INTERVAL, same cadence pattern as resources.js's
+  // maybeSpawnNode; (2) alive population must actually be below REFUGEE_POP_FRACTION of the
+  // starting count, so a healthy/growing colony just doesn't roll; (3) CitizenStore's fixed
+  // capacity (see citizens.js) is checked before spawning and the group size is clamped down to
+  // whatever room is actually left, rather than spawn() silently failing partway through.
+  _maybeSpawnRefugeeWagon() {
+    if (this.currentTick < REFUGEE_GRACE_TICKS) return;
+    if (this.currentTick % REFUGEE_CHECK_INTERVAL !== 0) return;
+
+    let alive = 0;
+    for (let i = 0; i < this.citizens.count; i++) if (this.citizens.isAliveAt(i)) alive++;
+    if (alive >= this.startingCitizenCount * REFUGEE_POP_FRACTION) return;
+    if (this.rng() >= REFUGEE_CHANCE) return;
+
+    const remainingCapacity = this.citizens.capacity - this.citizens.count;
+    if (remainingCapacity <= 0) return; // at capacity -- skip this check entirely rather than overflow
+
+    let groupSize = REFUGEE_MIN_GROUP + Math.floor(this.rng() * (REFUGEE_MAX_GROUP - REFUGEE_MIN_GROUP + 1));
+    groupSize = Math.min(groupSize, remainingCapacity);
+
+    // Arrive at a random map edge, clustered loosely like a small group walking in together --
+    // same edge-picking idea as siege.js's WaveSpawner, just friendly and much smaller.
+    const edge = Math.floor(this.rng() * 4);
+    let ex, ey;
+    if (edge === 0) { ex = 1; ey = this.rng() * this.height; }
+    else if (edge === 1) { ex = this.width - 2; ey = this.rng() * this.height; }
+    else if (edge === 2) { ex = this.rng() * this.width; ey = 1; }
+    else { ex = this.rng() * this.width; ey = this.height - 2; }
+
+    const arrivedNames = [];
+    for (let n = 0; n < groupSize; n++) {
+      const name = this._nextRefugeeName();
+      const x = Math.max(1, Math.min(this.width - 2, ex + (this.rng() - 0.5) * 2));
+      const y = Math.max(1, Math.min(this.height - 2, ey + (this.rng() - 0.5) * 2));
+      // CitizenStore.spawn assigns trait/backstory/passions itself (see citizens.js), same as
+      // every starting citizen in the constructor above -- nothing extra needed here for that.
+      const idx = this.citizens.spawn(name, x, y, this.rng);
+      if (idx < 0) break; // capacity hit mid-loop; shouldn't happen given the clamp above, but stay safe
+      this._citizenIds.push(this.citizens.id[idx]);
+      arrivedNames.push(name);
+    }
+    if (arrivedNames.length === 0) return;
+
+    const text = arrivedNames.length === 1
+      ? `Refugee Wagon arrives -- ${arrivedNames[0]} joins the settlement`
+      : `Refugee Wagon arrives -- ${arrivedNames.join(', ')} join the settlement`;
+    this.milestoneLog.push({ tick: this.currentTick, text });
+    if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    this.onRandomEvent?.(text);
   }
 
   tick() {
@@ -2170,15 +3785,48 @@ class SimWorld {
     this.currentTick++;
     this.timeOfDay = (this.timeOfDay + 1 / DAY_NIGHT_CYCLE_TICKS) % 1; // Duty Roster clock, see schedule.js
 
-    tickNeedsAndMood(this.citizens, (i) => this.isStaffAt(i), this.rng);
-    tickJobs(this.citizens, this.zones, (i) => this.isStaffAt(i), this.structures, this.resourceNodes,
-      (i) => this.idOf(i), (amt) => this.addScrap(amt), this);
+    // Room stats (beauty/cleanliness/impressiveness -> quality, see rooms.js's computeRoomStats
+    // doc comment): recomputed every tick against the *current* structures/pollution/fire state
+    // -- unlike detectRooms' cell layout, a room's contents change far more often than its walls
+    // do, so this can't be gated behind the wall-signature check below. Read by tickNeedsAndMood
+    // just after, via roomContaining, to nudge a citizen's mood based on the room they're in.
+    computeRoomStats(this.rooms, this.grid, this.structures, this);
+
+    tickNeedsAndMood(this.citizens, (i) => this.isStaffOnDutyAt(i), this.rng, this);
+    // Off-duty check runs before tickJobs so a staff member whose fatigue/hunger just crossed
+    // the threshold this tick immediately falls into jobs.js's normal Idle/SeekingFood/SeekingBed
+    // handling below, rather than waiting a tick -- see security.js's tickStaffOffDuty doc comment.
+    tickStaffOffDuty(this.citizens, this.roster, (i) => this.idOf(i), this.zones);
+    tickJobs(this.citizens, this.zones, (i) => this.isStaffOnDutyAt(i), this.structures, this.resourceNodes,
+      (i) => this.idOf(i), (amt) => this.addScrap(amt, 'harvest'), this);
     tickStaffDuty(this.citizens, this.roster, (i) => this.idOf(i));
-    tickWander(this.citizens, this.grid, this.rng, 0.04, (i) => this.isStaffAt(i) || isOnJob(this.citizens, i));
-    tickDogs(this.dogs, this.citizens, this.roster, this.attackers, (amt) => this.addScrap(amt));
+    // Armory issuance (security.js): cheap (roster-size loop, not per-citizen-store-slot), so
+    // just re-derive every tick rather than hooking build-complete/destroy events -- a built or
+    // destroyed Armory (and a freshly-assigned Guard/Sniper) all propagate within one tick.
+    tickArmoryIssuance(this.roster, this.structures);
+    // Rain (weather.js): citizens amble a bit slower underfoot -- same wander-speed knob every
+    // other build passes through already, just weather-scaled.
+    tickWander(this.citizens, this.grid, this.rng, 0.04 * weatherWanderSpeedMult(this.weather),
+      (i) => this.isStaffAt(i) || isOnJob(this.citizens, i));
+    tickDogs(this.dogs, this.citizens, this.roster, this.attackers, (amt) => this.addScrap(amt, 'kill'));
+    // Taming/breeding (RimWorld animals, see FEATURE_RESEARCH.md and security.js): wild animals
+    // wander and occasionally spawn like resource nodes below; jobs.js's Taming job moves a tamed
+    // one from wildAnimals into this.dogs, and tickDogBreeding occasionally grows the dogs list
+    // on its own once there are at least two, capped so it can't spiral.
+    tickWildAnimals(this.wildAnimals, this.grid, this.rng);
+    tickDogBreeding(this.dogs, this.rng, this.currentTick);
     this.relationships.tick(this.citizens, (i) => this.citizens.name[i], this.currentTick);
 
+    // Weather + one-off random events (RimWorld's "Events" list -- see weather.js's header
+    // comment and FEATURE_RESEARCH.md's RimWorld section). Runs after rooms/needs so the
+    // Cold/Heatwave indoor check sees this tick's room state, and after tickWander so a weather
+    // *change* this tick still affects this tick's movement via the call above.
+    tickWeather(this);
+    tickRandomEvents(this);
+
     maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
+    maybeSpawnWildAnimal(this.wildAnimals, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
+    this._maybeSpawnRefugeeWagon(); // population-growth-via-arrivals, see the method's doc comment above
     tickVehicles(this);
     if (this.ethanolPenaltyTimer > 0) this.ethanolPenaltyTimer--; // see vehicles.js FUEL_TYPES.ethanol
 
@@ -2186,23 +3834,49 @@ class SimWorld {
     // FEATURE_RESEARCH.md); it decays slowly on its own but climbs faster than that decay once
     // you have more than a couple of generators running, so a garbage-truck haul run matters.
     let activeGenerators = 0;
-    let activeRecyclingCenters = 0;
+    let activeCoalGenerators = 0;
+    let recyclingCapacity = 0;
     let activeUncontainedNuclear = 0;
     for (const s of this.structures) {
+      // Solar array siting (SEA:R multi-source power economy, see power.js's isSource doc
+      // comment): this codebase has no roof/indoor concept, so "needs open sky" is substituted
+      // with "not built inside a detected enclosed room" -- the closest analog to "indoors" this
+      // sim has (rooms.js's detectRooms). Stamped every tick, mirroring the s._staffed pattern
+      // world.js already uses for monitor_station, and read back by power.js's isSource so a
+      // solar array only acts as a power source while it's actually in the open.
+      if (s.kind === 'generator_solar') s._openSky = !roomContaining(this.rooms, this.grid, s.x, s.y);
+      // Wind turbine siting: power.js's isSource always recomputes this live off the current
+      // structures list (no lag in what actually gets powered) -- this stamp is purely so
+      // render.js can tint the turbine blades without importing power.js's internals directly.
+      if (s.kind === 'generator_wind') s._windSited = isWindSited(s, this.structures);
       if (s.destroyed || s.underConstruction) continue;
       if (s.kind === 'generator') activeGenerators++;
-      else if (s.kind === 'recycling_center') activeRecyclingCenters++;
+      // Coal (SEA:R): the "worse plain generator" tradeoff -- cheaper to build (economy.js) but
+      // dirtier per-tick than a plain generator, tracked separately so its pollution rate can
+      // differ from GENERATOR_POLLUTION_RATE below rather than reusing activeGenerators' count.
+      else if (s.kind === 'generator_coal') activeCoalGenerators++;
+      else if (s.kind === 'recycling_center') {
+        // Water grid payoff (water.js): a Recycling Center fed by a pump/pipe run processes
+        // pollution faster -- water pressure washing down the sorting line, same "provisioned
+        // beats unprovisioned" logic as the Food/Recreation refill bonus in jobs.js, applied to
+        // this consumer instead since it has no refill rate of its own to boost.
+        recyclingCapacity += isWateredAt(this.structures, s.x, s.y) ? 0.4 * RECYCLING_WATER_BONUS : 0.4;
+      }
       else if (s.kind === 'generator_nuclear' && !isNuclearContained(this.structures, s)) activeUncontainedNuclear++;
     }
     // Recycling Center (SEA:R): a passive waste->resource sink distinct from garbage trucks --
     // trucks do one big haul-cycle drop, this trickles constantly in exchange for scrap, so both
     // remain worth building rather than one obsoleting the other.
-    if (activeRecyclingCenters > 0) {
-      const processed = Math.min(this.pollution, activeRecyclingCenters * 0.4);
+    if (recyclingCapacity > 0) {
+      const processed = Math.min(this.pollution, recyclingCapacity);
       this.pollution -= processed;
-      this.addScrap(processed * 0.5);
+      this.addScrap(processed * 0.5, 'recycling');
     }
-    this.pollution = Math.max(0, this.pollution + activeGenerators * 0.03 - 0.01);
+    // Coal's pollution-per-tick is deliberately worse than a plain generator's 0.03 (roughly
+    // double) -- its whole tradeoff is "cheaper to build, dirtier to run", not a strict downgrade,
+    // so the gap has to be big enough to matter. Wind/solar contribute nothing here at all --
+    // their tradeoff is siting (power.js's isSource), not pollution.
+    this.pollution = Math.max(0, this.pollution + activeGenerators * 0.03 + activeCoalGenerators * 0.07 - 0.01);
 
     // Nuclear waste (SEA:R): distinct from pollution above -- it only accrues while a nuclear
     // generator is uncontained, and it's not something a recycling center processes; the only
@@ -2221,12 +3895,20 @@ class SimWorld {
     // Strictly additive on top of the scrap economy above -- it adds income, never gates it.
     tickWorldMap(this);
 
+    // Research trickle (research.js): scaled by alive citizen count, so keeping people alive is
+    // what advances the tech tree. Purely additive -- it gates nothing that already existed on
+    // tick 0 and never touches scrap or the director's difficulty inputs.
+    tickResearch(this);
+
     directWaveSpawner(this);
-    this.waveSpawner.tick(this.currentTick, this.attackers, this.rng);
+    // `this` is passed so WaveSpawner can read pollution/nuclearWaste when rolling the raid's
+    // arrival method (edge walk-in vs. an interior tunnel breach) -- read-only, same
+    // hazard-scales-danger pattern director.js uses.
+    this.waveSpawner.tick(this.currentTick, this.attackers, this.rng, this);
     tickAttackers(this.attackers, this.structures, this.grid, this.width / 2, this.height / 2, this.citizens,
-      (amt) => this.addScrap(amt), () => this.onKill?.());
-    tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt), (s) => this.onTurretFire?.(s), () => this.onKill?.());
-    tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt), () => this.onKill?.());
+      (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.());
+    tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt, 'kill'), (s) => this.onTurretFire?.(s), () => this.onKill?.());
+    tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.());
     tickAttackerVsCitizens(this.attackers, this.citizens, () => this.onCitizenDowned?.());
 
     // Wall blueprints live in this.structures like everything else (for the ghost render +
@@ -2261,9 +3943,36 @@ class SimWorld {
       this.rooms = detectRooms(this.grid);
     }
 
+    // Room-quality milestone (rooms.js's computeRoomStats): logged once per room object the tick
+    // its quality first crosses a "genuinely nice" threshold, and re-armed if it later dips back
+    // below so a room that's furnished, gutted, and re-furnished can log again. Room objects are
+    // stable references between wall-layout changes (see the wallSum signature check below), so
+    // a flag on the room itself is enough state -- no separate id-keyed tracking needed.
+    const ROOM_QUALITY_MILESTONE_THRESHOLD = 0.75;
+    for (const room of this.rooms) {
+      if (room.quality >= ROOM_QUALITY_MILESTONE_THRESHOLD) {
+        if (!room._loggedHighQuality) {
+          room._loggedHighQuality = true;
+          this.milestoneLog.push({
+            tick: this.currentTick,
+            text: `A room reached high quality (beauty ${room.beauty.toFixed(1)}, quality ${room.quality.toFixed(2)})`,
+          });
+          if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+        }
+      } else {
+        room._loggedHighQuality = false;
+      }
+    }
+
     if (this.waveSpawner.waveNumber > this._lastWaveLogged) {
       this._lastWaveLogged = this.waveSpawner.waveNumber;
-      this.milestoneLog.push({ tick: this.currentTick, text: `Wave ${this.waveSpawner.waveNumber} incoming` });
+      const tunnelled = this.waveSpawner.lastArrival === ArrivalMethod.Tunnel;
+      this.milestoneLog.push({
+        tick: this.currentTick,
+        text: tunnelled
+          ? `Wave ${this.waveSpawner.waveNumber} TUNNELLED IN -- breach inside the perimeter!`
+          : `Wave ${this.waveSpawner.waveNumber} incoming`,
+      });
       if (this.milestoneLog.length > 20) this.milestoneLog.shift();
       this.onWaveIncoming?.();
     }
@@ -2312,14 +4021,39 @@ class SimWorld {
       this.gameOver = true;
       this.milestoneLog.push({ tick: this.currentTick, text: 'GAME OVER -- the settlement has fallen' });
     }
+
+    // Finance history snapshot (budget report trend/sparkline, see the constructor's finance
+    // comment): once per FINANCE_SNAPSHOT_INTERVAL ticks -- roughly one wave-cycle, matching the
+    // 300-tick default wave spacing in siege.js's WaveSpawner -- record the net scrap change
+    // (income minus expense) since the last snapshot, capped to the last FINANCE_HISTORY_MAX
+    // entries so this can't grow unbounded over a long session.
+    if (this.currentTick % FINANCE_SNAPSHOT_INTERVAL === 0) {
+      const totalIncome = this.finance.killScrap + this.finance.harvestScrap + this.finance.haulScrap +
+        this.finance.recyclingScrap + this.finance.conquestScrap + this.finance.otherScrap;
+      const totalExpense = this.finance.buildSpend;
+      const net = (totalIncome - this._financeLastIncome) - (totalExpense - this._financeLastExpense);
+      this.finance.history.push({ tick: this.currentTick, net, scrap: Math.round(this.scrap) });
+      if (this.finance.history.length > FINANCE_HISTORY_MAX) this.finance.history.shift();
+      this._financeLastIncome = totalIncome;
+      this._financeLastExpense = totalExpense;
+    }
+
+    // Settlement Grading (grading.js): read-only reporting layer, throttled the same way as
+    // resources.js's maybeSpawnNode/security.js's breed check above -- a modulo gate on
+    // currentTick rather than every tick, since nothing downstream needs sub-second freshness.
+    if (this.currentTick % GRADING_INTERVAL_TICKS === 0) computeGrading(this);
   }
 
   serialize() {
     return {
       width: this.width, height: this.height, seed: this.seed, aggression: this.aggression,
       currentTick: this.currentTick, scrap: this.scrap, gameOver: this.gameOver,
+      finance: this.finance,
+      startingCitizenCount: this.startingCitizenCount, nextRefugeeNameIndex: this._nextRefugeeNameIndex,
       pollution: this.pollution, nuclearWaste: this.nuclearWaste, ethanolPenaltyTimer: this.ethanolPenaltyTimer,
       storyteller: this.storyteller, timeOfDay: this.timeOfDay,
+      research: serializeResearch(this.research),
+      weather: this.weather, weatherTimer: this._weatherTimer,
       waveNumber: this.waveSpawner.waveNumber, nextWaveTick: this.waveSpawner.nextWaveTick,
       citizens: {
         count: this.citizens.count,
@@ -2349,6 +4083,7 @@ class SimWorld {
       })),
       zones: Array.from(this.zones.kind),
       dogs: this.dogs.map(d => ({ ownerId: d.ownerId, x: d.x, y: d.y })),
+      wildAnimals: this.wildAnimals.map(a => ({ x: a.x, y: a.y })),
       resourceNodes: this.resourceNodes.map(n => ({ x: n.x, y: n.y, amount: n.amount, maxAmount: n.maxAmount, depleted: n.depleted })),
       // targetNode isn't serialized (it's a live reference into resourceNodes) -- a vehicle
       // mid-haul on save resumes as if just-departed rather than mid-route. Acceptable: it's a
@@ -2366,11 +4101,30 @@ class SimWorld {
     w.currentTick = json.currentTick;
     w.scrap = json.scrap;
     w.gameOver = json.gameOver || false;
+    // Refugee Wagon's population gate (see the REFUGEE_* constants' doc comment) needs the
+    // *original* starting count, not the 0 passed to the constructor above (deserialize always
+    // reconstructs citizens from json.citizens below rather than the constructor's own spawn
+    // loop) -- without this a loaded save's gate compares against 0 and the wagon never fires.
+    w.startingCitizenCount = json.startingCitizenCount || (json.citizens ? json.citizens.count : 0);
+    w._nextRefugeeNameIndex = json.nextRefugeeNameIndex || 0;
+    if (json.finance) {
+      w.finance = { ...w.finance, ...json.finance };
+      const totalIncome = w.finance.killScrap + w.finance.harvestScrap + w.finance.haulScrap +
+        w.finance.recyclingScrap + w.finance.conquestScrap + w.finance.otherScrap;
+      w._financeLastIncome = totalIncome;
+      w._financeLastExpense = w.finance.buildSpend;
+    }
     w.pollution = json.pollution || 0;
     w.nuclearWaste = json.nuclearWaste || 0;
     w.ethanolPenaltyTimer = json.ethanolPenaltyTimer || 0;
     w.storyteller = json.storyteller || 'Cassandra';
+    // Pre-research saves have no `research` key -- deserializeResearch falls back to a fresh
+    // state, so an old save loads with the survival core unlocked and 0 points rather than
+    // throwing or silently locking everything.
+    w.research = deserializeResearch(json.research);
     w.timeOfDay = json.timeOfDay != null ? json.timeOfDay : 0.3;
+    w.weather = json.weather || 'Clear';
+    w._weatherTimer = json.weatherTimer != null ? json.weatherTimer : w._weatherTimer;
     w.waveSpawner.waveNumber = json.waveNumber || 0;
     w.waveSpawner.nextWaveTick = json.nextWaveTick || 300;
     const c = json.citizens;
@@ -2399,6 +4153,9 @@ class SimWorld {
     });
     if (json.zones) w.zones.kind.set(json.zones);
     if (json.dogs) w.dogs = json.dogs.map(d => ({ ...d, cooldown: 0 }));
+    if (json.wildAnimals) {
+      w.wildAnimals = json.wildAnimals.map(a => ({ x: a.x, y: a.y, targetX: a.x, targetY: a.y, claimedBy: null, tameTicks: 0 }));
+    }
     if (json.vehicles) {
       // Citizen jobState isn't persisted (arrays default back to Idle on the fresh SimWorld
       // above), so a vehicle can't come back mid-haul with a valid driver -- every vehicle
@@ -2421,6 +4178,7 @@ class SimWorld {
 // generated images. Visual language borrows from RimWorld/Prison Architect: flat top-down
 // grid, a visible floor grid, outlined silhouettes so units read clearly against the ground,
 // and zone/room tints rather than photographic texture.
+
 
 
 
@@ -2614,6 +4372,7 @@ class Renderer {
     this._drawFire(world);
     this._drawCitizens(world);
     this._drawDogs(world);
+    this._drawWildAnimals(world);
     this._drawAttackers(world);
     this._drawVehicles(world);
     this._drawSmogHaze(world);
@@ -2899,29 +4658,105 @@ class Renderer {
     }
   }
 
+  // Tamed dogs (world.dogs, roster-assignable/combat-capable) get a warm coat + a gold collar
+  // ring; wild untamed animals (world.wildAnimals, see security.js/jobs.js's Taming job) reuse
+  // the same silhouette in a duller, uncollared coat so "this one isn't yours yet" reads clearly
+  // at a glance without needing a whole separate sprite.
   _drawDogs(world) {
+    this._drawAnimal(world.dogs, '#7a5230', '#f2c026');
+  }
+
+  _drawWildAnimals(world) {
+    this._drawAnimal(world.wildAnimals, '#8f8a76', null);
+  }
+
+  _drawAnimal(list, coatColor, collarColor) {
     const ctx = this.ctx;
-    for (const dog of world.dogs || []) {
+    for (const dog of list || []) {
       const [sx, sy] = this.worldToScreen(dog.x, dog.y);
       const s = CELL * this.zoom * 0.4;
       ctx.fillStyle = 'rgba(0,0,0,0.3)';
       ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.22, s * 0.34, s * 0.1, 0, 0, Math.PI * 2); ctx.fill();
       ctx.lineWidth = Math.max(1, s * 0.08);
       ctx.strokeStyle = OUTLINE;
-      ctx.fillStyle = '#7a5230';
+      ctx.fillStyle = coatColor;
       ctx.beginPath();
       ctx.ellipse(sx, sy, s * 0.32, s * 0.2, 0, 0, Math.PI * 2);
       ctx.fill(); ctx.stroke();
       ctx.beginPath();
       ctx.arc(sx + s * 0.28, sy - s * 0.05, s * 0.14, 0, Math.PI * 2);
       ctx.fill(); ctx.stroke();
+      if (collarColor) {
+        ctx.strokeStyle = collarColor;
+        ctx.lineWidth = Math.max(1, s * 0.1);
+        ctx.beginPath();
+        ctx.arc(sx + s * 0.28, sy - s * 0.05, s * 0.19, 0, Math.PI * 2);
+        ctx.stroke();
+      }
     }
   }
 
+  // Per-archetype silhouettes (see siege.js's ATTACKER_ARCHETYPES): size and palette both shift
+  // so the roster is readable at a glance mid-siege without reading a single number.
+  //   Grunt      -- the original small dark-red raider (unchanged, the baseline)
+  //   Brute      -- noticeably larger, heavy slate-plated
+  //   Skirmisher -- smaller and lighter/oranger, reads as "fast and flimsy"
+  //   Boss       -- much larger, violet, plus a pulsing threat ring and a spiked crown
+  static ATTACKER_STYLES = [
+    { scale: 0.6,  body: '#8a1f1f', head: '#c76b4a' }, // Grunt
+    { scale: 0.85, body: '#4a4438', head: '#8f7a5c' }, // Brute
+    { scale: 0.48, body: '#b0521f', head: '#e0a06a' }, // Skirmisher
+    { scale: 1.25, body: '#4a1f5e', head: '#c469e0' }, // Boss
+  ];
+
   _drawAttackers(world) {
+    const ctx = this.ctx;
     for (let i = 0; i < world.attackers.count; i++) {
       if (!world.attackers.isAliveAt(i)) continue;
-      this._drawHumanoid(world.attackers.x[i], world.attackers.y[i], 0.6, '#8a1f1f', '#c76b4a', world.attackers.health[i]);
+      const kind = world.attackers.kind ? world.attackers.kind[i] : 0;
+      const style = Renderer.ATTACKER_STYLES[kind] || Renderer.ATTACKER_STYLES[0];
+      const isBoss = kind === 3;
+
+      if (isBoss) {
+        // Threat ring under the boss, pulsing off the wall clock so it's obvious even when the
+        // sim is paused. Drawn before the body so it reads as ground marking, not an outline.
+        const [bx, by] = this.worldToScreen(world.attackers.x[i], world.attackers.y[i]);
+        const s = CELL * this.zoom * style.scale;
+        const pulse = 0.75 + 0.25 * Math.sin(Date.now() / 220);
+        ctx.save();
+        ctx.strokeStyle = 'rgba(200,90,235,0.85)';
+        ctx.lineWidth = Math.max(2, s * 0.09);
+        ctx.beginPath();
+        ctx.ellipse(bx, by + s * 0.42, s * 0.6 * pulse, s * 0.26 * pulse, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.fillStyle = 'rgba(150,40,190,0.18)';
+        ctx.fill();
+        ctx.restore();
+      }
+
+      this._drawHumanoid(world.attackers.x[i], world.attackers.y[i], style.scale,
+        style.body, style.head, world.attackers.health[i]);
+
+      if (isBoss) {
+        // Spiked crown on top of the head so the boss is distinguishable even in a dense crowd
+        // where the ground ring is occluded.
+        const [bx, by] = this.worldToScreen(world.attackers.x[i], world.attackers.y[i]);
+        const s = CELL * this.zoom * style.scale;
+        ctx.save();
+        ctx.fillStyle = '#f0c040';
+        ctx.strokeStyle = OUTLINE;
+        ctx.lineWidth = Math.max(1, s * 0.05);
+        ctx.beginPath();
+        const baseY = by - s * 0.46, w = s * 0.34;
+        ctx.moveTo(bx - w / 2, baseY);
+        for (let k = 0; k < 3; k++) {
+          ctx.lineTo(bx - w / 2 + w * (k + 0.5) / 3, baseY - s * 0.22);
+          ctx.lineTo(bx - w / 2 + w * (k + 1) / 3, baseY);
+        }
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.restore();
+      }
     }
   }
 
@@ -2933,7 +4768,7 @@ class Renderer {
       const [sx, sy] = this.worldToScreen(s.x, s.y);
       const size = CELL * this.zoom * 0.85;
 
-      if (s.kind !== 'fence' && s.kind !== 'wire') {
+      if (s.kind !== 'fence' && s.kind !== 'wire' && s.kind !== 'pipe') {
         ctx.fillStyle = 'rgba(0,0,0,0.25)';
         ctx.beginPath();
         ctx.ellipse(sx, sy + size * 0.4, size * 0.35, size * 0.12, 0, 0, Math.PI * 2);
@@ -3065,6 +4900,38 @@ class Renderer {
       ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill();
       return;
     }
+    if (s.kind === 'pipe') {
+      // Water's answer to 'wire' above -- same thin cross-conduit shape so a chain reads as one
+      // continuous run, but blue-tinted instead of wire's amber so the two grids never get
+      // visually confused when they're laid side by side. Lit only when actually carrying water
+      // back to a pump; dead segments stay a dull blue-grey.
+      const flowing = !s.destroyed && !s.underConstruction && isTileWatered(this._structuresForPower || [], s.x, s.y);
+      ctx.strokeStyle = flowing ? '#3ea0d9' : 'rgba(90,105,115,0.75)';
+      ctx.lineWidth = Math.max(1.5, size * 0.1);
+      ctx.beginPath();
+      ctx.moveTo(sx - size / 2, sy); ctx.lineTo(sx + size / 2, sy);
+      ctx.moveTo(sx, sy - size / 2); ctx.lineTo(sx, sy + size / 2);
+      ctx.stroke();
+      ctx.fillStyle = flowing ? '#9adcf5' : '#5f6d72';
+      ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
+    if (s.kind === 'pump') {
+      // Small well/tower silhouette -- a squat cylindrical drum with a raised spout, distinct
+      // from the generator's boxy housing so the two source buildings don't read as siblings.
+      const running = !s.destroyed && !s.underConstruction;
+      ctx.fillStyle = running ? '#2e5266' : 'rgba(46,60,68,0.6)';
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, size * 0.36, size * 0.4, 0, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+      ctx.fillStyle = running ? '#3ea0d9' : '#5a6a70'; // water-level band
+      ctx.beginPath();
+      ctx.ellipse(sx, sy + size * 0.08, size * 0.28, size * 0.16, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = running ? '#8c949e' : 'rgba(120,120,120,0.6)';
+      ctx.fillRect(sx - size * 0.06, sy - size * 0.5, size * 0.12, size * 0.24); // spout
+      return;
+    }
     if (s.kind === 'generator') {
       const running = !s.destroyed && !s.underConstruction;
       ctx.fillStyle = running ? '#4a4a52' : 'rgba(60,60,64,0.6)';
@@ -3098,6 +4965,84 @@ class Renderer {
       }
       ctx.fillStyle = running ? '#e8ffb0' : '#7a8570';
       ctx.beginPath(); ctx.arc(sx, sy, size * 0.08, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
+    if (s.kind === 'generator_coal') {
+      // "Worse plain generator": a squatter, dirtier housing than 'generator' -- a small coal pile
+      // out front and a dull red (not amber) core light so it visually reads as the cheaper, more
+      // polluting choice at a glance.
+      const running = !s.destroyed && !s.underConstruction;
+      ctx.fillStyle = running ? '#3a332c' : 'rgba(50,46,40,0.6)';
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.36, size * 0.8, size * 0.72);
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.36, size * 0.8, size * 0.72);
+      ctx.fillStyle = running ? '#1a1a1a' : '#3a3a3a'; // coal pile
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.3, sy + size * 0.36);
+      ctx.lineTo(sx - size * 0.05, sy + size * 0.12);
+      ctx.lineTo(sx + size * 0.2, sy + size * 0.36);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = running ? '#c0492e' : '#5a4a44'; // dull red core, not the plain generator's amber
+      ctx.beginPath();
+      ctx.arc(sx + size * 0.18, sy - size * 0.12, size * 0.13, 0, Math.PI * 2);
+      ctx.fill();
+      return;
+    }
+    if (s.kind === 'generator_wind') {
+      // Turbine silhouette: a slim mast + three blades. _windSited (power.js's isWindSited,
+      // recomputed live off the current structures list) tints the blades pale blue when actually
+      // acting as a power source and rust-red when crowded/badly sited, so the siting tradeoff is
+      // visible on the map, not just in a tooltip.
+      const running = !s.destroyed && !s.underConstruction;
+      const sited = s._windSited !== false;
+      ctx.fillStyle = running ? '#5a5a5a' : 'rgba(70,70,70,0.6)';
+      ctx.fillRect(sx - size * 0.05, sy - size * 0.05, size * 0.1, size * 0.55); // mast
+      ctx.fillStyle = running ? (sited ? '#bfe6f5' : '#c76b4a') : '#6a6a6a';
+      for (let k = 0; k < 3; k++) {
+        const a = (k / 3) * Math.PI * 2;
+        ctx.save();
+        ctx.translate(sx, sy - size * 0.28);
+        ctx.rotate(a);
+        ctx.beginPath();
+        ctx.ellipse(0, -size * 0.24, size * 0.07, size * 0.24, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+      ctx.fillStyle = running ? '#3a3a3a' : '#5a5a5a';
+      ctx.beginPath(); ctx.arc(sx, sy - size * 0.28, size * 0.06, 0, Math.PI * 2); ctx.fill();
+      return;
+    }
+    if (s.kind === 'generator_solar') {
+      // Flat panel array in a grid pattern, tilted slightly (a parallelogram, not a square) so it
+      // reads as a solar panel rather than another generic box. Panel tint follows s._openSky
+      // (world.js's tick(), read back by power.js's isSource) the same sited/unsited color logic
+      // as the wind turbine above: bright blue when actually acting as a power source, dull grey
+      // when stuck inside an enclosed room.
+      const running = !s.destroyed && !s.underConstruction;
+      const openSky = s._openSky !== false;
+      ctx.fillStyle = running ? '#2a3038' : 'rgba(45,50,56,0.6)';
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.45, sy + size * 0.3);
+      ctx.lineTo(sx - size * 0.2, sy - size * 0.35);
+      ctx.lineTo(sx + size * 0.45, sy - size * 0.35);
+      ctx.lineTo(sx + size * 0.2, sy + size * 0.3);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+      // Panel grid lines: interpolate between the bottom edge (bottomLeft -> bottomRight) and the
+      // top edge (topLeft -> topRight) so the divider lines stay parallel to the panel's tilt.
+      const blX = sx - size * 0.45, blY = sy + size * 0.3;
+      const brX = sx + size * 0.2, brY = sy + size * 0.3;
+      const tlX = sx - size * 0.2, tlY = sy - size * 0.35;
+      const trX = sx + size * 0.45, trY = sy - size * 0.35;
+      ctx.strokeStyle = running ? (openSky ? '#5aa0d9' : '#6a6e72') : 'rgba(90,95,100,0.5)';
+      ctx.lineWidth = Math.max(1, size * 0.03);
+      for (let k = 1; k < 3; k++) {
+        const t = k / 3;
+        ctx.beginPath();
+        ctx.moveTo(blX + (brX - blX) * t, blY + (brY - blY) * t);
+        ctx.lineTo(tlX + (trX - tlX) * t, tlY + (trY - tlY) * t);
+        ctx.stroke();
+      }
       return;
     }
     if (s.kind === 'waste_storage') {
@@ -3144,6 +5089,20 @@ class Renderer {
       ctx.strokeStyle = s.destroyed ? 'rgba(120,140,220,0.3)' : '#a0c0ff';
       ctx.lineWidth = Math.max(1, size * 0.06);
       ctx.beginPath(); ctx.arc(sx, sy - size * 0.15, size * 0.16, 0, Math.PI * 2); ctx.stroke();
+      return;
+    }
+    if (s.kind === 'armory') {
+      ctx.fillStyle = s.destroyed ? 'rgba(60,60,60,0.6)' : '#5a4a38';
+      ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+      ctx.strokeRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
+      // Crossed-rifles glyph -- reads as "weapons issued here" at a glance, same idea as the
+      // recycling center's arrow icon just above.
+      ctx.strokeStyle = s.destroyed ? 'rgba(150,150,150,0.4)' : '#d8cba0';
+      ctx.lineWidth = Math.max(1, size * 0.07);
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.2, sy - size * 0.18); ctx.lineTo(sx + size * 0.2, sy + size * 0.18);
+      ctx.moveTo(sx - size * 0.2, sy + size * 0.18); ctx.lineTo(sx + size * 0.2, sy - size * 0.18);
+      ctx.stroke();
       return;
     }
     // turret (default)
@@ -3248,7 +5207,13 @@ class Renderer {
     ctx.fillStyle = '#ff3b30';
     for (let i = 0; i < world.attackers.count; i++) {
       if (!world.attackers.isAliveAt(i)) continue;
-      ctx.fillRect(world.attackers.x[i] * sx - 1.5, world.attackers.y[i] * sy - 1.5, 3, 3);
+      // Bosses get a fatter, brighter dot -- "there is a boss and it is HERE" is exactly the
+      // kind of thing the minimap exists to tell you.
+      const boss = world.attackers.kind && world.attackers.kind[i] === 3;
+      if (boss) ctx.fillStyle = '#e05aff';
+      const r = boss ? 3 : 1.5;
+      ctx.fillRect(world.attackers.x[i] * sx - r, world.attackers.y[i] * sy - r, r * 2, r * 2);
+      if (boss) ctx.fillStyle = '#ff3b30';
     }
 
     // viewport rectangle -- what the main camera currently frames
@@ -3260,12 +5225,58 @@ class Renderer {
       Math.max(1, (x1 - x0) * sx), Math.max(1, (y1 - y0) * sy),
     );
   }
+
+  /** Budget report sparkline (Prison Architect's finance ledger, see world.js's finance comment
+   *  and FEATURE_RESEARCH.md's Prison Architect section): plain Canvas 2D bar chart of
+   *  world.finance.history, one bar per snapshot, green for a net-positive wave-cycle and red for
+   *  net-negative -- same "manual line/bar-plot in a small inline canvas" spirit as drawMinimap
+   *  above, just DOM-driven (called from main.js only while the budget overlay is open) rather
+   *  than every frame. */
+  drawFinanceChart(world, chartCanvas) {
+    const ctx = chartCanvas.getContext('2d');
+    const W = chartCanvas.width, H = chartCanvas.height;
+    ctx.clearRect(0, 0, W, H);
+    ctx.fillStyle = '#241f1a';
+    ctx.fillRect(0, 0, W, H);
+
+    const history = world.finance?.history || [];
+    if (history.length === 0) {
+      ctx.fillStyle = '#a89e90';
+      ctx.font = '11px sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('No history yet -- first snapshot at tick 300', W / 2, H / 2);
+      return;
+    }
+
+    const maxAbs = Math.max(1, ...history.map(h => Math.abs(h.net)));
+    const midY = H / 2;
+    const slot = W / history.length;
+    const barW = Math.max(2, slot * 0.6);
+
+    // zero line
+    ctx.strokeStyle = '#4a4340';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, midY + 0.5);
+    ctx.lineTo(W, midY + 0.5);
+    ctx.stroke();
+
+    history.forEach((h, i) => {
+      const barH = (Math.abs(h.net) / maxAbs) * (H / 2 - 4);
+      const cx = i * slot + slot / 2;
+      ctx.fillStyle = h.net >= 0 ? '#6fbf6f' : '#d9534f';
+      if (h.net >= 0) ctx.fillRect(cx - barW / 2, midY - barH, barW, barH);
+      else ctx.fillRect(cx - barW / 2, midY, barW, barH);
+    });
+  }
 }
 
 
 // ---- input.js ----
 // Player input: build palette, zone painting, pause/speed. This is what turns the sim into an
 // actual game instead of a passive screensaver -- there was no player agency before this.
+
 
 
 const TOOLS = [
@@ -3282,6 +5293,11 @@ const TOOLS = [
   { key: 'y', tool: 'door', label: 'Door', cost: BUILD_COST.door },
   { key: 'g', tool: 'generator', label: 'Generator', cost: BUILD_COST.generator },
   { key: 'w', tool: 'wire', label: 'Wire', cost: BUILD_COST.wire },
+  // Water/plumbing grid (water.js): mirrors the generator/wire pair exactly -- a pump is the
+  // source, pipe is the conduit -- but feeds Food/Recreation zone refill rate and the Recycling
+  // Center's pollution-processing rate instead of turrets/tesla/watchtower.
+  { key: 'q', tool: 'pump', label: 'Water Pump', cost: BUILD_COST.pump },
+  { key: 'z', tool: 'pipe', label: 'Pipe', cost: BUILD_COST.pipe },
   // SEA:R truck fuel-type tradeoff (vehicles.js FUEL_TYPES): each garage now comes in 4 fuel
   // variants instead of one -- fossil (cheap/dirty), gas (best all-around), ethanol (clean,
   // temporarily saps Food zone refill per haul), electric (cleanest, needs the garage powered
@@ -3303,6 +5319,16 @@ const TOOLS = [
   { key: 'm', tool: 'monitor_station', label: 'Monitor Station', cost: BUILD_COST.monitor_station },
   { key: 'u', tool: 'generator_nuclear', label: 'Nuclear Generator', cost: BUILD_COST.generator_nuclear },
   { key: 'j', tool: 'waste_storage', label: 'Waste Storage', cost: BUILD_COST.waste_storage },
+  // Armory (security.js WEAPON_TIERS/tickArmoryIssuance): once built, every Guard/Sniper on the
+  // roster is automatically issued Rifle tier (a second Armory unlocks Heavy) -- no per-citizen
+  // pick-a-tier UI, per FEATURE_RESEARCH.md's scoped version of the Prison Architect armory idea.
+  { key: 'a', tool: 'armory', label: 'Armory', cost: BUILD_COST.armory },
+  // SEA:R multi-source power economy (FEATURE_RESEARCH.md): coal/wind/solar generator variants,
+  // each a real siting/tradeoff decision instead of a strict upgrade over plain 'generator' --
+  // see economy.js's BUILD_COST comment and power.js's isSource for how each tradeoff is enforced.
+  { key: 'd', tool: 'generator_coal', label: 'Coal Generator', cost: BUILD_COST.generator_coal },
+  { key: 's', tool: 'generator_wind', label: 'Wind Turbine', cost: BUILD_COST.generator_wind },
+  { key: '8', tool: 'generator_solar', label: 'Solar Array', cost: BUILD_COST.generator_solar },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -3465,6 +5491,14 @@ class InputController {
       if (!s.destroyed && Math.floor(s.x) === x && Math.floor(s.y) === y) { this.onToast?.('Already occupied'); return; }
     }
 
+    // Tech gate (research.js) -- checked BEFORE the scrap check so a locked buildable reports the
+    // real reason rather than a misleading "Not enough scrap". Fails open for ungated tools.
+    if (!isToolUnlocked(world.research, this.tool)) {
+      const node = researchNodeForTool(this.tool);
+      this.onToast?.(`Locked -- research "${node ? node.name : 'unknown'}" first`);
+      return;
+    }
+
     if (!canAfford(world, this.tool)) { this.onToast?.('Not enough scrap'); return; }
     spend(world, this.tool);
     // Every buildable -- including walls -- is placed as a blueprint that a citizen has to
@@ -3488,7 +5522,16 @@ class InputController {
     // the uppercase variant and lets 'm' fall through to the tool table below. main.js supplies
     // onToggleMap.
     if (e.key === 'M') { this.onToggleMap?.(); return; }
+    // Budget report overlay (world.js's finance ledger, surfaced in main.js). SHIFT+B for the
+    // same reason as SHIFT+M above -- lowercase 'b' is already the Bed buildable's hotkey.
+    if (e.key === 'B') { this.onToggleFinance?.(); return; }
+    // Research/tech tree overlay (research.js, surfaced in main.js). SHIFT+T, same
+    // uppercase-only convention -- lowercase 't' is the Table buildable's hotkey. Note SHIFT+R
+    // is NOT available: main.js binds both 'r' and 'R' to restart().
+    if (e.key === 'T') { this.onToggleResearch?.(); return; }
     if (e.key === 'Escape' && this.onToggleMap) { this.onCloseMap?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleResearch) { this.onCloseResearch?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleFinance) { this.onCloseFinance?.(); /* falls through to clear tool */ }
     if (e.key in TOOL_KEYS) { this.setTool(TOOL_KEYS[e.key]); return; }
     if (e.key === ' ') { e.preventDefault(); this.togglePause(); return; }
     if (e.key === '+' || e.key === '=') { this.setSpeedIndex(this.speedIndex + 1); return; }
@@ -3506,8 +5549,13 @@ class InputController {
 
 
 
+
+
+
+
 const SECONDS_PER_TICK = 0.1;
 const SAVE_KEY = 'settlement-defense-save';
+const WEATHER_ICON = { Clear: '🌤', Rain: '🌧', Cold: '❄', Heatwave: '🔥' };
 
 const canvas = document.getElementById('game');
 const renderer = new Renderer(canvas);
@@ -3524,6 +5572,9 @@ function attachAudioHooks(w) {
   w.onTurretFire = () => playTurretFire();
   w.onKill = () => playKill();
   w.onCitizenDowned = () => playCitizenDowned();
+  // Weather changes + one-off random events (weather.js) surface as a toast, same mechanism as
+  // every other player-visible notification in this file.
+  w.onRandomEvent = (text) => showToast(text);
 }
 
 let world = new SimWorld(64, 64, 12345, 'Calm', 24);
@@ -3547,7 +5598,24 @@ window.__debug = {
   // conquest-layer handles for console verification (see SESSION_HANDOFF.md's verification pattern)
   toggleWorldMap: (v) => toggleWorldMap(v),
   expandTo: (id) => expandTo(id),
+  // Budget report overlay (world.js's finance ledger) -- same console-verification pattern as
+  // toggleWorldMap above.
+  toggleFinance: (v) => toggleFinance(v),
+  // Research/tech-tree handles (research.js) -- same console-verification pattern.
+  toggleResearch: (v) => toggleResearch(v),
+  research: () => world.research,
+  researchNodes: RESEARCH_NODES,
+  isToolUnlocked: (tool) => isToolUnlocked(world.research, tool),
+  doResearch: (id) => tryResearch(world.research, id),
   audio: { isMuted, toggleMute, playBuildComplete, playTurretFire, playKill, playWaveAlert, playCitizenDowned },
+  // weather.js verification handles: force a weather state directly, or force-roll a one-off
+  // event without waiting on its normal timer/odds.
+  weather: {
+    kinds: WeatherKind,
+    force: (kind) => { world.weather = kind; },
+    triggerWanderer: () => tryWandererEvent(world),
+    triggerBlight: () => tryBlightEvent(world),
+  },
 };
 
 // ---------------------------------------------------------------- toolbar (built once)
@@ -3558,14 +5626,32 @@ for (const t of TOOLS) {
   btn.dataset.tool = t.tool ?? '';
   btn.innerHTML = `<span><span class="key">[${t.key}]</span>${t.label}</span>` +
     (t.cost != null ? `<span class="cost">$${t.cost}</span>` : '');
-  btn.addEventListener('click', () => input.setTool(t.tool));
+  // Research gate (research.js): clicking a locked tool doesn't select it at all -- it says why
+  // and opens the Research panel, so the gate is discoverable rather than a dead button. The
+  // authoritative gate is still input.js's _place(), this is just the UI mirroring it.
+  btn.addEventListener('click', () => {
+    if (!isToolUnlocked(world.research, t.tool)) {
+      const node = researchNodeForToolLocal(t.tool);
+      showToast(`Locked -- research "${node ? node.name : 'unknown'}" first`);
+      toggleResearch(true);
+      return;
+    }
+    input.setTool(t.tool);
+  });
   toolbarEl.appendChild(btn);
+}
+
+// Local lookup rather than importing researchNodeForTool -- main.js only ever needs it for the
+// toast label above and this keeps the import list to the tree/state helpers.
+function researchNodeForToolLocal(tool) {
+  return RESEARCH_NODES.find(n => n.unlocks.includes(tool)) || null;
 }
 
 function syncToolbarHighlight() {
   for (const btn of toolbarEl.children) {
     const btnTool = btn.dataset.tool || null;
     btn.classList.toggle('active', btnTool === input.tool);
+    btn.classList.toggle('locked', !isToolUnlocked(world.research, btnTool));
   }
 }
 
@@ -3581,6 +5667,18 @@ document.getElementById('btn-restart-modal').addEventListener('click', () => res
 document.getElementById('btn-recenter').addEventListener('click', () => input.recenter());
 document.getElementById('btn-worldmap').addEventListener('click', () => toggleWorldMap());
 document.getElementById('btn-worldmap-close').addEventListener('click', () => toggleWorldMap(false));
+document.getElementById('btn-finance').addEventListener('click', () => toggleFinance());
+document.getElementById('btn-finance-close').addEventListener('click', () => toggleFinance(false));
+document.getElementById('btn-research').addEventListener('click', () => toggleResearch());
+document.getElementById('btn-research-close').addEventListener('click', () => toggleResearch(false));
+
+// ---------------------------------------------------------------- settlement grading popover
+// Non-carceral reframe of Prison Architect's 4-axis Grading tab (world.grading, see grading.js);
+// purely a read-only display -- clicking just toggles the popover, nothing here writes to world.
+const gradingPopoverEl = document.getElementById('grading-popover');
+document.getElementById('stat-grading-btn').addEventListener('click', () => {
+  gradingPopoverEl.classList.toggle('hidden');
+});
 
 const muteBtn = document.getElementById('btn-mute');
 function syncMuteButton() {
@@ -3646,6 +5744,99 @@ function toggleWorldMap(force) {
 }
 input.onToggleMap = () => toggleWorldMap();
 input.onCloseMap = () => toggleWorldMap(false);
+input.onToggleFinance = () => toggleFinance();
+input.onCloseFinance = () => toggleFinance(false);
+
+// ---------------------------------------------------------------- research / tech tree overlay
+// Same full-screen-overlay-with-a-toggle-button convention as the conquest map and budget report
+// above (DOM, not canvas -- it's pure UI, not part of the world's coordinate space).
+const researchEl = document.getElementById('research');
+const researchGridEl = document.getElementById('research-grid');
+const researchSubEl = document.getElementById('research-sub');
+
+// Bound here rather than at the overlay's definition to keep every input.on* hook together with
+// the map/finance ones above.
+function toggleResearch(force) {
+  const show = force != null ? force : researchEl.classList.contains('hidden');
+  researchEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-research').classList.toggle('active', show);
+  if (show) renderResearch();
+}
+input.onToggleResearch = () => toggleResearch();
+input.onCloseResearch = () => toggleResearch(false);
+
+/** Full rebuild of the node grid. ~13 cards, only while the overlay is open -- cheap enough that
+ *  diffing isn't worth it, but the live progress refresh below mutates in place so a rebuild on a
+ *  timer can't destroy a "Research" button mid-click (same reasoning as renderWorldMap). */
+function renderResearch() {
+  const state = world.research;
+  researchGridEl.innerHTML = '';
+  for (const node of RESEARCH_NODES) {
+    const done = isNodeUnlocked(state, node.id);
+    const blocked = done ? null : researchBlockedReason(state, node);
+    const affordableNow = !done && blocked === null;
+    const card = document.createElement('div');
+    card.className = 'node' + (done ? ' done' : affordableNow ? ' available' : ' blocked');
+    card.dataset.nodeId = node.id;
+
+    const badge = done ? (node.cost === 0 ? 'Innate' : 'Researched')
+      : affordableNow ? 'Ready to research' : blocked;
+    const pct = done ? 100 : node.cost === 0 ? 100 : Math.min(100, (state.points / node.cost) * 100);
+
+    card.innerHTML =
+      `<div class="rname">${node.name}</div>` +
+      `<div class="badge">${badge}</div>` +
+      `<div class="desc">${node.desc}</div>` +
+      (node.cost > 0
+        ? `<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>` +
+          `<div class="badge cost-line">${Math.floor(Math.min(state.points, node.cost))} / ${node.cost} pts</div>`
+        : '') +
+      `<div class="unlocks">Unlocks: ${node.unlocks.join(', ')}</div>`;
+
+    if (!done) {
+      const btn = document.createElement('button');
+      btn.textContent = `Research (${node.cost})`;
+      btn.disabled = !affordableNow;
+      btn.addEventListener('click', () => {
+        const res = tryResearch(world.research, node.id);
+        if (!res.ok) { showToast(res.reason); return; }
+        showToast(`Researched: ${node.name}`);
+        world.milestoneLog.push({ tick: world.currentTick, text: `Research complete: ${node.name}` });
+        if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+        renderResearch();
+      });
+      card.appendChild(btn);
+    }
+    researchGridEl.appendChild(card);
+  }
+  const doneCount = RESEARCH_NODES.filter(n => isNodeUnlocked(world.research, n.id)).length;
+  researchSubEl.textContent =
+    `${Math.floor(world.research.points)} research points banked · ` +
+    `${doneCount} of ${RESEARCH_NODES.length} technologies known`;
+}
+
+// Live progress while the overlay stays open. Structural rebuild only when the unlocked set
+// actually changes, so the in-flight "Research" buttons survive.
+let lastResearchSignature = '';
+function refreshResearchValues() {
+  if (researchEl.classList.contains('hidden')) return;
+  const sig = RESEARCH_NODES.map(n => (isNodeUnlocked(world.research, n.id) ? '1' : '0')).join('');
+  if (sig !== lastResearchSignature) { lastResearchSignature = sig; renderResearch(); return; }
+  const state = world.research;
+  researchSubEl.firstChild && (researchSubEl.textContent =
+    `${Math.floor(state.points)} research points banked · ` +
+    `${RESEARCH_NODES.filter(n => isNodeUnlocked(state, n.id)).length} of ${RESEARCH_NODES.length} technologies known`);
+  for (const card of researchGridEl.children) {
+    const node = RESEARCH_NODES.find(n => n.id === card.dataset.nodeId);
+    if (!node || node.cost === 0 || isNodeUnlocked(state, node.id)) continue;
+    const fill = card.querySelector('.bar-fill');
+    if (fill) fill.style.width = Math.min(100, (state.points / node.cost) * 100) + '%';
+    const costLine = card.querySelector('.cost-line');
+    if (costLine) costLine.textContent = `${Math.floor(Math.min(state.points, node.cost))} / ${node.cost} pts`;
+    const btn = card.querySelector('button');
+    if (btn) btn.disabled = researchBlockedReason(state, node) !== null;
+  }
+}
 
 /** Rebuild the region grid. Cheap enough (16 cards) to redraw wholesale rather than diff, and
  *  it only runs while the overlay is actually open. */
@@ -3744,6 +5935,58 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'r' || e.key === 'R') { restart(); }
 });
 
+// ---------------------------------------------------------------- finance / budget report overlay
+// DOM rows for the category breakdown (same reasoning as the world-map overlay above -- it's
+// pure UI, not part of the game world's coordinate space), plus a small inline Canvas 2D
+// sparkline (render.js's drawFinanceChart) for the rolling net-scrap-per-wave-cycle trend.
+const financeEl = document.getElementById('finance');
+const financeRowsEl = document.getElementById('finance-rows');
+const financeSubEl = document.getElementById('finance-sub');
+const financeChartRangeEl = document.getElementById('finance-chart-range');
+const financeChartEl = document.getElementById('finance-chart');
+
+function toggleFinance(force) {
+  const show = force != null ? force : financeEl.classList.contains('hidden');
+  financeEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-finance').classList.toggle('active', show);
+  if (show) renderFinance();
+}
+
+const FINANCE_CATEGORIES = [
+  ['killScrap', '☠ Kills (turrets/staff/traps/dogs)', 'income'],
+  ['harvestScrap', '⛏ Harvesting', 'income'],
+  ['haulScrap', '🚚 Vehicle hauls', 'income'],
+  ['recyclingScrap', '♻ Recycling Center', 'income'],
+  ['conquestScrap', '🗺 Conquest supply lines', 'income'],
+  ['otherScrap', '❓ Other', 'income'],
+  ['buildSpend', '🔨 Construction spend', 'expense'],
+];
+
+/** Rebuild the category rows + redraw the chart. Cheap enough (7 rows, one small canvas) to
+ *  redraw wholesale on every open/refresh rather than diff, and it only runs while the overlay
+ *  is actually open (see refreshFinance below). */
+function renderFinance() {
+  const f = world.finance;
+  if (!f) return;
+  const totalIncome = f.killScrap + f.harvestScrap + f.haulScrap + f.recyclingScrap + f.conquestScrap + f.otherScrap;
+  financeRowsEl.innerHTML = FINANCE_CATEGORIES.map(([key, label, cls]) =>
+    `<div class="fin-row"><span class="label">${label}</span><span class="val ${cls}">${cls === 'expense' ? '-' : '+'}${Math.round(f[key])}</span></div>`
+  ).join('') +
+    `<div class="fin-row total"><span class="label">Net lifetime</span><span class="val ${totalIncome - f.buildSpend >= 0 ? 'income' : 'expense'}">` +
+    `${Math.round(totalIncome - f.buildSpend)}</span></div>`;
+  financeSubEl.textContent = `${Math.round(world.scrap)} scrap on hand · tick ${world.currentTick}`;
+  const h = f.history;
+  financeChartRangeEl.textContent = h.length > 0 ? `tick ${h[0].tick} - ${h[h.length - 1].tick}` : '';
+  renderer.drawFinanceChart(world, financeChartEl);
+}
+
+// While the overlay is open the sim keeps running behind it, so the numbers need to move --
+// same "only redraw while visible" gate as refreshWorldMapValues above.
+function refreshFinance() {
+  if (financeEl.classList.contains('hidden')) return;
+  renderFinance();
+}
+
 // ---------------------------------------------------------------- inspector panel
 const inspectorEl = document.getElementById('inspector');
 function updateInspector() {
@@ -3765,8 +6008,22 @@ function updateInspector() {
   inspectorEl.classList.remove('hidden');
   const c = world.citizens;
   const role = world.roster.isStaff(c.id[sel]) ? world.roster.kindOf(c.id[sel]) : 'Citizen';
+  // Armory-issued weapon tier (security.js WEAPON_TIERS) -- only meaningful for Guard/Sniper,
+  // who are the only roles tickStaffCombat (siege.js) reads it for.
+  const weaponLabel = (role === 'Guard' || role === 'Sniper')
+    ? ` [${WEAPON_TIERS[world.roster.weaponOf(c.id[sel])]?.label ?? 'Sidearm'}]`
+    : '';
   document.getElementById('insp-name').textContent = c.name[sel];
-  document.getElementById('insp-role').textContent = `${role} · ${c.trait[sel]?.name ?? ''}`;
+  document.getElementById('insp-role').textContent = `${role}${weaponLabel} · ${c.trait[sel]?.name ?? ''}`;
+  const backstory = c.backstory[sel];
+  const backstoryEl = document.getElementById('insp-backstory');
+  if (backstory) {
+    backstoryEl.textContent = `${backstory.childhood} → ${backstory.adult}`;
+    backstoryEl.title = backstory.description;
+  } else {
+    backstoryEl.textContent = '';
+    backstoryEl.title = '';
+  }
   const statusEl = document.getElementById('insp-status');
   if (c.isDownedAt(sel)) {
     statusEl.textContent = 'Downed';
@@ -3781,7 +6038,8 @@ function updateInspector() {
   setBar('social', c.social[sel]);
   setBar('mood', c.mood[sel]);
   document.getElementById('insp-skill').textContent =
-    `Combat: ${skillLevel(c.skillCombat[sel])} · Construction: ${skillLevel(c.skillConstruction[sel])}`;
+    `Combat: ${skillLevel(c.skillCombat[sel])}${PASSION_ICON[c.passionCombat[sel]]} · ` +
+    `Construction: ${skillLevel(c.skillConstruction[sel])}${PASSION_ICON[c.passionConstruction[sel]]}`;
 }
 
 function updateInspectorMulti(indices) {
@@ -3796,6 +6054,7 @@ function updateInspectorMulti(indices) {
   document.getElementById('insp-name').textContent = `${alive.length} citizens selected`;
   const names = alive.slice(0, 5).map(i => c.name[i]).join(', ');
   document.getElementById('insp-role').textContent = names + (alive.length > 5 ? `, +${alive.length - 5} more` : '');
+  document.getElementById('insp-backstory').textContent = '';
   document.getElementById('insp-status').textContent = 'Group averages below';
   const avg = (arr) => alive.reduce((s, i) => s + arr[i], 0) / alive.length;
   setBar('hp', avg(c.health));
@@ -3846,12 +6105,15 @@ function updateTopbar() {
   document.getElementById('stat-citizens').textContent = countAlive(world.citizens.count, world.citizens.isAliveAt.bind(world.citizens));
   document.getElementById('stat-attackers').textContent = countAlive(world.attackers.count, world.attackers.isAliveAt.bind(world.attackers));
   document.getElementById('stat-wave').textContent = world.waveSpawner.waveNumber;
+  document.getElementById('stat-research').textContent = Math.floor(world.research.points);
   const pollutionEl = document.getElementById('stat-pollution');
   pollutionEl.textContent = Math.round(world.pollution);
   pollutionEl.classList.toggle('danger', world.pollution > 150);
   const night = isNight(world.timeOfDay);
   document.getElementById('stat-daynight-icon').textContent = night ? '🌙' : '☀';
   document.getElementById('stat-daynight').textContent = (night ? 'Night ' : 'Day ') + Math.round(world.timeOfDay * 100) + '%';
+  document.getElementById('stat-weather-icon').textContent = WEATHER_ICON[world.weather] || '🌤';
+  document.getElementById('stat-weather').textContent = world.weather;
   pauseBtn.textContent = world.paused ? '▶ Resume' : '⏸ Pause';
   pauseBtn.classList.toggle('active', world.paused);
   document.getElementById('speed-label').textContent = speedMultiplier + 'x';
@@ -3861,6 +6123,32 @@ function countAlive(count, isAliveAt) {
   let n = 0;
   for (let i = 0; i < count; i++) if (isAliveAt(i)) n++;
   return n;
+}
+
+// ---------------------------------------------------------------- settlement grading popover
+function setGradingBar(name, value) {
+  const pct = Math.max(0, Math.min(100, Math.round(value)));
+  const fillEl = document.getElementById(`grading-${name}`);
+  const pctEl = document.getElementById(`grading-${name}-pct`);
+  fillEl.style.width = pct + '%';
+  pctEl.textContent = pct;
+  fillEl.classList.toggle('low', pct < 40);
+  fillEl.classList.toggle('mid', pct >= 40 && pct < 70);
+}
+
+function updateGrading() {
+  const g = world.grading;
+  if (!g) return;
+  const avg = Math.round((g.safety + g.wellbeing + g.sustainability + g.cohesion) / 4);
+  document.getElementById('stat-grading').textContent = avg;
+  // Bars only need updating while the popover is actually open -- same "don't bother while
+  // hidden" pattern refreshWorldMapValues uses for the conquest overlay above.
+  if (!gradingPopoverEl.classList.contains('hidden')) {
+    setGradingBar('safety', g.safety);
+    setGradingBar('wellbeing', g.wellbeing);
+    setGradingBar('sustainability', g.sustainability);
+    setGradingBar('cohesion', g.cohesion);
+  }
 }
 
 let framesSinceReframe = 0;
@@ -3884,6 +6172,9 @@ function frame() {
   updateEventLog();
   updateGameOver();
   refreshWorldMapValues();
+  refreshResearchValues();
+  refreshFinance();
+  updateGrading();
 
   if (toastTimer > 0) { toastTimer--; if (toastTimer === 0) toastEl.classList.remove('show'); }
 }

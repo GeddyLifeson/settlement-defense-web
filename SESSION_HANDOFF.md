@@ -218,6 +218,73 @@ still gets the long survival time. If confirmed, the fix is almost certainly in
    (the "settlements giving each other resources" part of the ask). UI: a topbar button or `M`
    key opens a full-screen map overlay in the same DOM-panel style as the rest of the UI.
 
+## SECOND BACKLOG WAVE (this session, via 13 more parallel subagents): DONE
+
+User asked "what else are we missing from each of the games", got a fresh gap analysis against
+`FEATURE_RESEARCH.md`, then said to run a subagent for every remaining bullet. All 13 landed,
+same no-worktree-isolation constraint as the first wave (agents edited the shared tree directly,
+concurrently) -- collisions happened and were mostly self-resolved by the agents themselves; the
+rest fixed in this final integration pass.
+
+**New systems, one per subagent:**
+- **Backstories + skill passions** (`backstories.js`) -- 8 childhood/adult pairs, None/Minor/
+  Burning passion tiers with a verified 2.5x skill-gain multiplier on Burning.
+- **Room stats** (`computeRoomStats` in `rooms.js`) -- beauty/cleanliness/impressiveness/quality
+  per detected room, feeds a real, measured mood delta.
+- **Weather + random events** (`weather.js`) -- Clear/Rain/Cold/Heatwave with real decay/speed
+  effects, wanderer-joins + blight events (infestation explicitly scoped out, documented why).
+- **Enemy variety** -- 4 archetypes (Grunt/Brute/Skirmisher/Boss) with a legible damage-type
+  resistance matrix (Kinetic/Explosive/Energy) and tunnel-arrival raids that breach the interior
+  instead of walking in from the edge.
+- **Animal taming/breeding** -- wild animals spawn periodically, tameable via a new job state,
+  breed with a population cap (verified holding at exactly 8 over a 30k-tick soak).
+- **Water/plumbing** (`water.js`) -- a direct architectural mirror of `power.js`'s flood-fill
+  graph; boosts Food/Recreation zone refill and Recycling Center throughput when connected.
+- **Staff patrol routes + fatigue** -- guards/snipers can patrol 2-4 waypoints instead of a
+  static post, and now actually go off-duty to eat/sleep when needs crash (previously they just
+  silently decayed forever with zero recovery -- a real bug, not just a missing feature).
+- **Armory + weapon tiers** -- Sidearm/Rifle/Heavy issued off armory count, Heavy's cooldown
+  penalty is a genuine tradeoff (measured, not a strict upgrade).
+- **Grading/scoring** (`grading.js`) -- Safety/Wellbeing/Sustainability/Cohesion, the non-carceral
+  reframe of Prison Architect's 4-axis system, read-only reporting layer.
+- **Population growth via arrivals** -- a "Refugee Wagon" analog, reactive (only replenishes
+  combat losses back toward ~90% of starting population, capped).
+- **Finance ledger** -- per-category income/expense tracking + a rolling 20-snapshot trend chart,
+  Budget Report modal (Shift+B).
+- **Generator variety** -- coal/wind/solar added (geothermal skipped, documented reasoning: its
+  "needs guarding" fits a staffing UI this pass didn't have room to build safely, not the
+  nuclear-style containment pattern). Siting constraints are honest substitutes for elevation/
+  roof data this engine doesn't have (open-ground clearance for wind, non-enclosed-room for
+  solar), and are real binary gates on the power graph, not cosmetic.
+- **Research tree** (`research.js`) -- 3 free innate techs (wall/turret/fence/door/bed/table/
+  generator/wire) + 12 gated nodes, fail-open by design (any buildable not in the gate map stays
+  placeable, so future work can't go silently unplaceable), Research panel (Shift+T).
+
+**Real regression caught and fixed during this pass's final integration**: multiple agents
+independently observed hands-off soak tests landing well below the established baseline (16-18k
+ticks vs. the historical 22-36k). The root cause: `weather.js`'s wanderer-joins event had **no
+population ceiling of its own**, and stacked uncoordinated with the separate Refugee Wagon
+mechanic (which does cap around 90% of starting population) -- a hands-off colony grew from 24 to
+40+ citizens in ~10k ticks with zero combat losses. Since `colonyStrength()` scales directly off
+alive-citizen count, this silently inflated wave difficulty with nothing scaling up to match --
+the same *shape* of bug as the scrap-uncapped regression from the first backlog wave, just a
+different resource ballooning unchecked. Fixed with a `WANDERER_POPULATION_CAP_MULT = 1.15` gate
+in `weather.js`. Re-soak-tested: 21241-23245 ticks across 4 seeds post-fix (up from ~16-18k) --
+still somewhat below the original 22-36k, which is expected and reasonable given how much
+genuinely new difficulty this wave added (Bosses, tunnel raids, damage resistances, staff
+periodically going off-duty) -- did not chase the exact historical number further.
+
+**Also fixed in this integration pass**: `#topbar` was overflowing horizontally (many agents
+each added their own topbar stat/button -- weather, day/night, grading, research, budget, map,
+sound -- and total content width exceeded the bar at common viewport widths, clipping the
+rightmost buttons). Fixed with `overflow-x: auto` + `flex-shrink: 0` on stats/buttons, same
+scrollable-bounded-bar pattern already used for `#toolbar`'s vertical overflow from the first
+backlog wave.
+
+**Verification**: full rebuild, zero console errors, `tests/run.html` still 85/85 passing against
+the fully-merged tree, real screenshot verification (Claude in Chrome extension) of the Research
+panel, Budget Report, and the now-scrollable topbar/toolbar.
+
 ## FULL BACKLOG CLEAR (this session, via 11 parallel subagents): DONE
 
 User: "DO EVERYTHING" + "RUN AGENTS FOR EACH THING THAT'S ON BACKLOG" -- every remaining backlog

@@ -1,6 +1,8 @@
 // Ported/condensed from SD.Sim (CitizenStore, NeedsDecaySystem, NeedsMoodBreakTickGroup,
 // SocialInteractionSystem). Struct-of-arrays store, same shape as the C# CitizenStore.
 import { randomTrait } from './traits.js';
+import { roomContaining } from './rooms.js';
+import { randomBackstory, randomPassions } from './backstories.js';
 
 export const CitizenFlags = Object.freeze({
   None: 0,
@@ -12,11 +14,21 @@ export const CitizenFlags = Object.freeze({
 const DOWNED_RECOVERY_RATE = 0.0015; // per tick, passive -- no dedicated first-aid job yet
 const DOWNED_RECOVER_THRESHOLD = 0.3;
 
-const HUNGER_DECAY = 0.0005;   // per tick (10 Hz), matches ARCHITECTURE.md "100ms/tick"
-const REST_DECAY = 0.0003;
+// Exported so weather.js can scale its extra Cold/Heatwave decay proportionally to these base
+// rates rather than hardcoding a second copy of the numbers.
+export const HUNGER_DECAY = 0.0005;   // per tick (10 Hz), matches ARCHITECTURE.md "100ms/tick"
+export const REST_DECAY = 0.0003;
 const SOCIAL_DECAY = 0.0002;
 const ON_DUTY_SOCIAL_FULFILLMENT = 0.6; // guards/snipers get partial social fulfillment on duty
 const BREAK_MOOD_THRESHOLD = 0.12;
+
+// Room quality -> mood (rooms.js's computeRoomStats, RimWorld-style beauty/cleanliness/
+// impressiveness -> a 0..1 "quality" score). 0.5 is the neutral "no room / average room"
+// baseline, so this term is signed: a genuinely nice room (quality near 1) gives a steady small
+// positive nudge each tick, a bare/ugly one (quality near 0) gives a steady small negative nudge.
+// Kept deliberately gentle -- this should read as a slow trend over many ticks in a soak test,
+// not something that swamps the existing hunger/rest/social-driven mood swing in one tick.
+const ROOM_MOOD_INFLUENCE = 0.02;
 
 export class CitizenStore {
   constructor(capacity) {
@@ -41,6 +53,9 @@ export class CitizenStore {
     this._staffCooldown = new Float32Array(capacity); // used by siege.js tickStaffCombat
     this._jobRef = {}; // used by jobs.js: index -> blueprint/resource-node object currently targeted
     this.trait = new Array(capacity).fill(null);
+    this.backstory = new Array(capacity).fill(null); // see backstories.js -- childhood/adult flavor pair + skill nudge
+    this.passionCombat = new Uint8Array(capacity); // Passion tier (backstories.js), biases skillCombat gain rate
+    this.passionConstruction = new Uint8Array(capacity); // Passion tier, biases skillConstruction gain rate
     this._nextId = 1;
   }
 
@@ -56,6 +71,13 @@ export class CitizenStore {
     this.flags[i] = CitizenFlags.None;
     this.alive[i] = 1;
     this.trait[i] = randomTrait(rng);
+    const backstory = randomBackstory(rng);
+    this.backstory[i] = backstory;
+    this.skillCombat[i] = backstory.skillCombatStart ?? 0;
+    this.skillConstruction[i] = backstory.skillConstructionStart ?? 0;
+    const passions = randomPassions(rng, backstory);
+    this.passionCombat[i] = passions.combat;
+    this.passionConstruction[i] = passions.construction;
     return i;
   }
 
@@ -74,7 +96,10 @@ export class CitizenStore {
 
 // isStaffAt(i) -> bool, used to decide on-duty social fulfillment (guards/snipers don't
 // need to be near others to stay socially fulfilled while working).
-export function tickNeedsAndMood(store, isStaffAt, rng) {
+// world (optional, 5th arg) -- passed by world.js as `this` so a citizen's current room quality
+// (rooms.js's roomContaining + computeRoomStats) can nudge their mood; omit it (e.g. in tests)
+// and this term is simply skipped, matching the rest of this function's null-safe style.
+export function tickNeedsAndMood(store, isStaffAt, rng, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
 
@@ -98,6 +123,15 @@ export function tickNeedsAndMood(store, isStaffAt, rng) {
     // Mood eases toward the current need average rather than snapping, so a single bad tick
     // doesn't cause a break.
     store.mood[i] += (avgNeed - store.mood[i]) * 0.05;
+
+    // Room quality (see ROOM_MOOD_INFLUENCE doc comment above): one roomContaining lookup per
+    // citizen per tick, same cost/pattern as the ROOM_REFILL_BONUS lookups already done per
+    // citizen per tick in jobs.js's Eating/Sleeping/Recreating states.
+    if (world) {
+      const room = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      if (room) store.mood[i] += (room.quality - 0.5) * ROOM_MOOD_INFLUENCE;
+    }
+    store.mood[i] = Math.min(1, Math.max(0, store.mood[i]));
 
     if (store.mood[i] < BREAK_MOOD_THRESHOLD) {
       store.flags[i] |= CitizenFlags.OnBreak;

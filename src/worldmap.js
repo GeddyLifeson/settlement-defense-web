@@ -186,7 +186,7 @@ export function tickWorldMap(world) {
   // Supply lines: every other region you hold ships scrap to wherever you're currently standing.
   let others = 0;
   for (const o of wm.regions) if (o.owned && o.id !== r.id) others++;
-  if (others > 0) world.scrap += others * TRICKLE_PER_OWNED_REGION;
+  if (others > 0) world.addScrap(others * TRICKLE_PER_OWNED_REGION, 'conquest');
 
   // Keep the map's view of the active region fresh so the overlay shows live numbers.
   if ((world.currentTick & 15) === 0) r.snapshot = summarize(world);

@@ -14,24 +14,64 @@ export function powerTileKey(x, y) {
   return Math.floor(x) * TILE_STRIDE + Math.floor(y);
 }
 
+// SEA:R multi-source power economy (FEATURE_RESEARCH.md): coal is a straight cost/pollution
+// tradeoff (see economy.js/world.js) and plugs into the grid exactly like a plain generator --
+// no siting condition. Wind and solar DO carry a real siting condition though, and this codebase
+// has no elevation or roof/indoor concept to check against (see grid.js's TerrainKind -- just
+// Bare/Soil/Rock/Water -- and rooms.js's enclosed-room flood-fill, which is the closest thing to
+// "indoors" that exists). Rather than invent fake elevation/roof data, each substitutes the
+// honest nearest equivalent already in the sim:
+//   - Wind ("needs high ground"): substituted with "needs open, unobstructed ground" -- no other
+//     structure within WIND_CLEARANCE_RADIUS (wires/pipes excluded, since a turbine still needs a
+//     wire run out to actually deliver anywhere; it's other buildings crowding the site that
+//     count as the obstruction). Sited badly, it simply doesn't act as a power source at all this
+//     tick -- a stark but honest and easily-verified stand-in for "reduced output", given this
+//     engine's power model is a binary source/no-source graph (power.js has no notion of partial
+//     wattage to reduce).
+//   - Solar ("needs open sky"): substituted with "not built inside a detected enclosed room" (see
+//     rooms.js's detectRooms -- a room is by definition walled-in on every side, the closest
+//     analog to "roofed/indoors" this codebase has). world.js's tick() stamps s._openSky onto
+//     every generator_solar structure each tick (mirroring the s._staffed pattern already used
+//     for monitor_station); isSource below just reads it back. Same binary source/no-source
+//     tradeoff as wind above, for the same reason.
+const WIND_CLEARANCE_RADIUS = 2.5;
+
+// Exported (rather than kept private like isSource/isConductor) so world.js's tick() can stamp
+// s._windSited onto each generator_wind structure purely for render.js to read back and tint the
+// turbine blades -- the power graph itself (isSource below) always recomputes this live and never
+// depends on the stamped flag, so there's no lag in what actually gets powered, only in the paint.
+export function isWindSited(s, structures) {
+  for (const other of structures) {
+    if (other === s || other.kind === 'wire' || other.kind === 'pipe' || other.destroyed) continue;
+    if (Math.hypot(other.x - s.x, other.y - s.y) <= WIND_CLEARANCE_RADIUS) return false;
+  }
+  return true;
+}
+
 // Any generator variant counts as a source (plain 'generator', 'generator_nuclear', ...) so new
-// generator types plug into the grid without needing to be listed here.
-function isSource(s) {
+// generator types plug into the grid without needing to be listed here -- except wind/solar,
+// which are only sources when their siting condition (above) actually holds.
+function isSource(s, structures) {
+  if (s.kind === 'generator_wind') return isWindSited(s, structures);
+  if (s.kind === 'generator_solar') return s._openSky !== false; // see world.js's tick(), defaults true until the first room pass
   return s.kind === 'generator' || s.kind.startsWith('generator_');
 }
 
-function isConductor(s) {
-  return (s.kind === 'wire' || isSource(s)) && !s.destroyed && !s.underConstruction;
+function isConductor(s, structures) {
+  return (s.kind === 'wire' || isSource(s, structures)) && !s.destroyed && !s.underConstruction;
 }
 
 // Cheap order-sensitive hash of every live conductor's tile+kind, so the O(n) rebuild only runs
-// when a wire/generator is built, finished, or destroyed -- not every tick for every turret.
+// when a wire/generator is built, finished, or destroyed -- not every tick for every turret. Also
+// changes whenever a wind/solar generator's siting eligibility flips (isSource reads live state
+// for those two), so a turbine losing its clearance or a solar array losing open sky correctly
+// triggers a recompute instead of coasting on a stale cached graph.
 function layoutSignature(structures) {
   let h = 17;
   for (let i = 0; i < structures.length; i++) {
     const s = structures[i];
-    if (!isConductor(s)) continue;
-    h = (Math.imul(h, 31) + powerTileKey(s.x, s.y) + (isSource(s) ? 7 : 3)) | 0;
+    if (!isConductor(s, structures)) continue;
+    h = (Math.imul(h, 31) + powerTileKey(s.x, s.y) + (isSource(s, structures) ? 7 : 3)) | 0;
   }
   return h;
 }
@@ -43,10 +83,10 @@ function computeEnergized(structures) {
   const conductors = new Set();
   const sources = [];
   for (const s of structures) {
-    if (!isConductor(s)) continue;
+    if (!isConductor(s, structures)) continue;
     const k = powerTileKey(s.x, s.y);
     conductors.add(k);
-    if (isSource(s)) sources.push(k);
+    if (isSource(s, structures)) sources.push(k);
   }
 
   const energized = new Set();

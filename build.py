@@ -12,9 +12,9 @@ SRC = ROOT / "src"
 # Dependency order matters for classic scripts (no hoisting across files at parse time in a
 # way that matters here since everything runs top-to-bottom, but keep it topological anyway).
 ORDER = [
-    "core.js", "traits.js", "grid.js", "zones.js", "economy.js", "resources.js", "vehicles.js",
-    "rooms.js", "power.js", "citizens.js", "security.js", "siege.js", "relationships.js", "director.js",
-    "schedule.js", "jobs.js", "worldmap.js", "fire.js", "audio.js", "world.js", "render.js", "input.js", "main.js",
+    "core.js", "traits.js", "backstories.js", "grid.js", "zones.js", "economy.js", "research.js", "resources.js", "vehicles.js",
+    "rooms.js", "power.js", "water.js", "citizens.js", "security.js", "siege.js", "relationships.js", "director.js",
+    "schedule.js", "jobs.js", "worldmap.js", "fire.js", "weather.js", "grading.js", "audio.js", "world.js", "render.js", "input.js", "main.js",
 ]
 
 IMPORT_RE = re.compile(r"^\s*import\s+[\s\S]*?from\s+['\"][^'\"]*['\"];?\s*$", re.MULTILINE)

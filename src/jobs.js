@@ -7,8 +7,18 @@ import { ZoneKind } from './zones.js';
 import { findUndrivenVehicle, boardVehicle } from './vehicles.js';
 import { roomContaining } from './rooms.js';
 import { getScheduleBlock, ScheduleBlock } from './schedule.js';
+import { Passion, PASSION_GAIN_MULT } from './backstories.js';
+import { isWateredAt } from './water.js';
+import { TAME_CHANCE_PER_TICK, TAME_MAX_TICKS, DOG_POPULATION_CAP } from './security.js';
 
 const ROOM_REFILL_BONUS = 1.3; // RimWorld/PA-style: an actually-enclosed room works better than open ground
+// Water grid payoff (water.js): a Food or Recreation zone tile fed by a pump/pipe run refills
+// hunger/social faster, same "provisioned area works better" precedent as ROOM_REFILL_BONUS
+// above -- running water on top of four walls stacks multiplicatively with it, it doesn't
+// replace it. No Bedroom bonus: rest isn't naturally a "running water" need the way eating/
+// recreating are, and power.js's turret/tesla/watchtower trio didn't need a bedroom analogue
+// either -- every consumer type doesn't have to take every utility.
+const WATER_REFILL_BONUS = 1.25;
 
 export const JobState = Object.freeze({
   Idle: 0,
@@ -24,6 +34,8 @@ export const JobState = Object.freeze({
   Harvesting: 10,
   SeekingVehicle: 11,
   Driving: 12,
+  SeekingAnimal: 13, // RimWorld-style taming, see security.js's wild-animal helpers and FEATURE_RESEARCH.md
+  Taming: 14,
 });
 
 const SEEK_SOCIAL_THRESHOLD = 0.35;
@@ -78,6 +90,16 @@ function findNearestNode(nodes, x, y) {
   return best;
 }
 
+function findNearestTameableAnimal(wildAnimals, x, y) {
+  let best = null, bestDist = Infinity;
+  for (const a of wildAnimals) {
+    if (a.claimedBy != null) continue; // someone's already taming this one
+    const d = Math.hypot(a.x - x, a.y - y);
+    if (d < bestDist) { bestDist = d; best = a; }
+  }
+  return best;
+}
+
 export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, onScrapGain, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
@@ -98,6 +120,10 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         store.jobState[i] = JobState.Idle;
       } else if (interruptible === JobState.Harvesting || interruptible === JobState.SeekingScrap
         || interruptible === JobState.SeekingVehicle) {
+        store.jobState[i] = JobState.Idle;
+      } else if (interruptible === JobState.SeekingAnimal || interruptible === JobState.Taming) {
+        const animal = store._jobRef?.[i];
+        if (animal) animal.claimedBy = null; // release it so someone else (or the same citizen later) can try again
         store.jobState[i] = JobState.Idle;
       }
     }
@@ -156,6 +182,20 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // after harvesting meant no citizen ever reached it in testing -- a real bug, not a
       // priority nuance.
       const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i]);
+      const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
+
+      // Passion tie-break (RimWorld-style): only when there's a genuine choice -- both an idle
+      // truck and a harvestable node are actually available this tick -- a citizen who burns for
+      // construction-adjacent work (harvesting gains skillConstruction, see below) very slightly
+      // prefers picking at the node over driving. Doesn't touch the needs-first checks above, and
+      // doesn't apply when only one option exists (that's not a "choice").
+      if (vehicle && node && store.passionConstruction[i] === Passion.Burning) {
+        store.jobState[i] = JobState.SeekingScrap;
+        store.targetX[i] = node.x; store.targetY[i] = node.y;
+        store._jobRef[i] = node;
+        continue;
+      }
+
       if (vehicle) {
         store.jobState[i] = JobState.SeekingVehicle;
         store.targetX[i] = vehicle.x; store.targetY[i] = vehicle.y;
@@ -163,18 +203,31 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         continue;
       }
 
-      const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
       if (node) {
         store.jobState[i] = JobState.SeekingScrap;
         store.targetX[i] = node.x; store.targetY[i] = node.y;
         store._jobRef[i] = node;
         continue;
       }
+
+      // Taming (RimWorld-style, see security.js and FEATURE_RESEARCH.md): lowest-priority of all
+      // the idle-fallback jobs -- an idle wild animal to approach only matters once there's
+      // nothing else productive to do, same reasoning as vehicle/node above but one rung further
+      // down, since taming doesn't feed the scrap economy the way those two do.
+      const animal = findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i]);
+      if (animal) {
+        animal.claimedBy = idOf(i);
+        store.jobState[i] = JobState.SeekingAnimal;
+        store.targetX[i] = animal.x; store.targetY[i] = animal.y;
+        store._jobRef[i] = animal;
+        continue;
+      }
       continue;
     }
 
     if (state === JobState.SeekingFood || state === JobState.SeekingBed || state === JobState.SeekingRec
-      || state === JobState.SeekingBuild || state === JobState.SeekingScrap || state === JobState.SeekingVehicle) {
+      || state === JobState.SeekingBuild || state === JobState.SeekingScrap || state === JobState.SeekingVehicle
+      || state === JobState.SeekingAnimal) {
       const dx = store.targetX[i] - store.x[i];
       const dy = store.targetY[i] - store.y[i];
       const dist = Math.hypot(dx, dy);
@@ -184,6 +237,10 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
           if (vehicle.driverId != null) { store.jobState[i] = JobState.Idle; continue; } // beaten to it
           boardVehicle(world, vehicle, idOf(i));
           store.jobState[i] = JobState.Driving;
+          continue;
+        }
+        if (state === JobState.SeekingAnimal) {
+          store.jobState[i] = JobState.Taming;
           continue;
         }
         store.jobState[i] = state === JobState.SeekingFood ? JobState.Eating
@@ -201,12 +258,13 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
 
     if (state === JobState.Eating) {
       const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
+      const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
       // Ethanol-fuel trucks (vehicles.js FUEL_TYPES.ethanol) brew clean fuel out of the
       // settlement's food surplus -- there's no bulk food-stockpile resource in this codebase
       // to drain directly, so the honest portable stand-in is a temporary hit to how fast the
       // Food zone actually refills hunger after each ethanol haul completes.
       const ethanolMult = world.ethanolPenaltyTimer > 0 ? ETHANOL_FOOD_REFILL_MULT : 1;
-      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus * ethanolMult);
+      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus * waterBonus * ethanolMult);
       if (store.hunger[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
@@ -220,7 +278,8 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
 
     if (state === JobState.Recreating) {
       const roomBonus = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) ? ROOM_REFILL_BONUS : 1;
-      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * (store.trait[i]?.socialGainMult ?? 1));
+      const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
+      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * waterBonus * (store.trait[i]?.socialGainMult ?? 1));
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
@@ -233,7 +292,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       if (bp.buildProgress >= 1) {
         bp.underConstruction = false;
         bp.claimedBy = null;
-        store.skillConstruction[i] += BUILD_SKILL_GAIN;
+        store.skillConstruction[i] += BUILD_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]];
         store.jobState[i] = JobState.Idle;
       }
       continue;
@@ -246,7 +305,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       const take = Math.min(HARVEST_RATE * harvestRateMult, node.amount);
       node.amount -= take;
       onScrapGain?.(take);
-      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2;
+      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2 * PASSION_GAIN_MULT[store.passionConstruction[i]];
       if (node.amount <= 0) node.depleted = true;
       if (node.depleted) store.jobState[i] = JobState.Idle;
       continue;
@@ -262,6 +321,36 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         continue;
       }
       store.x[i] = vehicle.x; store.y[i] = vehicle.y; // riding along, hidden (render.js skips Driving citizens)
+      continue;
+    }
+
+    if (state === JobState.Taming) {
+      const animal = store._jobRef?.[i];
+      if (!animal) { store.jobState[i] = JobState.Idle; continue; }
+      animal.tameTicks = (animal.tameTicks || 0) + 1;
+      // Flat per-tick roll (see security.js's TAME_CHANCE_PER_TICK doc comment for why this isn't
+      // scaled by a skill -- no "Animals" skill exists and FEATURE_RESEARCH.md says not to add
+      // one just for this). world.rng keeps this reproducible under the same seed as everything
+      // else in the sim. Gated on the same DOG_POPULATION_CAP tickDogBreeding respects -- a long
+      // soak session could otherwise keep taming freshly-spawned wild animals past the cap even
+      // with zero breeding, which defeats the point of having one at all.
+      if (world.dogs.length < DOG_POPULATION_CAP && world?.rng && world.rng() < TAME_CHANCE_PER_TICK) {
+        const idx = world.wildAnimals.indexOf(animal);
+        if (idx >= 0) world.wildAnimals.splice(idx, 1);
+        // Joins world.dogs unowned -- exactly like a bred pup (security.js's tickDogBreeding),
+        // it just sits until assigned to a K9Handler via the existing roster.assign() system,
+        // same as the starting dog in world.js's constructor.
+        world.dogs.push({ ownerId: null, x: animal.x, y: animal.y, cooldown: 0 });
+        store.jobState[i] = JobState.Idle;
+        continue;
+      }
+      if (animal.tameTicks >= TAME_MAX_TICKS) {
+        // Gave up -- the animal flees rather than staying claimed (and tameable) forever.
+        const idx = world.wildAnimals.indexOf(animal);
+        if (idx >= 0) world.wildAnimals.splice(idx, 1);
+        store.jobState[i] = JobState.Idle;
+        continue;
+      }
       continue;
     }
   }

@@ -38,6 +38,11 @@ const FLAMMABLE_KINDS = new Set(['bed', 'table', 'door']);
 // in world.js tick(). At 10 Hz, one generator rolls roughly once every ~9 real-world minutes on
 // average before it sparks, and even then only catches if something flammable is nearby.
 const IGNITION_CHANCE_PER_GENERATOR = 0.00003;
+// Coal (SEA:R multi-source power economy): combustion-based like the plain generator, but
+// dirtier -- rolls at roughly double the plain generator's spark chance, consistent with it also
+// producing roughly double the pollution-per-tick in world.js. Wind/solar have no combustion
+// process at all and deliberately never appear in tickFireIgnition below.
+const IGNITION_CHANCE_PER_COAL_GENERATOR = 0.00006;
 const IGNITION_SEARCH_RADIUS = 4; // generator sparks something flammable within this range
 
 const FIRE_DAMAGE_PER_TICK = 0.01; // burning structure's health drains at this rate until destroyed
@@ -58,8 +63,10 @@ export function igniteStructure(s) {
 // structure. Call once per tick from SimWorld.tick().
 export function tickFireIgnition(structures, rng) {
   for (const g of structures) {
-    if (g.kind !== 'generator' || g.destroyed || g.underConstruction) continue;
-    if (rng() >= IGNITION_CHANCE_PER_GENERATOR) continue;
+    if (g.kind !== 'generator' && g.kind !== 'generator_coal') continue;
+    if (g.destroyed || g.underConstruction) continue;
+    const chance = g.kind === 'generator_coal' ? IGNITION_CHANCE_PER_COAL_GENERATOR : IGNITION_CHANCE_PER_GENERATOR;
+    if (rng() >= chance) continue;
 
     let target = null;
     let candidateCount = 0;
