@@ -6,11 +6,24 @@ generated art — every sprite is drawn procedurally with Canvas 2D primitives.
 
 ## Running it
 
+**Just double-click `index.html`.** It loads `game.bundle.js`, a plain classic script (not an
+ES module), specifically so it works straight from `file://` with no server. If you'd rather
+serve it (e.g. for the browser devtools' network tab), any static file server works too:
+
 ```
 python -m http.server 8123
 ```
 
-then open `http://localhost:8123/index.html`. Any static file server works.
+### If you edit anything in `src/`
+
+`game.bundle.js` is generated, not hand-written. After changing any file in `src/`, rerun:
+
+```
+python build.py
+```
+
+`index.html` always loads `game.bundle.js`, never the `src/` files directly -- if you edit
+`src/` and forget to rebuild, you'll be testing stale code.
 
 ## Controls
 
