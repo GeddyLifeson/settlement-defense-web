@@ -1123,7 +1123,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       if (bp.buildProgress >= 1) {
         bp.underConstruction = false;
         bp.claimedBy = null;
-        store.skillConstruction[i] += BUILD_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
+        store.skillConstruction[i] += BUILD_SKILL_GAIN * (PASSION_GAIN_MULT[store.passionConstruction[i]] ?? 1) * ageBandFor(store.age[i]).skillGainMult;
         store.jobState[i] = JobState.Idle;
         // Mood event trigger #2 (positive, see citizens.js's addMoodEvent/MOOD_EVENT_STACK_LIMITS):
         // finishing a build is a small, stacking, decaying morale boost -- RimWorld-scaled
@@ -1141,7 +1141,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       const take = Math.min(HARVEST_RATE * harvestRateMult, node.amount);
       node.amount -= take;
       onScrapGain?.(take);
-      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2 * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
+      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2 * (PASSION_GAIN_MULT[store.passionConstruction[i]] ?? 1) * ageBandFor(store.age[i]).skillGainMult;
       if (node.amount <= 0) node.depleted = true;
       if (node.depleted) store.jobState[i] = JobState.Idle;
       continue;
@@ -1230,7 +1230,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         // hauling system exists for a distinct "Components" resource, so this is the option that
         // actually integrates with the rest of the economy instead of adding a parallel one).
         world.addScrap(WORKSHOP_PROCESSED_PER_UNIT, 'processing');
-        store.skillConstruction[i] += HARVEST_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
+        store.skillConstruction[i] += HARVEST_SKILL_GAIN * (PASSION_GAIN_MULT[store.passionConstruction[i]] ?? 1) * ageBandFor(store.age[i]).skillGainMult;
       }
       continue;
     }
@@ -1258,7 +1258,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         // assigned into the next cycle rather than being released -- a Farm Plot is a standing job,
         // not a one-shot claim like a blueprint or a single workshop unit.
         world.addScrap(FARM_YIELD_PER_CYCLE, 'farm');
-        store.skillConstruction[i] += FARM_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
+        store.skillConstruction[i] += FARM_SKILL_GAIN * (PASSION_GAIN_MULT[store.passionConstruction[i]] ?? 1) * ageBandFor(store.age[i]).skillGainMult;
       }
       continue;
     }
@@ -1287,7 +1287,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         // Farm Plot -- a Restaurant isn't a one-shot claim like a blueprint or a single workshop
         // unit.
         world.addScrap(RESTAURANT_YIELD_PER_CYCLE, 'restaurant');
-        store.skillConstruction[i] += RESTAURANT_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
+        store.skillConstruction[i] += RESTAURANT_SKILL_GAIN * (PASSION_GAIN_MULT[store.passionConstruction[i]] ?? 1) * ageBandFor(store.age[i]).skillGainMult;
       }
       continue;
     }

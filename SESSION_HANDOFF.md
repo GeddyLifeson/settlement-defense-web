@@ -1542,6 +1542,21 @@ insufficient alone.
 
 **Final integration for round 10**: clean rebuild, zero duplicate top-level declarations, 122/122
 tests passing (once caching quirks above are worked around), zero console errors and zero
-exceptions across multiple full soak tests. NOT yet committed as of this handoff update pending
-the balance investigation above -- or committed anyway with this regression clearly flagged,
-depending what's decided when this is picked back up.
+exceptions across multiple full soak tests. **Committed as `b60a823`** (superseding the earlier
+"not yet committed" note above -- the balance regression was documented and committed with it
+clearly flagged, rather than held back).
+
+**Stale duplicate bug report received and checked, already resolved**: a report describing "the
+builder gains construction skill on completion" failing (89 total/88 passing) with a hypothesized
+`PASSION_GAIN_MULT[undefined]` NaN root cause came in after `b60a823` was already committed. Live
+`tests/run.html` check confirmed 122/122 already passing with the real fix from `b60a823` visibly
+applied (`"the builder gains construction skill on completion (-0.0300 -> -0.0100)"`). The
+hypothesized root cause doesn't match what was actually found: `passionConstruction` is never
+`undefined` via the real `CitizenStore.spawn()` path (it unconditionally calls
+`randomPassions()`), confirmed via direct reproduction. The real cause (see the "real, legitimate
+bug" paragraph above) was the test's stale assumption that skill starts at 0, which a concurrent
+earlier feature (some backstories legitimately starting `skillConstruction` negative) had already
+invalidated. Added the suggested `?? 1` defensive guard to all 5 `PASSION_GAIN_MULT[...]` call
+sites in `jobs.js` anyway as cheap, harmless insurance -- rebuilt clean, zero duplicate
+declarations. Not yet committed as its own change as of this handoff update (bundled with
+whatever lands next).
