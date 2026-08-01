@@ -1793,6 +1793,14 @@
   </div>
 </div>
 
-<script src="./game.bundle.js"></script>
+<script>
+  // Cache-bust the actual game code, not just this HTML page. A `?v=` on index.html's own URL
+  // never touches this <script src>, so the browser's HTTP cache could silently keep serving a
+  // stale game.bundle.js indefinitely regardless of how the page itself was navigated to -- this
+  // was the real root cause behind this project's long-documented "aggressive caching" symptom,
+  // not just a quirk of this dev environment's browser tool. Stamping the request itself with a
+  // real cache-buster guarantees every page load actually runs the file currently on disk.
+  document.write('<script src="./game.bundle.js?t=' + Date.now() + '"><\/script>');
+</script>
 </body>
 </html>

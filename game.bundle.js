@@ -15897,10 +15897,14 @@ const TOOL_CATEGORY = {
   garage_garbage_fossil: 'economy', garage_garbage_gas: 'economy',
   garage_garbage_ethanol: 'economy', garage_garbage_electric: 'economy',
   recycling_center: 'economy', workshop: 'economy',
+  fabrication_bay: 'economy', farm_plot: 'economy',
   bed: 'furniture', table: 'furniture', door: 'furniture',
+  shelf: 'furniture', medical_bed: 'furniture', shrine: 'furniture', fitness_station: 'furniture',
   camera: 'security', monitor_station: 'security', armory: 'security', rat_trap: 'security',
   stabilizer: 'security', // anomaly.js's counter-buildable, same "hazard-management, not combat" bucket as Rat Trap
   'zone-food': 'zones', 'zone-bedroom': 'zones', 'zone-recreation': 'zones', 'zone-training': 'zones',
+  'zone-storage': 'zones', 'zone-medical': 'zones', 'zone-command': 'zones', 'zone-gymnasium': 'zones',
+  'restrict-area': 'zones', // paints a citizen's allowed area, same paint-gesture family as the zone tools
 };
 // One-line "Makes:"-style effect/description per buildable, written fresh in this project's own
 // voice from each tool's real cost/effect in economy.js/BUILD_COST comments, siege.js, power.js,
@@ -15947,6 +15951,17 @@ const TOOL_BLURB = {
   'zone-bedroom': 'Marks ground as a bedroom area. Pair with a Bed on it for the formal room-role bonus.',
   'zone-recreation': 'Marks ground for recreation. Refills Social and Mood when a citizen visits.',
   'zone-training': 'Marks ground for the Skills Workshop program -- boosts skill-gain for citizens who use it.',
+  'zone-storage': 'Marks ground as a Storage room. Pair with a Shelf for the formal room-role bonus.',
+  'zone-medical': 'Marks ground as a Medical room. Pair with a Medical Bed for the formal room-role bonus.',
+  'zone-command': 'Marks ground as a Command room. Requires an Armory and a Monitor Station together to validate.',
+  'zone-gymnasium': 'Marks ground as a Gymnasium. Pair with a Fitness Station for the formal room-role bonus.',
+  'restrict-area': 'Paints the allowed area for the currently-selected citizen -- their autonomous AI never leaves it, though a direct drafted order still can.',
+  shelf: 'Storage room furniture. No mechanical effect on its own beyond validating the room role.',
+  medical_bed: 'Medical room furniture -- doubles a downed citizen\'s recovery rate while they\'re tended inside a validated Medical room.',
+  shrine: 'Pure beauty building -- raises a room\'s Beauty score, feeding the room-quality mood bonus.',
+  fitness_station: 'Gymnasium room furniture. A citizen with low Exercise walks to and uses it to refill the need.',
+  fabrication_bay: 'Unlocks capacity for labor drones -- tireless, needs-free workers locked to one work category each.',
+  farm_plot: 'Staffed crop plot -- a tending citizen produces a steady scrap trickle each work cycle. Requires Agronomy research.',
 };
 
 // ---- DOM scaffold (header + collapsible body: Select shortcut, category grid, item list, detail) ----

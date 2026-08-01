@@ -1286,3 +1286,44 @@ can only be staffed via `window.__debug` in the console. Flagged as a spawned ba
 `tests/run.html` passing, fresh hands-off soak test to a real colony wipe at 24,587 ticks --
 inside the established 22-36k baseline despite this being the largest single merge of the whole
 session (34 files touched, 8 new modules). Zero console errors across the full soak.
+
+## POST-ROUND-9 MANUAL AUDIT (this session): DONE, 2 real bugs found and fixed
+
+User asked to "go over the game to see what else needs to be done" after the huge round-9 merge.
+Did an actual live audit (not just re-reading agent reports) -- loaded the game, checked console,
+inspected the toolbar/inspector, and diffed `TOOLS` against `TOOL_CATEGORY`/`TOOL_BLURB`
+programmatically rather than eyeballing. Found two real, concrete issues:
+
+1. **11 fully-functional buildables were invisible in the categorized toolbar.** Each of them
+   works correctly (real cost, real structure/job logic, individually verified by whichever
+   round-9 agent built it) but was never added to `main.js`'s `TOOL_CATEGORY`/`TOOL_BLURB` maps --
+   because the categorized-toolbar UI (built by a round-7 agent) and most of these buildables
+   (built by round-9 agents afterward) never coordinated on this specific map. Affected:
+   `restrict-area`, `zone-storage`, `zone-medical`, `zone-command`, `zone-gymnasium`, `shelf`,
+   `medical_bed`, `shrine`, `fabrication_bay`, `fitness_station`, `farm_plot`. **Fixed**: added
+   all 11 to both maps in `src/main.js`. If a future pass adds a new buildable to `TOOLS`, run
+   the same diff check before assuming it's reachable in the UI: `TOOLS.filter(t=>t.tool &&
+   !(t.tool in TOOL_CATEGORY))` in the browser console (or `window.__debug` equivalent) should
+   always return empty.
+
+2. **The real root cause of this session's long-running "aggressive browser caching" symptom**,
+   documented and worked around dozens of times throughout this file without ever being fixed:
+   `index.html`'s `<script src="./game.bundle.js">` tag had **no cache-busting parameter at
+   all**. Every verification this whole session used a `?v=<label>` query string on `index.html`'s
+   own URL, which busts the cache for the HTML page -- but never touched the separate HTTP cache
+   entry for the unparameterized `game.bundle.js` script request, so the browser could keep
+   serving a stale bundle indefinitely regardless of how the page itself was navigated to. Proved
+   this concretely: a real edit + rebuild + fresh-tab-with-new-`?v=`-navigate still showed the old
+   behavior, but a direct `fetch('/game.bundle.js', {cache:'no-store'})` immediately showed the
+   new content was being served correctly -- confirming the server was fine and the browser's own
+   cache was the problem. **Fixed**: `index.html` now injects the actual `<script>` tag via
+   `document.write` with a real `?t=${Date.now()}` cache-buster baked into the script's own src,
+   so every page load is now guaranteed fresh regardless of the outer URL. This may retroactively
+   explain some of the "tab got hijacked"/"stale state"/needed-a-fresh-tab-to-get-a-clean-result
+   notes scattered through many earlier agents' reports this session -- worth keeping in mind if
+   something in this file's history reads as inconsistent with the code as it exists now.
+
+**Verified**: `python build.py` clean, zero duplicate declarations, 89/89 tests passing, the
+11-tool category gap confirmed closed via the same programmatic diff check (0 missing), and the
+cache-buster confirmed working live (`document.querySelector('script[src*="game.bundle.js"]').src`
+showed a real `?t=<timestamp>` in a fresh tab). Not yet committed as of this handoff update.
