@@ -55,6 +55,23 @@ export function roomContaining(rooms, grid, x, y) {
   return null;
 }
 
+// Centroid of a room's cells, in grid coordinates -- rooms only store a flat Set of cell
+// indices (see detectRooms above), so jobs.js's Cleaning job (the first consumer that needs to
+// walk a citizen *to* a room rather than just checking whether they're standing in one) needs a
+// concrete x/y to target. Average of all member cells, not weighted -- good enough for an
+// irregular room shape to land somewhere walkable-adjacent most of the time; jobs.js's normal
+// arrival-distance check handles the rare edge case where the exact centroid cell is occupied by
+// wall/furniture.
+export function roomCentroid(room, grid) {
+  let sx = 0, sy = 0;
+  for (const idx of room.cells) {
+    sx += idx % grid.width;
+    sy += Math.floor(idx / grid.width);
+  }
+  const n = room.cells.size;
+  return { x: sx / n + 0.5, y: sy / n + 0.5 };
+}
+
 // Room stats (RimWorld-style beauty/cleanliness/impressiveness, see FEATURE_RESEARCH.md's
 // "Room detection + room roles/stats" priority item). Deliberately kept separate from
 // detectRooms above: detectRooms only re-runs when the *wall layout* changes (rare), but a
@@ -92,6 +109,19 @@ const CLEANLINESS_POLLUTION_DIVISOR = 20; // world.pollution this high alone ful
 const CLEANLINESS_NUCLEAR_DIVISOR = 10;   // world.nuclearWaste this high alone fully tanks cleanliness
 const CLEANLINESS_FIRE_PENALTY = 0.6;     // any structure actively on fire inside the room
 
+// Mess (jobs.js's new Cleaning WorkCategory, RimWorld's real near-bottom-priority WorkTypeDef --
+// naturalPriority 200, below Construction/Hauling/Harvesting, above only Research). A room's
+// `.mess` is 0..1, persists on the room object across ticks (rooms are only rebuilt when the wall
+// layout changes, see detectRooms above), accumulates slowly on its own the way real dust/scuff
+// does, and accumulates much faster while something is actively wrong -- a fire burning inside, or
+// an attacker physically present (combat debris/blood, RimWorld's own filth source list includes
+// both). A citizen on the Cleaning job (jobs.js) reduces `.mess` directly; there is deliberately no
+// automatic decay of mess back toward 0 on its own -- the whole point is that it needs work done.
+const MESS_ACCUMULATION_RATE = 0.0003; // per tick, ambient -- same order of magnitude as REST_DECAY
+const MESS_FIRE_RATE = 0.01;           // per tick while any structure inside is on fire
+const MESS_COMBAT_RATE = 0.006;        // per tick per living attacker physically standing inside
+const MESS_CLEANLINESS_WEIGHT = 1;     // mess subtracts 1:1 from the 0..1 cleanliness score below
+
 // ---------------------------------------------------------------------------------------------
 // Room roles (Prison Architect-style): an enclosed room only counts as a specific *role* -- and
 // only feeds the jobs.js room-refill bonus for the matching need -- if it's both zoned right
@@ -110,11 +140,18 @@ const CLEANLINESS_FIRE_PENALTY = 0.6;     // any structure actively on fire insi
 //  - Recreation Room: needs a Recreation zone. No furniture requirement -- Recreation zones
 //    don't have a canonical "furniture" kind the way beds/tables do (siege.js has no rec-room
 //    Structure kind), so gating it on zone presence alone matches how jobs.js already treats it.
+//  - Training Room (programs.js's Skills Workshop program): needs a Training zone. No furniture
+//    requirement, same reasoning as Recreation Room -- there's no dedicated "workbench" Structure
+//    kind in this codebase, so gating on zone presence alone matches the existing precedent
+//    rather than inventing an equipment requirement PA's real schema has but this port doesn't
+//    need. Named "Training Room" rather than "Workshop" to avoid colliding with the unrelated
+//    'workshop' materials-processing Structure kind elsewhere in this codebase.
 export const RoomRole = Object.freeze({
   None: 'none',
   Bedroom: 'bedroom',
   DiningRoom: 'dining',
   RecreationRoom: 'recreation',
+  Training: 'training',
 });
 
 export const ROOM_ROLE_LABEL = {
@@ -122,6 +159,7 @@ export const ROOM_ROLE_LABEL = {
   [RoomRole.Bedroom]: 'Bedroom',
   [RoomRole.DiningRoom]: 'Dining Room',
   [RoomRole.RecreationRoom]: 'Recreation Room',
+  [RoomRole.Training]: 'Training Room',
 };
 
 const BED_MIN = 1;
@@ -136,6 +174,7 @@ const ZONE_TO_ROLE = [
   [ZoneKind.Bedroom, RoomRole.Bedroom],
   [ZoneKind.Food, RoomRole.DiningRoom],
   [ZoneKind.Recreation, RoomRole.RecreationRoom],
+  [ZoneKind.Training, RoomRole.Training],
 ];
 
 // Which need (jobs.js's JobState-adjacent "what is this citizen here to refill") a validated
@@ -150,10 +189,10 @@ export const ROLE_FOR_NEED = Object.freeze({
 // Counts which ZoneKind cells appear inside a room. Small map, but a room can be large -- this
 // is O(room.size), fine at the "only recompute when structures/zones change" cadence below.
 function zoneCellCounts(room, grid, zones) {
-  const counts = { [ZoneKind.Bedroom]: 0, [ZoneKind.Food]: 0, [ZoneKind.Recreation]: 0 };
+  const counts = { [ZoneKind.Bedroom]: 0, [ZoneKind.Food]: 0, [ZoneKind.Recreation]: 0, [ZoneKind.Training]: 0 };
   for (const idx of room.cells) {
     const kind = zones.kind[idx];
-    if (kind === ZoneKind.Bedroom || kind === ZoneKind.Food || kind === ZoneKind.Recreation) counts[kind]++;
+    if (kind === ZoneKind.Bedroom || kind === ZoneKind.Food || kind === ZoneKind.Recreation || kind === ZoneKind.Training) counts[kind]++;
   }
   return counts;
 }
@@ -173,7 +212,7 @@ function classifyRoomRole(room, grid, zones, bedCount, tableCount) {
       const valid = tableCount >= TABLE_MIN;
       return { role, roleValid: valid, missingRequirements: valid ? [] : ['a table'], tableCount };
     }
-    if (role === RoomRole.RecreationRoom) {
+    if (role === RoomRole.RecreationRoom || role === RoomRole.Training) {
       return { role, roleValid: true, missingRequirements: [] };
     }
   }
@@ -207,9 +246,27 @@ export function computeRoomStats(rooms, grid, structures, world, zones) {
       if (s.kind === 'table') tableCount++;
     }
 
+    // Mess accumulation (see MESS_* doc comment above) -- ambient trickle always applies, plus a
+    // much faster rate while a fire is actively burning inside, plus a per-attacker rate for any
+    // living attacker physically standing in the room this tick (a raid that breaches the
+    // interior, see siege.js's tunnel-arrival raids, tracks blood/debris through the place).
+    let attackersInside = 0;
+    const attackers = world?.attackers;
+    if (attackers) {
+      for (let i = 0; i < attackers.count; i++) {
+        if (!attackers.isAliveAt(i)) continue;
+        const ax = Math.floor(attackers.x[i]), ay = Math.floor(attackers.y[i]);
+        if (!grid.inBounds(ax, ay)) continue;
+        if (room.cells.has(grid.index(ax, ay))) attackersInside++;
+      }
+    }
+    const messGain = MESS_ACCUMULATION_RATE + (onFireInside ? MESS_FIRE_RATE : 0) + attackersInside * MESS_COMBAT_RATE;
+    room.mess = clamp01((room.mess || 0) + messGain);
+
     const pollution = world?.pollution ?? 0;
     const nuclearWaste = world?.nuclearWaste ?? 0;
-    let cleanliness = 1 - pollution / CLEANLINESS_POLLUTION_DIVISOR - nuclearWaste / CLEANLINESS_NUCLEAR_DIVISOR;
+    let cleanliness = 1 - pollution / CLEANLINESS_POLLUTION_DIVISOR - nuclearWaste / CLEANLINESS_NUCLEAR_DIVISOR
+      - room.mess * MESS_CLEANLINESS_WEIGHT;
     if (onFireInside) cleanliness -= CLEANLINESS_FIRE_PENALTY;
     cleanliness = clamp01(cleanliness);
 
@@ -237,3 +294,69 @@ export function computeRoomStats(rooms, grid, structures, world, zones) {
     }
   }
 }
+
+// ---------------------------------------------------------------------------------------------
+// RimWorld-style label text for the three room stats above -- cosmetic only, does not change
+// .quality/.roleValid/mood math anywhere. Real RimWorld's thresholds (from its actual
+// QualityCategory/RoomStatDef data, not a wiki paraphrase) are scaled proportionally onto
+// whatever numeric range each stat actually uses in this codebase, since none of the three match
+// RimWorld's raw scale 1:1:
+//  - Impressiveness here is clamp01'd (0..1); real RimWorld impressiveness is unbounded but its
+//    named tiers top out at "wondrously impressive" (240). Scale factor 1/240 maps that ceiling
+//    onto this project's ceiling of 1.0.
+//  - Beauty here is a raw, unbounded sum of small per-furniture contributions (BEAUTY_BY_KIND
+//    above, roughly -6..+2.5 per item) -- already the same order of magnitude as RimWorld's own
+//    beauty numbers, so no rescaling is applied (scale factor 1).
+//  - Cleanliness here is clamp01'd (0..1); real RimWorld cleanliness runs roughly -1.5 (filthy)
+//    to +0.5 (sterile-and-then-some). Linearly remapping that [-1.5, 0.5] span onto this
+//    project's [0, 1] span is what the REAL_CLEAN_MIN/MAX constants below do.
+function labelFor(value, table) {
+  let label = table[0][1];
+  for (const [threshold, text] of table) {
+    if (value >= threshold) label = text; else break;
+  }
+  return label;
+}
+
+const IMPRESSIVENESS_SCALE = 1 / 240;
+const IMPRESSIVENESS_LABELS = [
+  [0, 'awful'],
+  [20 * IMPRESSIVENESS_SCALE, 'dull'],
+  [30 * IMPRESSIVENESS_SCALE, 'mediocre'],
+  [40 * IMPRESSIVENESS_SCALE, 'decent'],
+  [50 * IMPRESSIVENESS_SCALE, 'slightly impressive'],
+  [65 * IMPRESSIVENESS_SCALE, 'somewhat impressive'],
+  [85 * IMPRESSIVENESS_SCALE, 'very impressive'],
+  [120 * IMPRESSIVENESS_SCALE, 'extremely impressive'],
+  [170 * IMPRESSIVENESS_SCALE, 'unbelievably impressive'],
+  [240 * IMPRESSIVENESS_SCALE, 'wondrously impressive'],
+];
+
+const BEAUTY_LABELS = [
+  [-Infinity, 'hideous'],
+  [-3.5, 'ugly'],
+  [0, 'neutral'],
+  [2.4, 'pretty'],
+  [5.0, 'beautiful'],
+  [15, 'very beautiful'],
+  [50, 'extremely beautiful'],
+  [100, 'unbelievably beautiful'],
+];
+
+// Anchor points for the cleanliness linear remap (see doc comment above) -- deliberately a touch
+// wider than RimWorld's own real extremes (-1.1 very dirty .. 0.4 sterile) so "sterile" isn't the
+// only label a maxed-out (mess=0, pollution=0) room can ever show.
+const REAL_CLEAN_MIN = -1.5;
+const REAL_CLEAN_MAX = 0.5;
+function scaleClean(real) { return (real - REAL_CLEAN_MIN) / (REAL_CLEAN_MAX - REAL_CLEAN_MIN); }
+const CLEANLINESS_LABELS = [
+  [-Infinity, 'very dirty'],
+  [scaleClean(-1.1), 'dirty'],
+  [scaleClean(-0.4), 'slightly dirty'],
+  [scaleClean(-0.05), 'clean'],
+  [scaleClean(0.4), 'sterile'],
+];
+
+export function impressivenessLabel(value) { return labelFor(value, IMPRESSIVENESS_LABELS); }
+export function beautyLabel(value) { return labelFor(value, BEAUTY_LABELS); }
+export function cleanlinessLabel(value) { return labelFor(value, CLEANLINESS_LABELS); }

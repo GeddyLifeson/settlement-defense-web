@@ -7,7 +7,7 @@
 import { StaffRoleKind, TerrainKind } from './core.js';
 import { ZONE_COLOR, ZoneKind } from './zones.js';
 import { JobState } from './jobs.js';
-import { isTileEnergized, isSegmentOverloadedAt } from './power.js';
+import { isTileEnergized, isSegmentOverloadedAt, BATTERY_STORED_MAX } from './power.js';
 import { isTileWatered } from './water.js';
 import { isNuclearContained, NUCLEAR_HAZARD_RADIUS } from './siege.js';
 import { roomContaining, ROOM_ROLE_LABEL, RoomRole } from './rooms.js';
@@ -31,6 +31,12 @@ const ROLE_COLOR = {
   [StaffRoleKind.Sniper]: '#bf59d9',
   [StaffRoleKind.K9Handler]: '#f2c026',
   [StaffRoleKind.Monitor]: '#59a6d9',
+  // Structured Group Program staff (programs.js) -- distinct from the security-role palette above
+  // so a Foreman/Psychologist/Facilitator reads visually apart from Guard/Sniper/Monitor at a
+  // glance, same "role tints the citizen dot" convention.
+  [StaffRoleKind.Foreman]: '#c87830',
+  [StaffRoleKind.Psychologist]: '#7ac0c0',
+  [StaffRoleKind.Facilitator]: '#c878c8',
   [StaffRoleKind.None]: '#d3cdbf',
 };
 
@@ -38,6 +44,7 @@ const ZONE_BORDER = {
   [ZoneKind.Bedroom]: '#5a6fb0',
   [ZoneKind.Food]: '#c98a2e',
   [ZoneKind.Recreation]: '#4a9e5f',
+  [ZoneKind.Training]: '#c878c8',
 };
 
 // SEA:R truck fuel-type tradeoff (see vehicles.js FUEL_TYPES) -- a stripe color per fuel so the
@@ -219,6 +226,7 @@ export class Renderer {
     this._drawCitizens(world);
     this._drawDogs(world);
     this._drawWildAnimals(world);
+    this._drawRats(world);
     this._drawAttackers(world);
     this._drawVehicles(world);
     this._drawSmogHaze(world);
@@ -612,6 +620,27 @@ export class Renderer {
     this._drawAnimal(world.wildAnimals, '#8f8a76', null);
   }
 
+  // Rats (rats.js) -- a small, plain Canvas primitive on purpose (this is deliberately the
+  // "cheap" system this pass, no SVG asset needed): a dark ellipse body, a thin tail line, no
+  // health bar/collar since rats have neither. Kept visually tiny and low-key so a handful of
+  // them read as background nuisance, not a threat on par with attackers.
+  _drawRats(world) {
+    const ctx = this.ctx;
+    for (const rat of world.rats || []) {
+      if (!rat.alive) continue;
+      const [sx, sy] = this.worldToScreen(rat.x, rat.y);
+      const s = CELL * this.zoom * 0.18;
+      ctx.fillStyle = '#3a332a';
+      ctx.beginPath(); ctx.ellipse(sx, sy, s, s * 0.6, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = Math.max(1, s * 0.25);
+      ctx.beginPath();
+      ctx.moveTo(sx - s * 0.9, sy);
+      ctx.lineTo(sx - s * 1.6, sy + s * 0.3);
+      ctx.stroke();
+    }
+  }
+
   _drawAnimal(list, coatColor, collarColor) {
     const ctx = this.ctx;
     for (const dog of list || []) {
@@ -744,7 +773,8 @@ export class Renderer {
     // shape so it reads as a hazard glow around the wire/generator, not a replacement paint job.
     // Pulses off the wall clock (same pattern as the boss threat-ring above) so it's still
     // visible while the sim is paused.
-    if ((s.kind === 'wire' || s.kind.startsWith('generator')) && !s.destroyed && !s.underConstruction &&
+    if ((s.kind === 'wire' || s.kind === 'battery' || s.kind === 'power_switch' || s.kind.startsWith('generator')) &&
+      !s.destroyed && !s.underConstruction &&
       isSegmentOverloadedAt(this._structuresForPower || [], s.x, s.y)) {
       const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 180);
       ctx.save();
@@ -752,6 +782,21 @@ export class Renderer {
       ctx.lineWidth = Math.max(2, size * 0.14);
       ctx.beginPath();
       ctx.arc(sx, sy, size * 0.62, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.restore();
+    }
+
+    // Frozen pipe/pump (water.js's Cold-weather freeze mechanic): a pale icy overlay ring so a
+    // frozen tile reads distinctly from a merely-disconnected one (which the pipe/pump cases below
+    // already dim to grey via isTileWatered/running -- frozen is a DIFFERENT reason to be dark,
+    // worth telling apart at a glance). Static (no pulse) since this is a passive state, not an
+    // active hazard warning like the overload ring above.
+    if ((s.kind === 'pipe' || s.kind === 'pump') && s.frozen) {
+      ctx.save();
+      ctx.strokeStyle = 'rgba(180,225,245,0.85)';
+      ctx.lineWidth = Math.max(1.5, size * 0.09);
+      ctx.beginPath();
+      ctx.arc(sx, sy, size * 0.55, 0, Math.PI * 2);
       ctx.stroke();
       ctx.restore();
     }
@@ -827,6 +872,28 @@ export class Renderer {
         ctx.fillStyle = panel;
         ctx.fillRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
         ctx.strokeRect(sx - size * 0.35, sy - size * 0.42, size * 0.7, size * 0.84);
+      }
+      return;
+    }
+    if (s.kind === 'workshop') {
+      // Processing station (Prison Architect materials-chain analog, see jobs.js's Processing job
+      // -- raw scrap in, Components out at 2x value). No SVG template exists for this yet, so it's
+      // a plain-primitive fallback (same pattern as fence/wire/pipe): a squat industrial box with
+      // a stack, dimmed and un-lit when unstaffed (s.workerId) so the player can see at a glance
+      // that it needs a worker, same "read the staffing state at a glance" idea as monitor_station.
+      const staffed = s.workerId != null;
+      const fill = s.destroyed ? 'rgba(90,80,40,0.4)' : staffed ? '#8c6a2e' : '#5a4a28';
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.42, sy - size * 0.38, size * 0.84, size * 0.76);
+      ctx.strokeRect(sx - size * 0.42, sy - size * 0.38, size * 0.84, size * 0.76);
+      ctx.fillStyle = shade(fill, -0.2);
+      ctx.fillRect(sx + size * 0.1, sy - size * 0.62, size * 0.14, size * 0.28); // stack
+      if (staffed && !s.destroyed) {
+        // Lit work-light while a citizen is actively staffing it -- pulses gently so it reads as
+        // "running", same visual language as the overload-warning pulse ring above.
+        const pulse = 0.55 + 0.35 * Math.sin(Date.now() / 220);
+        ctx.fillStyle = `rgba(242,201,76,${pulse})`;
+        ctx.beginPath(); ctx.arc(sx - size * 0.22, sy - size * 0.18, size * 0.09, 0, Math.PI * 2); ctx.fill();
       }
       return;
     }
@@ -932,6 +999,52 @@ export class Renderer {
       ctx.stroke();
       ctx.fillStyle = flowing ? '#9adcf5' : '#5f6d72';
       ctx.beginPath(); ctx.arc(sx, sy, size * 0.12, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      return;
+    }
+    if (s.kind === 'battery') {
+      // A squat rounded-rect cell with a raised terminal nub (real battery-icon silhouette) and a
+      // fill bar showing storedEnergy/BATTERY_STORED_MAX -- reads at a glance whether it's empty,
+      // mid-charge, or full, the same way a fuel gauge would.
+      const live = !s.destroyed && !s.underConstruction;
+      const frac = Math.max(0, Math.min(1, (s.storedEnergy || 0) / BATTERY_STORED_MAX));
+      const casing = live ? '#3a3f47' : 'rgba(58,63,71,0.6)';
+      ctx.fillStyle = casing;
+      const w = size * 0.6, h = size * 0.8;
+      ctx.fillRect(sx - w / 2, sy - h / 2, w, h);
+      ctx.strokeRect(sx - w / 2, sy - h / 2, w, h);
+      // terminal nub on top
+      ctx.fillStyle = casing;
+      ctx.fillRect(sx - size * 0.1, sy - h / 2 - size * 0.08, size * 0.2, size * 0.08);
+      // charge fill bar, bottom-up
+      if (live && frac > 0) {
+        const fillH = (h - size * 0.08) * frac;
+        const fillColor = frac > 0.6 ? '#7ad45a' : frac > 0.25 ? '#e0c336' : '#d95a3a';
+        ctx.fillStyle = fillColor;
+        ctx.fillRect(sx - w / 2 + size * 0.05, sy + h / 2 - size * 0.04 - fillH, w - size * 0.1, fillH);
+      }
+      return;
+    }
+    if (s.kind === 'power_switch') {
+      // Small pedestal with a lever -- up and lit green when switchedOn (the default), down and
+      // dull red when the player has manually cut this exact tile out of the segment (power.js's
+      // isConductor). Reads immediately even at a glance, no need to open the inspector.
+      const live = !s.destroyed && !s.underConstruction;
+      const on = s.switchedOn !== false;
+      ctx.fillStyle = live ? '#4a4a52' : 'rgba(74,74,82,0.6)';
+      ctx.fillRect(sx - size * 0.22, sy - size * 0.1, size * 0.44, size * 0.32); // pedestal base
+      ctx.strokeRect(sx - size * 0.22, sy - size * 0.1, size * 0.44, size * 0.32);
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = Math.max(2, size * 0.12);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - size * 0.06);
+      if (on) ctx.lineTo(sx + size * 0.12, sy - size * 0.42);
+      else ctx.lineTo(sx - size * 0.12, sy - size * 0.02);
+      ctx.stroke();
+      ctx.fillStyle = live ? (on ? '#7ad45a' : '#d95a3a') : '#6a6a6a';
+      ctx.beginPath();
+      ctx.arc(sx + (on ? size * 0.12 : -size * 0.12), sy + (on ? -size * 0.42 : -size * 0.02), size * 0.09, 0, Math.PI * 2);
+      ctx.fill();
       return;
     }
     if (s.kind === 'pump') {
@@ -1212,6 +1325,20 @@ export class Renderer {
         ctx.moveTo(sx - size * 0.2, sy - size * 0.18); ctx.lineTo(sx + size * 0.2, sy + size * 0.18);
         ctx.moveTo(sx - size * 0.2, sy + size * 0.18); ctx.lineTo(sx + size * 0.2, sy - size * 0.18);
         ctx.stroke();
+      }
+      return;
+    }
+    if (s.kind === 'rat_trap') {
+      // Kept as a plain Canvas primitive (rats.js is deliberately the "cheap" system this pass --
+      // no new SVG asset needed for a small counter-buildable): a squat wooden box with a dark
+      // trigger-plate slot, distinct enough from the round explosive 'trap' shape above at a glance.
+      const fill = s.destroyed ? 'rgba(80,60,40,0.4)' : '#8a6a42';
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.32, sy - size * 0.22, size * 0.64, size * 0.44);
+      ctx.strokeRect(sx - size * 0.32, sy - size * 0.22, size * 0.64, size * 0.44);
+      if (!s.destroyed) {
+        ctx.fillStyle = 'rgba(30,25,20,0.8)';
+        ctx.fillRect(sx - size * 0.2, sy - size * 0.06, size * 0.4, size * 0.12);
       }
       return;
     }

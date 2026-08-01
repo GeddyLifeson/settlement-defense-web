@@ -43,6 +43,24 @@ export const BUILD_COST = {
   // Heavy tier. Priced between a turret (25) and a garage (35+) since it's a force multiplier
   // on personnel you've already paid upkeep for, not a direct combat structure of its own.
   armory: 32,
+  // Processing station (real Prison Architect materials.txt: SheetMetal price -10 -> two staffed
+  // workshop stations (WorkshopSaw/WorkshopPress, -1500 each) -> LicensePlate price -20, an exact
+  // 2x raw-to-finished uplift). This project's dollar economy runs roughly 40x PA's, so anchored
+  // off the existing garage tier (garage_recycling: 45 / garage_garbage: 35) instead of scaling
+  // PA's -1500 literally. See jobs.js's Processing job for the raw-scrap-in/Components-out chain.
+  workshop: 40,
+  // Battery/power-switch (power.js's storage + manual-breaker mechanics, RimWorld's PowerNet
+  // Battery/PowerSwitch): battery priced between the plain generator (30) and nuclear (90) tiers,
+  // reflecting real utility (stores/discharges into the overload math) without being a source of
+  // its own. Power switch is cheap on purpose, same "cheap relative to a real combat structure"
+  // logic as RimWorld's real PowerSwitch being far cheaper than a turret -- it's a control tool,
+  // not a defense or generation upgrade.
+  battery: 50,
+  power_switch: 6,
+  // Rat Trap (rats.js, real Prison Architect infestation countermeasure): cheap, single-purpose
+  // counter-buildable -- priced below a real combat trap (15) since it does nothing against
+  // attackers, just catches rats at rats.js's real 65% rate.
+  rat_trap: 10,
 };
 
 export const SCRAP_PER_KILL = 4;

@@ -2,33 +2,59 @@
 // this file tests AGAINST director.js's colonyStrength() -- it must never modify that function
 // or its balance-critical constants.
 import { assert, section } from './harness.js';
-import { WaveSpawner, AttackerStore } from '../src/siege.js';
+import { WaveSpawner, AttackerStore, costOf } from '../src/siege.js';
 import { colonyStrength } from '../src/director.js';
 import { SettlementGrid } from '../src/grid.js';
 import { CitizenStore } from '../src/citizens.js';
 import { Structure } from '../src/siege.js';
 import { makeRng } from '../src/core.js';
 
-section('WaveSpawner: spawn counts scale up with wave number', () => {
+// NOTE on the rework below: WaveSpawner now fills a RimWorld-style points budget
+// (wavePoints(), see siege.js) with weighted archetype picks instead of rolling a fixed attacker
+// COUNT per wave. waveCount()'s original formula still drives the budget total 1:1 (points =
+// count * costOf(Grunt)), so the BUDGET is still guaranteed monotonic in wave number exactly like
+// the old count was -- but raw attacker HEADCOUNT no longer has to be, since a later wave can
+// spend the same/larger budget on fewer, more expensive Brutes/Bosses instead of more Grunts.
+// That's the intended point of the rework (trade "many weak" for "few strong"), so headcount
+// monotonicity is deliberately no longer asserted; budget monotonicity is asserted instead.
+section('WaveSpawner: points budget scales up with wave number (budget-fill composition)', () => {
   const grid = new SettlementGrid(20, 20);
   const rng = makeRng(42);
 
-  function spawnCountForWave(waveNumber) {
+  function budgetForWave(waveNumber) {
     const spawner = new WaveSpawner(grid);
-    spawner.waveNumber = waveNumber - 1; // spawnOneWave increments before computing count
+    spawner.waveNumber = waveNumber;
+    spawner.strengthFactor = 1;
+    return spawner.wavePoints();
+  }
+
+  function spawnForWave(waveNumber) {
+    const spawner = new WaveSpawner(grid);
+    spawner.waveNumber = waveNumber - 1; // spawnOneWave increments before computing the budget
     spawner.strengthFactor = 1;
     const attackers = new AttackerStore(500);
     spawner.spawnOneWave(0, attackers, rng);
-    return attackers.count;
+    let spent = 0;
+    for (let i = 0; i < attackers.count; i++) spent += costOf(attackers.kind[i]);
+    return { count: attackers.count, spent };
   }
 
-  const wave1 = spawnCountForWave(1);
-  const wave5 = spawnCountForWave(5);
-  const wave20 = spawnCountForWave(20);
+  const budget1 = budgetForWave(1), budget5 = budgetForWave(5), budget20 = budgetForWave(20);
+  assert(budget1 > 0, `wave 1 has a positive points budget (got ${budget1})`);
+  assert(budget5 > budget1, `wave 5's points budget is bigger than wave 1's (${budget5} vs ${budget1})`);
+  assert(budget20 >= budget5, `wave 20's points budget is at least wave 5's (${budget20} vs ${budget5}, count formula caps its bonus term at +10)`);
 
-  assert(wave1 > 0, `wave 1 spawns at least one attacker (got ${wave1})`);
-  assert(wave5 > wave1, `wave 5 spawns more attackers than wave 1 (${wave5} vs ${wave1})`);
-  assert(wave20 >= wave5, `wave 20 spawns at least as many attackers as wave 5 (${wave20} vs ${wave5}, count formula caps its bonus term at +10)`);
+  const wave1 = spawnForWave(1);
+  const wave5 = spawnForWave(5);
+  const wave20 = spawnForWave(20);
+  assert(wave1.count > 0, `wave 1 spawns at least one attacker (got ${wave1.count})`);
+  // fillWaveBudget must actually spend most of what it's given (within one cheapest-unit's worth
+  // of slack, since it stops as soon as nothing affordable is left) -- not silently under-spend.
+  const cheapest = Math.min(costOf(0), costOf(1), costOf(2), costOf(3));
+  for (const [label, wave, budget] of [['wave1', wave1, budget1], ['wave5', wave5, budget5], ['wave20', wave20, budget20]]) {
+    assert(wave.spent > budget - cheapest * 2 && wave.spent <= budget,
+      `${label} spends most of its points budget without exceeding it (spent ${wave.spent} of ${budget})`);
+  }
 
   // All spawned attackers must land on the grid boundary (0, width-1, 0, or height-1), never
   // inside the map interior -- that's the whole point of an "edge spawn" wave.

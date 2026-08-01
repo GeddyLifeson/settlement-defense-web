@@ -108,6 +108,7 @@
   #inspector .bar-fill.rest { background: #5a8fd9; }
   #inspector .bar-fill.social { background: #b565d9; }
   #inspector .bar-fill.mood { background: var(--good); }
+  #inspector .bar-fill.unrest { background: var(--danger); }
   #inspector .skill-line { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
   #inspector #insp-workprio-btn {
     margin-top: 10px; width: 100%;
@@ -115,6 +116,12 @@
     border-radius: 5px; padding: 6px 8px; font-size: 12px; cursor: pointer;
   }
   #inspector #insp-workprio-btn:hover { background: #3a342f; }
+  #inspector #insp-fire-corrupt-btn {
+    margin-top: 6px; width: 100%;
+    background: #4a2320; color: var(--text); border: 1px solid var(--danger);
+    border-radius: 5px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+  }
+  #inspector #insp-fire-corrupt-btn:hover { background: #5c2b27; }
 
   /* ---- Work Priorities panel ---- Same full-screen dimmed .box.panel convention as #research. */
   #workprio {
@@ -419,6 +426,76 @@
   #toolbar .tool-btn.locked { opacity: 0.42; cursor: not-allowed; }
   #toolbar .tool-btn.locked:hover { background: #2c2825; }
 
+  /* ---- Cliques / faction-demand overlay (factions.js) -- same structure/classes as #research
+     above (.box/.grid/.node/.badge/.bar/.legend/.close-btn), just re-scoped under #factions since
+     these overlays intentionally don't share a single global class (see #research/#worldmap/
+     #finance, each scoped the same way). */
+  #factions {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
+  }
+  #factions.hidden { display: none; }
+  #factions .box { padding: 20px 24px; width: min(720px, 94vw); max-height: 92vh; overflow: auto; }
+  #factions .fac-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  #factions h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #factions .fac-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
+  #factions .fac-head .spacer { flex: 1; }
+  #factions .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #factions .node {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 5px;
+    min-height: 122px;
+  }
+  #factions .node.available { border-style: dashed; }
+  #factions .node .rname { font-weight: 700; font-size: 13px; line-height: 1.2; }
+  #factions .node .badge {
+    font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+  }
+  #factions .node .desc { font-size: 10.5px; color: var(--text-dim); line-height: 1.35; }
+  #factions .node .unlocks { font-size: 10px; color: var(--text-dim); margin-top: auto; }
+  #factions .node .bar { height: 6px; background: #332e2a; border-radius: 4px; overflow: hidden; }
+  #factions .node .bar-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
+  #factions .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
+  #factions .close-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+
+  /* ---- Structured Group Programs overlay (programs.js) -- same shared structure/classes as
+     #research/#factions above, re-scoped under #programs per the same each-overlay-scoped-
+     separately convention. */
+  #programs {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
+  }
+  #programs.hidden { display: none; }
+  #programs .box { padding: 20px 24px; width: min(760px, 94vw); max-height: 92vh; overflow: auto; }
+  #programs .prog-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
+  #programs h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #programs .prog-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
+  #programs .prog-head .spacer { flex: 1; }
+  #programs .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #programs .node {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 5px;
+    min-height: 150px;
+  }
+  #programs .node.available { border-color: var(--good); }
+  #programs .node.blocked { opacity: 0.6; border-style: dashed; }
+  #programs .node .rname { font-weight: 700; font-size: 13px; line-height: 1.2; }
+  #programs .node .badge {
+    font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+  }
+  #programs .node .desc { font-size: 10.5px; color: var(--text-dim); line-height: 1.35; }
+  #programs .node .unlocks { font-size: 10px; color: var(--text-dim); margin-top: auto; }
+  #programs .node .bar { height: 6px; background: #332e2a; border-radius: 4px; overflow: hidden; }
+  #programs .node .bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+  #programs .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
+  #programs .close-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+
   /* ---- Settings overlay ---- Reachable from BOTH the title screen's main menu (no SimWorld yet)
      and in-game via the pause menu's Settings button -- so like #saveload it is deliberately NOT
      in the body.pregame hide-list below and NOT torn down by showTitleScreen()'s overlay-cleanup
@@ -676,6 +753,7 @@
   body.pregame #worldmap,
   body.pregame #finance,
   body.pregame #research,
+  body.pregame #programs,
   body.pregame #pausemenu,
   body.pregame #tutorial,
   body.pregame #help-panel,
@@ -820,6 +898,8 @@
   <button id="btn-worldmap" title="Conquest map -- per-region control meters and expansion [Shift+M]">🗺 Map</button>
   <button id="btn-finance" title="Budget report -- scrap income/expense breakdown and trend [Shift+B]">💰 Budget</button>
   <button id="btn-research" title="Research -- tech tree unlocking advanced buildables [Shift+T]">🔬 Research</button>
+  <button id="btn-factions" title="Cliques -- rival citizen cliques and their demands [Shift+F]">🤝 Cliques</button>
+  <button id="btn-programs" title="Programs -- Skills Workshop / Wellness Counseling / Community Circle status [Shift+P]">📋 Programs</button>
   <button id="btn-help" title="Reference -- job priorities, building, waves, resources and every building category [F1 or ?]">❓ Help</button>
   <button id="btn-fullscreen" title="Toggle fullscreen">⛶ Fullscreen</button>
   <button id="btn-mute" title="Mute/unmute procedurally-synthesized sound effects">🔊 Sound</button>
@@ -848,8 +928,11 @@
   <div class="stat-row"><div class="label"><span>Rest</span><span id="insp-rest-pct"></span></div><div class="bar"><div class="bar-fill rest" id="insp-rest"></div></div></div>
   <div class="stat-row"><div class="label"><span>Social</span><span id="insp-social-pct"></span></div><div class="bar"><div class="bar-fill social" id="insp-social"></div></div></div>
   <div class="stat-row"><div class="label"><span>Mood</span><span id="insp-mood-pct"></span></div><div class="bar"><div class="bar-fill mood" id="insp-mood"></div></div></div>
+  <div class="stat-row" title="How close this citizen is to becoming a flashpoint for unrest (Prison Architect dynamicRep.txt-style per-citizen riot-proneness -- riled up/volatile temperament/nearby fighting push it up, a good room and skill investment pull it down). Distinct from the colony-wide Unrest reading in the topbar."><div class="label"><span>Unrest Risk</span><span id="insp-unrest-pct"></span></div><div class="bar"><div class="bar-fill unrest" id="insp-unrest"></div></div></div>
   <div class="skill-line" id="insp-skill"></div>
+  <div class="subtitle" id="insp-room" title="Room stats where this citizen currently stands (RimWorld-style beauty/cleanliness/impressiveness labels, cosmetic flavor text next to the raw numbers)"></div>
   <button id="insp-workprio-btn" title="Work Priorities -- bias which jobs this citizen (or the whole roster) prefers, without removing their autonomy">📋 Work Priorities</button>
+  <button id="insp-fire-corrupt-btn" class="hidden" title="This staffer was caught secretly diverting scrap. Fire them off the duty roster for a scrap reward.">🚫 Fire for Reward</button>
 </div>
 
 <!-- Work Priorities panel (RimWorld Work-tab-style, see jobs.js's WorkCategory and citizens.js's
@@ -957,6 +1040,51 @@
       and scrap power are known from the start and can never be locked away; everything past that
       is a force multiplier you have to earn. Locked buildables stay visible in the build toolbar,
       greyed out, so you can see what's coming.
+    </div>
+  </div>
+</div>
+
+<!-- Cliques / faction-demand overlay (factions.js -- reskinned Prison Architect gang-demand
+     system, see that file's header for the real numbers this was ported from). Same
+     full-screen-overlay-with-a-toggle-button convention as #research/#worldmap/#finance above. -->
+<div id="factions" class="hidden">
+  <div class="box panel">
+    <div class="fac-head">
+      <h2>Cliques</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-factions-close">Close [Shift+F]</button>
+    </div>
+    <div class="fac-sub" id="factions-sub"></div>
+    <div class="grid" id="factions-grid"></div>
+    <div class="legend">
+      Once the settlement grows past 20 living citizens, rival cliques form on their own, each with
+      its own lean (who's more likely to scrap, wreck property, or slip off duty when things go
+      wrong). Satisfy a demand and the clique gets paid off in scrap -- but they'll come back
+      wanting more next time. Ignore one past its deadline and unrest rises, some scrap goes
+      missing, and that clique's own flavor of trouble shows up somewhere in the settlement.
+    </div>
+  </div>
+</div>
+
+<!-- Structured Group Programs overlay (programs.js -- a direct, reskinned port of Prison
+     Architect's real reform-program schema: SessionCost/Places/SessionLength/NumSessions/
+     Difficulty, a Room+Teacher requirement, Voluntary intake). Same full-screen-overlay
+     convention as #research/#worldmap/#finance/#factions above. -->
+<div id="programs" class="hidden">
+  <div class="box panel">
+    <div class="prog-head">
+      <h2>Programs</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-programs-close">Close [Shift+P]</button>
+    </div>
+    <div class="prog-sub" id="programs-sub"></div>
+    <div class="grid" id="programs-grid"></div>
+    <div class="legend">
+      Skills Workshop, Wellness Counseling, and Community Circle each run in a matching validated
+      room (Training Room / Recreation Room) staffed by a Foreman / Psychologist / Facilitator
+      actually holding the post -- no staffer physically present, no sessions run. Citizens attend
+      voluntarily when they stand to benefit, same as any other need-driven trip. A program lists
+      "Unstaffed" or "No room" until both requirements are met.
     </div>
   </div>
 </div>

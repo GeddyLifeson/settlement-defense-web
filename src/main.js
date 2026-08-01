@@ -11,7 +11,8 @@ import {
   isMuted, toggleMute, getVolume, setVolume, getMasterGainValue,
 } from './audio.js';
 import { WeatherKind, tryWandererEvent, tryBlightEvent } from './weather.js';
-import { WEAPON_TIERS } from './security.js';
+import { WEAPON_TIERS, fireCorruptStaff, forceCorruptionRoll, forceActivateCorruption, CORRUPTION_FIRE_REWARD } from './security.js';
+import { forceHeldCitizenCrisis } from './siege.js';
 import { AggressionPreset } from './core.js';
 import { STORYTELLERS } from './director.js';
 import {
@@ -22,6 +23,12 @@ import {
   toggleHelp, isHelpOpen, hasSeenTutorial, resetTutorialSeen, TUTORIAL_SEEN_KEY, TUTORIAL_STEPS,
 } from './tutorial.js';
 import { WorkCategory, WORK_CATEGORY_ORDER, WORK_CATEGORY_LABELS, WORK_CATEGORY_FIELD } from './jobs.js';
+import { ProgramKind, PROGRAM_DEFS, PROGRAM_ORDER, isSiteStaffed } from './programs.js';
+import { computeCitizenUnrestScore } from './citizens.js';
+import { CLIQUES, DEMAND_BASE_TARGET, DEMAND_ESCALATED_TARGET } from './factions.js';
+import {
+  roomContaining, impressivenessLabel, beautyLabel, cleanlinessLabel, ROOM_ROLE_LABEL,
+} from './rooms.js';
 import {
   ACHIEVEMENTS, getMeta, isAchievementUnlocked, setAchievementUnlockedCallback,
   checkResearchAchievements, checkWaveAchievements, checkConquestAchievements, checkTameAchievement,
@@ -242,6 +249,25 @@ window.__debug = {
     checkConquest: () => checkConquestAchievements(worldMap),
     checkTame: () => checkTameAchievement(),
   },
+  // Corrupt/bribable staff (security.js) -- console-verification pattern matching every other
+  // feature above. The real periodic roll only fires every ~24000 ticks (10 in-game days), far
+  // too long for a manual soak test, so force* bypasses the wait without duplicating the logic.
+  security: {
+    CORRUPTION_FIRE_REWARD,
+    isCorruptEligible: (id) => world.roster.isCorruptEligible(id),
+    isCorruptActive: (id) => world.roster.isCorruptActive(id),
+    isCorruptDiscovered: (id) => world.roster.isCorruptDiscovered(id),
+    fire: (citizenId) => fireCorruptStaff(world, citizenId),
+    forceRoll: () => forceCorruptionRoll(world),
+    forceActivate: (citizenId) => forceActivateCorruption(world, citizenId),
+  },
+  // Held-citizen crisis (siege.js) -- same console-verification pattern. force() bypasses the
+  // unrest-tier/probability gates so a soak test doesn't have to grind out a genuine tier-3 unrest
+  // crisis (which itself requires a sustained mood crash over hundreds of ticks) just to see it.
+  crisis: {
+    getEvent: () => world.heldCitizenEvent,
+    force: () => forceHeldCitizenCrisis(world),
+  },
 };
 
 // ---------------------------------------------------------------- toolbar (built once)
@@ -298,6 +324,10 @@ document.getElementById('btn-finance').addEventListener('click', () => toggleFin
 document.getElementById('btn-finance-close').addEventListener('click', () => toggleFinance(false));
 document.getElementById('btn-research').addEventListener('click', () => toggleResearch());
 document.getElementById('btn-research-close').addEventListener('click', () => toggleResearch(false));
+document.getElementById('btn-programs').addEventListener('click', () => toggleProgramsPanel());
+document.getElementById('btn-programs-close').addEventListener('click', () => toggleProgramsPanel(false));
+document.getElementById('btn-factions').addEventListener('click', () => toggleFactions());
+document.getElementById('btn-factions-close').addEventListener('click', () => toggleFactions(false));
 
 // ---------------------------------------------------------------- fullscreen toggle
 // Wraps the Fullscreen API in try/catch and fails silently (toast instead of throw) -- some
@@ -468,7 +498,8 @@ function renderSettings() {
     ['Menus', [
       ['Pause / Resume', 'Space'], ['Speed down / up', '- / +'],
       ['Conquest Map', 'Shift+M'], ['Budget Report', 'Shift+B'], ['Research', 'Shift+T'],
-      ['Help Reference', 'F1 or ?'], ['Deselect tool / close Map-Research-Budget', 'Escape'],
+      ['Cliques', 'Shift+F'], ['Programs', 'Shift+P'],
+      ['Help Reference', 'F1 or ?'], ['Deselect tool / close Map-Research-Budget-Cliques-Programs', 'Escape'],
     ]],
     ['Save / Load', [
       ['Quick Save', 'F5'], ['Quick Load', 'F9'], ['New Settlement', 'R'],
@@ -1080,6 +1111,125 @@ function toggleResearch(force) {
 input.onToggleResearch = () => toggleResearch();
 input.onCloseResearch = () => toggleResearch(false);
 
+// ---------------------------------------------------------------- factions / clique demands overlay
+// Same full-screen-overlay-with-a-toggle-button convention as the conquest map/budget/research
+// overlays above (DOM, not canvas). See factions.js for the underlying system -- reskinned Prison
+// Architect gang-demand system, 3 named cliques with real, mechanical demands/rewards/consequences.
+const factionsEl = document.getElementById('factions');
+const factionsGridEl = document.getElementById('factions-grid');
+const factionsSubEl = document.getElementById('factions-sub');
+
+function toggleFactions(force) {
+  const show = force != null ? force : factionsEl.classList.contains('hidden');
+  factionsEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-factions').classList.toggle('active', show);
+  if (show) renderFactions();
+}
+input.onToggleFactions = () => toggleFactions();
+input.onCloseFactions = () => toggleFactions(false);
+
+/** Full rebuild of the clique cards -- cheap (3 cliques) to redraw wholesale, same "no diffing
+ *  needed, small enough list" reasoning as renderResearch/renderWorldMap. Shows "not formed yet"
+ *  guidance below FACTION_MIN_POPULATION rather than an empty panel, so the system is discoverable
+ *  before it actually kicks in. */
+function renderFactions() {
+  const f = world.factions;
+  factionsGridEl.innerHTML = '';
+  if (!f || !f.formed) {
+    factionsSubEl.textContent = `No cliques have formed yet -- they emerge once the settlement reaches 20 living citizens.`;
+    return;
+  }
+  let aliveCount = 0;
+  for (let i = 0; i < world.citizens.count; i++) if (world.citizens.isAliveAt(i)) aliveCount++;
+  factionsSubEl.textContent = `${aliveCount} living citizens, sorted into ${CLIQUES.length} rival cliques.`;
+
+  for (const clique of CLIQUES) {
+    const memberCount = f.memberCountOf(clique.id, world);
+    const demand = f.demand[clique.id];
+    const card = document.createElement('div');
+    card.className = 'node' + (demand ? ' available' : '');
+    card.style.borderColor = clique.color;
+
+    let body = `<div class="rname" style="color:${clique.color}">${clique.name}</div>` +
+      `<div class="badge">${memberCount} members &middot; leans ${clique.preferredMisbehaviour}</div>`;
+
+    if (demand) {
+      const pct = Math.min(100, (demand.progress / demand.target) * 100);
+      const ticksLeft = Math.max(0, demand.deadlineTick - world.currentTick);
+      body += `<div class="desc">${demand.tier === 'escalated' ? 'ESCALATED demand' : 'Demand'}: more time in the Recreation zone.</div>` +
+        `<div class="bar"><div class="bar-fill" style="width:${pct}%;background:${clique.color}"></div></div>` +
+        `<div class="badge cost-line">${demand.progress} / ${demand.target} visits &middot; ${ticksLeft} ticks left</div>`;
+    } else {
+      const cooldownLeft = Math.max(0, f.cooldownUntil[clique.id] - world.currentTick);
+      body += `<div class="desc">${cooldownLeft > 0 ? `Quiet for now -- next demand in ${cooldownLeft} ticks.` : 'No active demand.'}</div>` +
+        `<div class="unlocks">Satisfied ${f.completions[clique.id]}x -- next demand will be ${f.demandTier[clique.id] === 'escalated' ? `ESCALATED (${DEMAND_ESCALATED_TARGET} visits)` : `base (${DEMAND_BASE_TARGET} visits)`}.</div>`;
+    }
+    card.innerHTML = body;
+    factionsGridEl.appendChild(card);
+  }
+}
+
+// While the overlay is open the sim keeps running behind it, so progress/cooldowns need to move --
+// same "only redraw while visible" gate as refreshFinance/refreshResearchValues above. Structural
+// rebuild every call (cheap, 3 cards) rather than diffing, same reasoning as renderFactions itself.
+function refreshFactions() {
+  if (factionsEl.classList.contains('hidden')) return;
+  renderFactions();
+}
+
+// ---------------------------------------------------------------- structured group programs overlay
+// Same full-screen-overlay-with-a-toggle-button convention as the panels above. One card per
+// PROGRAM_DEFS kind (fixed 3, not per-site -- a settlement can have multiple validated rooms of
+// the same kind, so the card aggregates across every current world.programSites entry of that
+// kind rather than listing rooms individually, keeping this readable at a glance).
+const programsEl = document.getElementById('programs');
+const programsGridEl = document.getElementById('programs-grid');
+const programsSubEl = document.getElementById('programs-sub');
+
+function toggleProgramsPanel(force) {
+  const show = force != null ? force : programsEl.classList.contains('hidden');
+  programsEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-programs').classList.toggle('active', show);
+  if (show) renderPrograms();
+}
+input.onTogglePrograms = () => toggleProgramsPanel();
+input.onClosePrograms = () => toggleProgramsPanel(false);
+
+function renderPrograms() {
+  const sites = world.programSites || [];
+  programsSubEl.textContent = `${sites.length} validated program room${sites.length === 1 ? '' : 's'} currently detected.`;
+  programsGridEl.innerHTML = '';
+  for (const kind of PROGRAM_ORDER) {
+    const def = PROGRAM_DEFS[kind];
+    const kindSites = sites.filter(s => s.kind === kind);
+    const staffedSites = kindSites.filter(s => isSiteStaffed(world, s));
+    const totalAttendees = kindSites.reduce((sum, s) => sum + s.attendeeIds.length, 0);
+    const totalPlaces = kindSites.length * def.places;
+
+    const card = document.createElement('div');
+    let status, cls;
+    if (kindSites.length === 0) { status = 'No validated room'; cls = 'blocked'; }
+    else if (staffedSites.length === 0) { status = 'Unstaffed -- no sessions running'; cls = 'blocked'; }
+    else { status = `Running -- ${staffedSites.length}/${kindSites.length} room(s) staffed`; cls = 'available'; }
+    card.className = 'node' + (cls ? ` ${cls}` : '');
+
+    const pct = totalPlaces > 0 ? Math.min(100, (totalAttendees / totalPlaces) * 100) : 0;
+    card.innerHTML =
+      `<div class="rname">${def.label}</div>` +
+      `<div class="badge">${status}</div>` +
+      `<div class="desc">${def.sessionCost} scrap/session &middot; ${def.numSessions} sessions &middot; ${def.places} places &middot; staffed by ${def.staffRole}</div>` +
+      `<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>` +
+      `<div class="badge cost-line">${totalAttendees} / ${totalPlaces || def.places} attending now</div>` +
+      `<div class="unlocks">Runs during the ${def.scheduleBlock === 0 ? 'Sleep' : def.scheduleBlock === 1 ? 'Work' : 'Recreation'} schedule block.</div>`;
+    programsGridEl.appendChild(card);
+  }
+}
+
+function refreshPrograms() {
+  if (programsEl.classList.contains('hidden')) return;
+  renderPrograms();
+}
+
 // ---------------------------------------------------------------- work priorities panel
 // RimWorld Work-tab-style grid: every living citizen (row) x jobs.js's 4 non-needs WorkCategory
 // columns (Construction/Hauling/Harvesting/Animal Handling). Reached from the citizen inspector's
@@ -1097,6 +1247,17 @@ function toggleWorkPriorities(force) {
 }
 document.getElementById('insp-workprio-btn').addEventListener('click', () => toggleWorkPriorities());
 document.getElementById('btn-workprio-close').addEventListener('click', () => toggleWorkPriorities(false));
+
+// Corrupt/bribable staff (security.js): fires the currently-inspected citizen if (and only if)
+// they've actually been caught -- updateInspector below is what shows/hides this button in the
+// first place, so a click here always has a real discovered-corrupt id behind it.
+document.getElementById('insp-fire-corrupt-btn').addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const citizenId = world.citizens.id[sel];
+  const result = fireCorruptStaff(world, citizenId);
+  if (result.ok) showToast(`Fired for corruption -- +${result.reward} scrap`);
+});
 
 const WORKPRIO_CYCLE_MAX = 3; // priority tiers 1-3, plus 0 (Off) -- matches WORK_CATEGORY_FIELD's 4 categories
 
@@ -1160,8 +1321,9 @@ function renderWorkPriorities() {
       resetBtn.title = 'Clear this citizen\'s overrides and go back to the default autonomous order.';
       resetBtn.addEventListener('click', () => {
         c.hasWorkPriorities[i] = 0;
-        c.workPriorityConstruction[i] = 1; c.workPriorityHauling[i] = 1;
+        c.workPriorityConstruction[i] = 1; c.workPriorityProcessing[i] = 1; c.workPriorityHauling[i] = 1;
         c.workPriorityHarvesting[i] = 1; c.workPriorityAnimal[i] = 1;
+        c.workPriorityCleaning[i] = 1;
         renderWorkPriorities();
       });
       resetTd.appendChild(resetBtn);
@@ -1385,6 +1547,7 @@ const FINANCE_CATEGORIES = [
   ['haulScrap', '🚚 Vehicle hauls', 'income'],
   ['recyclingScrap', '♻ Recycling Center', 'income'],
   ['conquestScrap', '🗺 Conquest supply lines', 'income'],
+  ['factionScrap', '🤝 Clique demands', 'income'],
   ['otherScrap', '❓ Other', 'income'],
   ['buildSpend', '🔨 Construction spend', 'expense'],
 ];
@@ -1395,7 +1558,9 @@ const FINANCE_CATEGORIES = [
 function renderFinance() {
   const f = world.finance;
   if (!f) return;
-  const totalIncome = f.killScrap + f.harvestScrap + f.haulScrap + f.recyclingScrap + f.conquestScrap + f.otherScrap;
+  // Summed from FINANCE_CATEGORIES' own 'income' rows rather than hardcoding each key -- keeps
+  // this total correct automatically as categories get added (factionScrap, see factions.js).
+  const totalIncome = FINANCE_CATEGORIES.filter(([, , cls]) => cls === 'income').reduce((sum, [key]) => sum + f[key], 0);
   financeRowsEl.innerHTML = FINANCE_CATEGORIES.map(([key, label, cls]) =>
     `<div class="fin-row"><span class="label">${label}</span><span class="val ${cls}">${cls === 'expense' ? '-' : '+'}${Math.round(f[key])}</span></div>`
   ).join('') +
@@ -1452,21 +1617,53 @@ function updateInspector() {
     backstoryEl.title = '';
   }
   const statusEl = document.getElementById('insp-status');
-  if (c.isDownedAt(sel)) {
+  const isDiscoveredCorrupt = world.roster.isCorruptDiscovered(c.id[sel]);
+  if (isDiscoveredCorrupt) {
+    statusEl.textContent = 'Caught diverting supplies -- fire them below for a reward';
+  } else if (c.isDownedAt(sel)) {
     statusEl.textContent = 'Downed';
   } else if (c.isOnBreakAt(sel)) {
     statusEl.textContent = 'On Break (mood too low to work at full speed)';
   } else {
     statusEl.textContent = '';
   }
+  document.getElementById('insp-fire-corrupt-btn').classList.toggle('hidden', !isDiscoveredCorrupt);
   setBar('hp', c.health[sel]);
   setBar('hunger', c.hunger[sel]);
   setBar('rest', c.rest[sel]);
   setBar('social', c.social[sel]);
   setBar('mood', c.mood[sel]);
+  // Per-citizen unrest-contribution score (citizens.js's computeCitizenUnrestScore, Prison
+  // Architect dynamicRep.txt-style) -- 0-100 like every other bar here, distinct from the
+  // colony-wide unrestLevel shown in the topbar. Surfaces which specific citizen is closest to
+  // "flipping" so the player has something concrete to target.
+  setBar('unrest', computeCitizenUnrestScore(c, sel, world) / 100);
   document.getElementById('insp-skill').textContent =
     `Combat: ${skillLevel(c.skillCombat[sel])}${PASSION_ICON[c.passionCombat[sel]]} · ` +
     `Construction: ${skillLevel(c.skillConstruction[sel])}${PASSION_ICON[c.passionConstruction[sel]]}`;
+  document.getElementById('insp-room').textContent = roomStatLine(c.x[sel], c.y[sel]);
+}
+
+// RimWorld-style flavor labels (rooms.js's impressivenessLabel/beautyLabel/cleanlinessLabel) next
+// to the existing raw .beauty/.cleanliness/.impressiveness numbers -- cosmetic text only, the
+// numbers stay so nothing is lost, this just makes them legible at a glance the way RimWorld's
+// own room-inspect tooltip does. Reused by both the single-citizen inspector above (whichever
+// room the selected citizen currently stands in) and nothing else yet -- there's no separate
+// tile/structure inspector in this game to hook a second call site into.
+function roomStatLine(x, y) {
+  const room = roomContaining(world.rooms, world.grid, x, y);
+  if (!room) return 'Not in an enclosed room';
+  // world.js runs computeRoomStats() BEFORE the wall-signature check that (re)builds this.rooms
+  // via detectRooms -- so a room detected fresh this very tick hasn't had its .beauty/.cleanliness/
+  // .impressiveness populated yet and won't until next tick. Rare (one tick right after a wall
+  // completes an enclosure) but real, so this guards rather than throwing on undefined.toFixed().
+  if (room.beauty == null || room.cleanliness == null || room.impressiveness == null) {
+    return 'Room stats settling...';
+  }
+  const roleLabel = ROOM_ROLE_LABEL[room.role] ?? 'Unroofed Area';
+  return `${roleLabel} · Beauty ${room.beauty.toFixed(1)} (${beautyLabel(room.beauty)}) · ` +
+    `Cleanliness ${room.cleanliness.toFixed(2)} (${cleanlinessLabel(room.cleanliness)}) · ` +
+    `Impressiveness ${room.impressiveness.toFixed(2)} (${impressivenessLabel(room.impressiveness)})`;
 }
 
 function updateInspectorMulti(indices) {
@@ -1483,13 +1680,16 @@ function updateInspectorMulti(indices) {
   document.getElementById('insp-role').textContent = names + (alive.length > 5 ? `, +${alive.length - 5} more` : '');
   document.getElementById('insp-backstory').textContent = '';
   document.getElementById('insp-status').textContent = 'Group averages below';
+  document.getElementById('insp-fire-corrupt-btn').classList.add('hidden'); // no per-citizen action in a multi-select, see this function's own header comment above
   const avg = (arr) => alive.reduce((s, i) => s + arr[i], 0) / alive.length;
   setBar('hp', avg(c.health));
   setBar('hunger', avg(c.hunger));
   setBar('rest', avg(c.rest));
   setBar('social', avg(c.social));
   setBar('mood', avg(c.mood));
+  setBar('unrest', alive.reduce((s, i) => s + computeCitizenUnrestScore(c, i, world), 0) / alive.length / 100);
   document.getElementById('insp-skill').textContent = '';
+  document.getElementById('insp-room').textContent = '';
 }
 
 // Raw skill floats are unbounded accrual values (see jobs.js/siege.js gain rates), not
@@ -1907,6 +2107,8 @@ function frame() {
   refreshWorldMapValues();
   refreshResearchValues();
   refreshFinance();
+  refreshFactions();
+  refreshPrograms();
   updateGrading();
   syncPauseMenu();
 

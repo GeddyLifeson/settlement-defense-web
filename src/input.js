@@ -54,6 +54,24 @@ export const TOOLS = [
   { key: 'd', tool: 'generator_coal', label: 'Coal Generator', cost: BUILD_COST.generator_coal },
   { key: 's', tool: 'generator_wind', label: 'Wind Turbine', cost: BUILD_COST.generator_wind },
   { key: '8', tool: 'generator_solar', label: 'Solar Array', cost: BUILD_COST.generator_solar },
+  // Battery/power switch (power.js's storage + manual-breaker mechanics). Every letter a-z and
+  // digit 0-8 is already claimed by an existing tool -- '9' and the bracket keys are the first
+  // free ones left, chosen over any modifier-key combo to keep single-keypress tool switching.
+  { key: '9', tool: 'battery', label: 'Battery', cost: BUILD_COST.battery },
+  // Power Switch doesn't just place -- clicking an EXISTING power_switch tile with this tool
+  // selected toggles it instead (see _onDown below), so the same key both places new switches and
+  // flips ones already built.
+  { key: '[', tool: 'power_switch', label: 'Power Switch (click existing to toggle)', cost: BUILD_COST.power_switch },
+  // Processing station (Prison Architect materials-chain analog, see jobs.js's Processing job /
+  // siege.js's Structure 'workshop' kind): ']' is the next free key after power_switch claimed '['.
+  { key: ']', tool: 'workshop', label: 'Processing Station', cost: BUILD_COST.workshop },
+  // Training Zone (programs.js's Skills Workshop program, see zones.js's ZoneKind.Training /
+  // rooms.js's RoomRole.Training) -- every letter/digit/bracket is claimed above, ';' is the next
+  // free single-keypress key.
+  { key: ';', tool: 'zone-training', label: 'Training Zone', cost: null },
+  // Rat Trap (rats.js's real Prison Architect infestation countermeasure) -- ';' just claimed the
+  // last easy punctuation key, "'" is the next free one.
+  { key: "'", tool: 'rat_trap', label: 'Rat Trap', cost: BUILD_COST.rat_trap },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -284,6 +302,25 @@ export class InputController {
       return;
     }
 
+    // Power Switch (power.js's isConductor manual toggle): clicking an EXISTING switch tile with
+    // this tool selected flips it on/off instead of failing "Already occupied" -- this only fires
+    // on the initial mousedown, not on every _place() call while dragging/painting, so hovering
+    // over an already-toggled switch during a paint-drag can't rapidly flip it back and forth.
+    if (this.tool === 'power_switch') {
+      this._updateHover(e);
+      const world = this.getWorld();
+      if (world && this.hoverGridX != null) {
+        const x = this.hoverGridX, y = this.hoverGridY;
+        const existing = world.structures.find(s => !s.destroyed && s.kind === 'power_switch' &&
+          Math.floor(s.x) === x && Math.floor(s.y) === y);
+        if (existing) {
+          existing.switchedOn = existing.switchedOn === false ? true : false;
+          this.onToast?.(existing.switchedOn ? 'Power switch: ON' : 'Power switch: OFF');
+          return;
+        }
+      }
+    }
+
     this._painting = true;
     this._place();
   }
@@ -339,7 +376,7 @@ export class InputController {
     if (x < 0 || y < 0 || x >= world.width || y >= world.height) return;
 
     if (this.tool.startsWith('zone-')) {
-      const kind = { 'zone-food': ZoneKind.Food, 'zone-bedroom': ZoneKind.Bedroom, 'zone-recreation': ZoneKind.Recreation }[this.tool];
+      const kind = { 'zone-food': ZoneKind.Food, 'zone-bedroom': ZoneKind.Bedroom, 'zone-recreation': ZoneKind.Recreation, 'zone-training': ZoneKind.Training }[this.tool];
       world.zones.set(x, y, kind);
       return;
     }
@@ -393,6 +430,13 @@ export class InputController {
     // uppercase-only convention -- lowercase 't' is the Table buildable's hotkey. Note SHIFT+R
     // is NOT available: main.js binds both 'r' and 'R' to restart().
     if (e.key === 'T') { this.onToggleResearch?.(); return; }
+    // Cliques/faction-demand overlay (factions.js, surfaced in main.js). SHIFT+F, same
+    // uppercase-only convention -- lowercase 'f' is already the Floodlight buildable's hotkey.
+    if (e.key === 'F') { this.onToggleFactions?.(); return; }
+    // Structured Group Programs overlay (programs.js, surfaced in main.js). SHIFT+P, same
+    // uppercase-only convention -- lowercase 'p' is already the Garbage Garage (Electric)
+    // buildable's hotkey.
+    if (e.key === 'P') { this.onTogglePrograms?.(); return; }
     // Onboarding reference panel (tutorial.js, surfaced in main.js). F1 and '?' are both free --
     // '?' is Shift+/ and appears in no TOOL_KEYS entry, and F1 collides with nothing here or in
     // main.js's F5/F9 save/load bindings. F1 needs preventDefault or the browser opens its own help.
@@ -400,6 +444,8 @@ export class InputController {
     if (e.key === 'Escape' && this.onToggleMap) { this.onCloseMap?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onToggleResearch) { this.onCloseResearch?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onToggleFinance) { this.onCloseFinance?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleFactions) { this.onCloseFactions?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onTogglePrograms) { this.onClosePrograms?.(); /* falls through to clear tool */ }
     if (e.key in TOOL_KEYS) { this.setTool(TOOL_KEYS[e.key]); return; }
     if (e.key === ' ') { e.preventDefault(); this.togglePause(); return; }
     if (e.key === '+' || e.key === '=') { this.setSpeedIndex(this.speedIndex + 1); return; }

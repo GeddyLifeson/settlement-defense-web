@@ -48,7 +48,21 @@ const IGNITION_SEARCH_RADIUS = 4; // generator sparks something flammable within
 const FIRE_DAMAGE_PER_TICK = 0.01; // burning structure's health drains at this rate until destroyed
 const SPREAD_CHECK_INTERVAL = 30; // ticks between spread rolls -- "a few ticks per cell" pacing
 const SPREAD_RADIUS = 1.6; // reaches orthogonal + diagonal neighbor cells
-const SPREAD_CHANCE = 0.18; // per eligible unburned neighbor, per check
+const SPREAD_CHANCE = 0.18; // per eligible unburned neighbor, per check, at the Medium (1.0x) tier
+
+// Real Prison Architect difficulty-tier fire-spread multiplier (firePropagationSystem.txt, see
+// task brief): Low 0.75x / Medium 1.0x / High 1.25x. Wired to this project's existing
+// AggressionPreset knob (core.js/director.js) rather than adding a parallel difficulty enum --
+// Calm maps to PA's Low (a gentler, more forgiving spread rate for a low-aggression game), the
+// default Standard maps to Medium (SPREAD_CHANCE unchanged, matching the pre-existing tuned
+// baseline), Aggressive maps to High (spreads meaningfully faster, consistent with Aggressive
+// already meaning "harder" everywhere else in this file's siblings, e.g. director.js's
+// AGGRESSION_MULTIPLIER).
+export const FIRE_SPREAD_DIFFICULTY_MULT = Object.freeze({
+  Calm: 0.75,
+  Standard: 1.0,
+  Aggressive: 1.25,
+});
 
 export function isFlammable(kind) {
   return FLAMMABLE_KINDS.has(kind);
@@ -85,7 +99,7 @@ export function tickFireIgnition(structures, rng) {
 // Damages every burning structure each tick (destroying it once fully consumed) and, every
 // SPREAD_CHECK_INTERVAL ticks, rolls to spread to nearby unburned flammable structures. Fire is
 // purely self-limiting -- see file header for why there's no firefighting mechanic.
-export function tickFire(structures, rng) {
+export function tickFire(structures, rng, spreadMult = 1) {
   for (const s of structures) {
     if (!s.onFire || s.destroyed) continue;
 
@@ -103,7 +117,7 @@ export function tickFire(structures, rng) {
         if (other === s || !isFlammable(other.kind)) continue;
         if (other.destroyed || other.underConstruction || other.onFire) continue;
         if (Math.hypot(other.x - s.x, other.y - s.y) > SPREAD_RADIUS) continue;
-        if (rng() < SPREAD_CHANCE) igniteStructure(other);
+        if (rng() < SPREAD_CHANCE * spreadMult) igniteStructure(other);
       }
     }
   }

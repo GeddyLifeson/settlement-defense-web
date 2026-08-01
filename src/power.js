@@ -57,8 +57,14 @@ function isSource(s, structures) {
   return s.kind === 'generator' || s.kind.startsWith('generator_');
 }
 
+// Power switch (Prison Architect's manual breaker idea): a conductor tile the player can toggle
+// off to deliberately split a segment in two without physically removing wire -- real manual
+// control over the graph, not cosmetic. Battery (below) is always a conductor when built: it sits
+// "on the wire" like RimWorld's PowerNet batteries, never a source of its own (isSource stays
+// false for it), just a pass-through node that also happens to store/release energy.
 function isConductor(s, structures) {
-  return (s.kind === 'wire' || isSource(s, structures)) && !s.destroyed && !s.underConstruction;
+  if (s.kind === 'power_switch') return s.switchedOn !== false && !s.destroyed && !s.underConstruction;
+  return (s.kind === 'wire' || s.kind === 'battery' || isSource(s, structures)) && !s.destroyed && !s.underConstruction;
 }
 
 // Cheap order-sensitive hash of every live conductor's tile+kind, so the O(n) rebuild only runs
@@ -166,18 +172,43 @@ export function isPoweredAt(structures, x, y) {
 // conductor tiles carry a small per-tick chance to catch fire (rare, escalating stakes -- reuses
 // fire.js's igniteStructure/tickFire directly rather than a parallel damage system).
 //
-// Capacities are tiered the same way the real thing is: nuclear and coal are the "big steady
-// baseload" sources and get the highest capacity, the plain generator sits in the middle, and
-// wind/solar -- both already able to drop to zero output entirely on bad siting (isSource above)
-// -- carry the lowest capacity, same intermittent-renewable tradeoff as their real-world
-// counterparts, independent of their scrap cost in economy.js.
+// Capacities are pulled from RimWorld's OWN ThingDefs_Buildings/Buildings_Power.xml wattages,
+// scaled to this codebase's baseline of 5 for a plain generator (RimWorld's wood/chemfuel
+// generator: 1000W). Ratios, not vibes:
+//   generator_coal:   0.9x  (worse than plain -- see economy.js's "worse plain generator" cost
+//                     comment, which this number now actually agrees with, unlike the old table)
+//   generator_solar:  1.7x  (RimWorld solar: 1700W)
+//   generator_wind:   2.3x  (RimWorld wind: 2300W -- genuinely beats solar, same as the real def)
+//   generator_nuclear: highest tier, anchored above geothermal's 3.6x (RimWorld's biggest
+//                     baseload single-tile source) since this codebase's nuclear generator is
+//                     already a distinct high-risk/high-reward fictional tier (waste-hazard
+//                     containment mechanic below), not a literal port of any one RimWorld def.
+// Previously wind/solar sat at 2.5 -- BELOW the plain generator's 5 -- which was backwards: in
+// RimWorld both renewables out-produce the baseline generator per-building, their real tradeoff is
+// siting reliability (isSource above), not raw capacity. Fixed here; siting is still the thing
+// that can drop them to zero, capacity is just what they deliver when actually sited.
 const GENERATOR_CAPACITY = {
   generator: 5,
-  generator_coal: 6,
-  generator_nuclear: 14,
-  generator_wind: 2.5,
-  generator_solar: 2.5,
+  generator_coal: 4.5,
+  generator_nuclear: 19,
+  generator_wind: 11.5,
+  generator_solar: 8.5,
 };
+
+// Battery (RimWorld's PowerNet battery, storedEnergyMax=600/efficiency=0.5, scaled to this
+// codebase's small integer capacity/load units): stores surplus capacity from its segment and
+// releases it back when the segment is short, plugging straight into the connected-graph model
+// above as an always-on conductor (isConductor) that is never itself a source (isSource stays
+// false for it -- see the comment on isConductor). tickBatteries (called once per tick from
+// world.js, BEFORE this tick's overload/hasPoweredBonus checks read it) is the only thing that
+// mutates a battery structure's `storedEnergy`.
+export const BATTERY_STORED_MAX = 20; // full charge, roughly 4x a plain generator's per-tick capacity
+export const BATTERY_CHARGE_RATE = 1.2; // max stored-energy gained per tick from segment surplus
+export const BATTERY_DISCHARGE_RATE = 1.2; // max stored-energy DRAWN per tick to help cover a deficit
+// Real, measured tradeoff (RimWorld's actual battery efficiency stat): only half of what's drawn
+// from storage actually reaches the grid -- the rest is lost. Charging is not lossy (mirrors
+// RimWorld: the efficiency loss is on discharge, not charge).
+export const BATTERY_EFFICIENCY = 0.5;
 
 // Load each powered consumer draws once it's actually receiving the powered bonus (siege.js's
 // POWERED_DAMAGE_MULT/POWERED_RANGE_MULT, world.js's watchtower warning-window boost). Tesla
@@ -253,11 +284,34 @@ function overloadSignature(structures) {
     if (!POWERED_CONSUMER_KINDS.has(s.kind) || s.destroyed || s.underConstruction) continue;
     h = (Math.imul(h, 31) + powerTileKey(s.x, s.y) + 5) | 0;
   }
+  // Batteries' storedEnergy changes every tick they're actively charging/discharging, but their
+  // tile position doesn't -- without folding charge level into the signature, the cache above
+  // would never invalidate for a battery sitting still on an unchanged wire layout, and its
+  // discharge contribution (addBatteryCapacity below) would go stale. Bucketed to one decimal so
+  // floating-point noise doesn't thrash the cache every single tick.
+  for (const s of structures) {
+    if (s.kind !== 'battery' || s.destroyed || s.underConstruction) continue;
+    h = (Math.imul(h, 31) + powerTileKey(s.x, s.y) + Math.round((s.storedEnergy ?? 0) * 10) + 11) | 0;
+  }
   return h;
+}
+
+// Credits each segment with whatever its batteries can discharge RIGHT NOW (current stored
+// charge, capped at BATTERY_DISCHARGE_RATE, after the real efficiency loss) -- read by both
+// isSegmentOverloadedAt/hasPoweredBonus (via computeOverloadState below) so a charged battery
+// genuinely staves off overload, not just cosmetically.
+function addBatteryCapacity(segments, segIdOf, structures) {
+  for (const s of structures) {
+    if (s.kind !== 'battery' || s.destroyed || s.underConstruction) continue;
+    const segId = segIdOf.get(powerTileKey(s.x, s.y));
+    if (segId == null) continue;
+    segments[segId].capacity += Math.min(BATTERY_DISCHARGE_RATE, s.storedEnergy ?? 0) * BATTERY_EFFICIENCY;
+  }
 }
 
 function computeOverloadState(structures) {
   const { segments, segIdOf } = computeSegments(structures);
+  addBatteryCapacity(segments, segIdOf, structures);
   const nuclearBuckets = new Map(); // nuclear generator tileKey -> wireless load fed to it
   const nuclearCapacity = GENERATOR_CAPACITY.generator_nuclear;
 
@@ -343,4 +397,59 @@ export function overloadedSupplyKeys(structures) {
   for (const seg of segments) if (seg.load > seg.capacity) keys.add('seg:' + seg.id);
   for (const [k, load] of nuclearBuckets) if (load > nuclearCapacity) keys.add('nuc:' + k);
   return keys;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Battery storage tick (call once per world tick, BEFORE this tick's overload/hasPoweredBonus
+// reads -- see world.js). Deliberately uses RAW generator capacity vs. load here (NOT
+// addBatteryCapacity's battery-inclusive numbers above) to decide how much to charge/discharge --
+// otherwise a battery would be reacting to a segment capacity that already includes its own
+// pledged discharge, which is circular. This keeps it simple and one-directional: batteries
+// charge off genuine generator surplus, and discharge to help cover genuine generator shortfall;
+// what they contribute back to the overload check is a separate, later read (addBatteryCapacity).
+function computeSegmentLoads(structures) {
+  const { segments, segIdOf } = computeSegments(structures);
+  for (const s of structures) {
+    if (!POWERED_CONSUMER_KINDS.has(s.kind) || s.destroyed || s.underConstruction) continue;
+    // Same nuclear-wireless-bypass rule as computeOverloadState above: a consumer inside a
+    // reactor's wireless radius draws from the reactor directly, never counted against a
+    // wire-segment's battery here.
+    let nearNuclear = false;
+    for (const gen of structures) {
+      if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction) continue;
+      if (Math.hypot(gen.x - s.x, gen.y - s.y) <= NUCLEAR_WIRELESS_RADIUS) { nearNuclear = true; break; }
+    }
+    if (nearNuclear) continue;
+    const segId = findSegmentIdForConsumer(s.x, s.y, segIdOf);
+    if (segId != null) segments[segId].load += consumerLoad(s.kind);
+  }
+  return { segments, segIdOf };
+}
+
+// Mutates every live battery's `storedEnergy` by one tick: charges from real surplus (generator
+// capacity minus load, capped at BATTERY_CHARGE_RATE and remaining headroom, no loss), or
+// discharges to help cover a real deficit (capped at BATTERY_DISCHARGE_RATE worth of DELIVERED
+// power, which costs double that much in drawn storage per BATTERY_EFFICIENCY -- the real,
+// measured "half of stored power is lost" tradeoff). A segment with multiple batteries just runs
+// this per-battery in structure order -- simple, deterministic, good enough at this scale.
+export function tickBatteries(structures) {
+  const { segments, segIdOf } = computeSegmentLoads(structures);
+  for (const s of structures) {
+    if (s.kind !== 'battery' || s.destroyed || s.underConstruction) continue;
+    if (s.storedEnergy == null) s.storedEnergy = 0;
+    const segId = segIdOf.get(powerTileKey(s.x, s.y));
+    if (segId == null) continue;
+    const seg = segments[segId];
+    const balance = seg.capacity - seg.load; // positive = surplus, negative = deficit
+    if (balance > 0) {
+      const room = BATTERY_STORED_MAX - s.storedEnergy;
+      const charge = Math.min(BATTERY_CHARGE_RATE, balance, room);
+      if (charge > 0) s.storedEnergy += charge;
+    } else if (balance < 0) {
+      const neededDelivered = Math.min(BATTERY_DISCHARGE_RATE, -balance);
+      const neededDrawn = neededDelivered / BATTERY_EFFICIENCY;
+      const drawn = Math.min(neededDrawn, s.storedEnergy);
+      s.storedEnergy = Math.max(0, s.storedEnergy - drawn);
+    }
+  }
 }

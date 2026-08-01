@@ -10,6 +10,10 @@ import { StaffRoleKind, rngInt } from './core.js';
 import { damageAttacker, DamageType } from './siege.js';
 import { JobState } from './jobs.js';
 import { ZoneKind } from './zones.js';
+// Staff Vetting research node (research.js) -- lowers the crooked-staff ratio, see the
+// corruption section near the bottom of this file. research.js precedes security.js in
+// build.py's ORDER, so this named import is safe in the flat-concatenated bundle too.
+import { isNodeUnlocked } from './research.js';
 
 export const AlertLevel = Object.freeze({
   Calm: 0,
@@ -59,6 +63,13 @@ export class StaffRoster {
     this._patrolIndexById = new Map(); // citizenId -> index of the waypoint currently being walked to
     this._patrolPauseById = new Map(); // citizenId -> ticks spent paused at the current waypoint
     this._offDutyById = new Set(); // citizenId currently clocked off, recovering hunger/rest like a normal citizen
+
+    // Corrupt/bribable staff (Prison Architect's "Crooked Guards", reskinned -- see the
+    // tickStaffCorruption doc comment near the bottom of this file for the full mechanic).
+    this._corruptEvaluated = new Set();     // citizenId already run through the one-time hire-ratio roll
+    this._corruptEligible = new Set();      // citizenId flagged "crooked" -- capable of going actively corrupt
+    this._corruptActiveUntil = new Map();   // citizenId -> tick an active bribe period ends
+    this._corruptDiscovered = new Set();    // citizenId caught mid-bribe, awaiting the player firing them
   }
 
   // post may be a single {x, y} (backward compat / old save shape) or an array of 2-4 {x, y}
@@ -119,6 +130,11 @@ export class StaffRoster {
   equip(citizenId, tier) {
     this._weaponById.set(citizenId, tier);
   }
+
+  // ---- corrupt/bribable staff (see tickStaffCorruption below) ----
+  isCorruptEligible(citizenId) { return this._corruptEligible.has(citizenId); }
+  isCorruptActive(citizenId) { return this._corruptActiveUntil.has(citizenId); }
+  isCorruptDiscovered(citizenId) { return this._corruptDiscovered.has(citizenId); }
 }
 
 // Armory issuance (scoped version per FEATURE_RESEARCH.md: no per-citizen pick-a-tier UI --
@@ -249,11 +265,16 @@ export function deriveAlertLevel(attackerAliveCount) {
 }
 
 const DOG_RANGE = 2.5; const DOG_DAMAGE = 0.08; const DOG_COOLDOWN = 3; const DOG_SPEED = 0.07;
+// Bites carry the lowest armorPenetration of any damage source in the game (siege.js's
+// TURRET/GUARD/TESLA/TRAP/SNIPER_PENETRATION constants) -- a dog is cheap/fast, not armor-piercing.
+const DOG_PENETRATION = 10;
 
 // K9 units: each dog follows its handler loosely and bites the nearest attacker in range,
 // fast and cheap per-hit compared to a guard's sidearm -- matches the GDD's non-carceral
 // civil-protection-force framing ("guards/snipers/K9/CCTV", never inmates).
-export function tickDogs(dogs, citizens, roster, attackers, onScrap) {
+// rng: threaded through to siege.js's armor-vs-penetration roll for determinism; defaults to
+// Math.random so existing call sites (tests/console pokes) keep working unchanged.
+export function tickDogs(dogs, citizens, roster, attackers, onScrap, rng = Math.random) {
   for (const dog of dogs) {
     const ownerIdx = findCitizenIndexById(citizens, dog.ownerId);
     if (ownerIdx < 0 || !citizens.isAliveAt(ownerIdx)) continue;
@@ -275,7 +296,7 @@ export function tickDogs(dogs, citizens, roster, attackers, onScrap) {
     }
     if (bestI >= 0) {
       dog.cooldown = DOG_COOLDOWN;
-      if (damageAttacker(attackers, bestI, DOG_DAMAGE, DamageType.Kinetic)) onScrap?.(4);
+      if (damageAttacker(attackers, bestI, DOG_DAMAGE, DamageType.Kinetic, DOG_PENETRATION, rng)) onScrap?.(4);
     }
   }
 }
@@ -369,4 +390,198 @@ export function tickDogBreeding(dogs, rng, currentTick) {
   while (bIdx === aIdx && tries < 5) { bIdx = rngInt(rng, 0, dogs.length); tries++; }
   const a = dogs[aIdx], b = dogs[bIdx];
   dogs.push({ ownerId: null, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, cooldown: 0 });
+}
+
+// --- Corrupt/bribable staff (Prison Architect's "Crooked Guards" -- crookedguards_settings.txt,
+// reskinned as an integrity problem in a civil protection force, never a prison mechanic) ---
+//
+// Real numbers this was ported from, and how they map onto this project's tick rate/economy:
+//  - "Corrupt Every Nth Hired Guard 6" / "Crooked Guards to Normal Guards Ratio 0.1667": every
+//    corruption-eligible staff member assigned to the roster (Guard/Sniper/Monitor -- the roles
+//    that actually stand a post with something worth diverting, unlike a K9Handler) is evaluated
+//    exactly once, the first tick they're seen, with a CORRUPTION_BASE_RATIO (1/6) chance of
+//    being permanently flagged "crooked". That flag doesn't mean they're actively doing anything
+//    yet -- see the periodic roll below.
+//  - "30% chance per ~10-real-day interval": PA's real-day pacing translated onto this project's
+//    own day length (schedule.js's DAY_NIGHT_CYCLE_TICKS = 2400 ticks/day at 10Hz, hardcoded
+//    below rather than imported -- see the note on CORRUPTION_ROLL_INTERVAL_TICKS) -- every 10
+//    in-game days, every currently-eligible-but-not-already-active crooked staffer rolls a 30%
+//    chance to actually go active and start a bribe period.
+//  - "48 real-hours" bribe duration -> 2 of this project's days (4800 ticks). While active, the
+//    corrupt staffer secretly diverts a small amount of scrap from the settlement's stockpile,
+//    same "quiet drain" shape as the real mechanic's contraband smuggling, reskinned as scrap
+//    diversion since this settlement has no prisoners to smuggle contraband to.
+//  - "Reward for firing a corrupt guard ~500" -> scaled ~40x down to this project's scrap economy
+//    (BUILD_COST tops out in the 40-90 range for most buildables) -> CORRUPTION_FIRE_REWARD (13).
+//
+// Population gate: Prison Architect's real settings gate this off total guard count; the task
+// spec asks to gate on faction/clique population >=10 if a concurrently-developed src/factions.js
+// exists by the time this lands. Re-checked right before wiring this into world.js -- factions.js
+// DOES now exist (a concurrent pass built it this session), so this hooks into it via
+// corruptionPopulationGateMet below rather than the plain-citizen-count fallback. No import of
+// factions.js needed here (avoids any bundler-ordering question, see the GAME_DAY_TICKS note
+// above) -- it just duck-types world.factions, which is undefined/absent for any world built
+// before factions.js existed, in which case it falls back to total living citizen population.
+const CORRUPTION_POP_GATE = 10;
+
+function corruptionPopulationGateMet(world) {
+  if (world.factions) {
+    // factions.js's FactionState tracks clique membership directly (memberOf: citizenId -> clique
+    // id) -- that IS the "faction/clique population" the task spec asks to gate on, once cliques
+    // have actually formed (they don't recruit anyone before FACTION_MIN_POPULATION, so
+    // memberOf.size is 0 right up until formation, then jumps to the full alive population).
+    return world.factions.formed && world.factions.memberOf.size >= CORRUPTION_POP_GATE;
+  }
+  let alive = 0;
+  for (let i = 0; i < world.citizens.count; i++) if (world.citizens.isAliveAt(i)) alive++;
+  return alive >= CORRUPTION_POP_GATE;
+}
+const CORRUPTION_ELIGIBLE_ROLES = new Set([StaffRoleKind.Guard, StaffRoleKind.Sniper, StaffRoleKind.Monitor]);
+const CORRUPTION_BASE_RATIO = 1 / 6;    // "Crooked Guards to Normal Guards Ratio 0.1667"
+const CORRUPTION_VETTED_RATIO = 0.10;   // reduced ratio once Staff Vetting (research.js) is unlocked
+// Hardcoded rather than `import { DAY_NIGHT_CYCLE_TICKS } from './schedule.js'`: schedule.js
+// comes AFTER security.js in build.py's ORDER, and these are top-level `const` expressions
+// evaluated the instant this file's section of the flat-concatenated bundle runs -- importing a
+// later-ordered module's binding here would read as undefined in the bundle (works fine as real
+// ES modules, since those resolve lazily, but this project's file:// bundle doesn't). Keep this
+// literal in sync with schedule.js's DAY_NIGHT_CYCLE_TICKS (2400) if that ever changes.
+const GAME_DAY_TICKS = 2400;
+const CORRUPTION_ROLL_INTERVAL_TICKS = 10 * GAME_DAY_TICKS; // "~10-real-day interval"
+const CORRUPTION_ROLL_CHANCE = 0.30;
+const CORRUPTION_BRIBE_DURATION_TICKS = 2 * GAME_DAY_TICKS; // "48 real-hours"
+const CORRUPTION_DIVERSION_INTERVAL_TICKS = 60; // how often an active bribe siphons scrap
+const CORRUPTION_DIVERSION_AMOUNT = 0.6; // small per-siphon amount -- a few scrap over a full bribe window
+const CORRUPTION_DISCOVERY_CHECK_INTERVAL_TICKS = 240; // ~1 in-game hour (GAME_DAY_TICKS/10)
+const CORRUPTION_DISCOVERY_CHANCE = 0.05; // per check, only while a bribe is actively running
+export const CORRUPTION_FIRE_REWARD = 13; // real ~500, scaled ~40x to this project's scrap economy
+
+function corruptionRatio(world) {
+  return isNodeUnlocked(world.research, 'staff_vetting') ? CORRUPTION_VETTED_RATIO : CORRUPTION_BASE_RATIO;
+}
+
+// Called once per world tick (world.js). Cheap: iterates the roster (small) and, at most once
+// every CORRUPTION_ROLL_INTERVAL_TICKS, the (small) eligible set -- never the full citizen store
+// except via the one population-gate count and the per-active-bribe lookups below, both bounded
+// by roster size in practice.
+export function tickStaffCorruption(world) {
+  const roster = world.roster;
+  const store = world.citizens;
+
+  if (!corruptionPopulationGateMet(world)) return;
+
+  // One-time hire-ratio evaluation: any corruption-eligible-role staff member not yet evaluated
+  // gets exactly one roll, right here, the first tick after they're seen on the roster --
+  // functionally equivalent to rolling "at hire time" without needing every call site that ever
+  // assigns a Guard/Sniper/Monitor (world.js's constructor, a future hire UI, deserialize) to
+  // remember to hook into this system directly.
+  for (const [id, kind] of roster._roleById.entries()) {
+    if (!CORRUPTION_ELIGIBLE_ROLES.has(kind)) continue;
+    if (roster._corruptEvaluated.has(id)) continue;
+    roster._corruptEvaluated.add(id);
+    if (world.rng() < corruptionRatio(world)) roster._corruptEligible.add(id);
+  }
+
+  // Periodic bribe-activation roll.
+  if (world.currentTick % CORRUPTION_ROLL_INTERVAL_TICKS === 0) {
+    for (const id of roster._corruptEligible) {
+      if (roster._corruptActiveUntil.has(id)) continue; // already mid-bribe
+      if (roster._corruptDiscovered.has(id)) continue;  // caught, awaiting the player firing them
+      const idx = findCitizenIndexById(store, id);
+      if (idx < 0 || !store.isAliveAt(idx)) continue;
+      if (world.rng() < CORRUPTION_ROLL_CHANCE) {
+        roster._corruptActiveUntil.set(id, world.currentTick + CORRUPTION_BRIBE_DURATION_TICKS);
+      }
+    }
+  }
+
+  // Active bribes: periodic scrap diversion + a chance of being caught.
+  for (const [id, untilTick] of Array.from(roster._corruptActiveUntil.entries())) {
+    const idx = findCitizenIndexById(store, id);
+    if (idx < 0 || !store.isAliveAt(idx) || world.currentTick >= untilTick) {
+      roster._corruptActiveUntil.delete(id); // bribe period lapsed naturally (still eligible for a future roll)
+      continue;
+    }
+    if (world.currentTick % CORRUPTION_DIVERSION_INTERVAL_TICKS === 0) {
+      const amt = Math.min(world.scrap, CORRUPTION_DIVERSION_AMOUNT);
+      if (amt > 0) {
+        world.scrap -= amt;
+        world.finance.corruptionLoss = (world.finance.corruptionLoss || 0) + amt;
+      }
+    }
+    if (!roster._corruptDiscovered.has(id) && world.currentTick % CORRUPTION_DISCOVERY_CHECK_INTERVAL_TICKS === 0) {
+      if (world.rng() < CORRUPTION_DISCOVERY_CHANCE) {
+        roster._corruptDiscovered.add(id);
+        const name = store.name[idx];
+        const text = `${name} was caught quietly diverting supplies -- fire them for a reward, or leave them on duty`;
+        world.milestoneLog.push({ tick: world.currentTick, text });
+        if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+        world.onRandomEvent?.(text);
+      }
+    }
+  }
+}
+
+// Player-facing mitigation: fires a discovered-corrupt staffer off the roster entirely (back to
+// being a plain citizen, not removed from the settlement -- this is a firing, not a punishment,
+// matching the non-carceral framing) and grants the scrap reward. Only works once the staffer has
+// actually been caught (see tickStaffCorruption's discovery roll above) -- a merely "eligible"
+// (never-activated, or activated-but-undiscovered) staffer can't be preemptively fired on
+// suspicion alone, mirroring the real mechanic's "reward for firing A corrupt guard" (i.e. one
+// that's been caught), not a witch-hunt tool. Returns { ok, reward, kind } or { ok: false }.
+export function fireCorruptStaff(world, citizenId) {
+  const roster = world.roster;
+  if (!roster._corruptDiscovered.has(citizenId)) return { ok: false };
+
+  const kind = roster._roleById.get(citizenId);
+  roster._corruptDiscovered.delete(citizenId);
+  roster._corruptActiveUntil.delete(citizenId);
+  roster._corruptEligible.delete(citizenId); // fired for cause -- no longer on the roster to be re-bribed
+  roster._roleById.delete(citizenId);
+  roster._postById.delete(citizenId);
+  roster._weaponById.delete(citizenId);
+  roster._patrolIndexById.delete(citizenId);
+  roster._patrolPauseById.delete(citizenId);
+  roster._offDutyById.delete(citizenId);
+
+  world.addScrap(CORRUPTION_FIRE_REWARD);
+  const idx = findCitizenIndexById(world.citizens, citizenId);
+  const name = idx >= 0 ? world.citizens.name[idx] : 'A staffer';
+  const text = `${name} was fired for corruption -- ${CORRUPTION_FIRE_REWARD} scrap reward`;
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+  return { ok: true, reward: CORRUPTION_FIRE_REWARD, kind };
+}
+
+// Debug/soak-test helpers (see main.js's window.__debug.security): the real bribe-activation
+// roll only runs every CORRUPTION_ROLL_INTERVAL_TICKS (~24000 ticks, 10 in-game days) -- far
+// longer than a practical manual soak test. These let a verification pass force the same logic
+// immediately without waiting, without duplicating it.
+export function forceCorruptionRoll(world) {
+  const roster = world.roster;
+  const store = world.citizens;
+  let activated = 0;
+  for (const id of roster._corruptEligible) {
+    if (roster._corruptActiveUntil.has(id)) continue;
+    if (roster._corruptDiscovered.has(id)) continue;
+    const idx = findCitizenIndexById(store, id);
+    if (idx < 0 || !store.isAliveAt(idx)) continue;
+    if (world.rng() < CORRUPTION_ROLL_CHANCE) {
+      roster._corruptActiveUntil.set(id, world.currentTick + CORRUPTION_BRIBE_DURATION_TICKS);
+      activated++;
+    }
+  }
+  return activated;
+}
+
+// Forces a specific staffer straight to "active bribe" regardless of the eligibility/roll gates
+// above -- for a soak test that wants to verify the diversion/discovery/fire loop deterministically
+// rather than waiting on the 1-in-6 hire ratio and the 30% roll to both land.
+export function forceActivateCorruption(world, citizenId) {
+  const roster = world.roster;
+  if (!roster.isStaff(citizenId)) return false;
+  roster._corruptEvaluated.add(citizenId);
+  roster._corruptEligible.add(citizenId);
+  roster._corruptActiveUntil.set(citizenId, world.currentTick + CORRUPTION_BRIBE_DURATION_TICKS);
+  return true;
 }

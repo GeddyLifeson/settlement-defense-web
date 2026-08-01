@@ -94,9 +94,16 @@ function computeCohesion(world, avgSocialNeed) {
 
   // events is append-ordered ascending by tick, so walking from the end and stopping at the
   // first too-old entry is enough -- no need to scan the whole log every time this runs.
+  // relationships.js's events array also carries `kind: 'fight'` combat-proximity entries
+  // (see that file's logFight/hasFightNearby, used by citizens.js's per-citizen unrest score) --
+  // those aren't a friendship milestone, so they're skipped here rather than inflating Cohesion's
+  // recent-event count. The age check still applies (and can still break the loop) regardless of
+  // kind, since events is ascending by tick and everything before an old entry is also old.
   let recentEvents = 0;
   for (let i = web.events.length - 1; i >= 0; i--) {
-    if (world.currentTick - web.events[i].tick > RECENT_EVENT_WINDOW_TICKS) break;
+    const e = web.events[i];
+    if (world.currentTick - e.tick > RECENT_EVENT_WINDOW_TICKS) break;
+    if (e.kind === 'fight') continue;
     recentEvents++;
   }
   const eventScore = Math.min(1, recentEvents / 6);

@@ -628,6 +628,76 @@ this project going forward.
   there's no UI surfacing skill *levels* distinctly (just a raw number in the inspector panel).
 - CCTV (named in the original GDD) not implemented at all.
 
+## REAL-GAME-FILES DEEP DIVE (this session): DONE, research + full implementation wave both landed
+
+`FEATURE_RESEARCH.md` (referenced throughout this file) was built from web/wiki research, not
+the actual shipped game data. User pushed back explicitly: "you're missing a lot of stuff" and
+asked for a real deep dive into RimWorld's and Prison Architect's actual installed game files via
+Steam (owns both). This supersedes/extends FEATURE_RESEARCH.md -- treat *this* section, not that
+file, as the current source of truth for what's been mined from real data.
+
+**RimWorld**: read directly from `C:\Program Files (x86)\Steam\steamapps\common\RimWorld\Data\`
+-- Core + all 4 DLC, real human-readable Defs XML (StatDefs, NeedDefs, HediffDefs, WorkTypeDefs,
+SkillDefs, TraitDefs, BackstoryDefs, ThingDefs_Buildings, ResearchProjectDefs, PawnKindDefs,
+DamageDefs, WeatherDefs, Storyteller/DifficultyDefs). Only Core was covered this pass -- the 4
+DLCs' own content (Biotech genes/xenotypes, Ideology precepts, Anomaly horror mechanics, Royalty
+titles) is still unexamined, a real next-step if there's appetite for another research wave.
+
+**Prison Architect**: installed via Steam (computer-use, user's explicit choice) mid-session.
+Its actual data ships packed inside RAR archives (`main.dat`/`prisons.dat`/etc, despite the `.dat`
+extension) -- extracted read-only with a legitimately-downloaded 7-Zip (user approved) into a
+scratchpad, yielding 1151 real text/Lua files: `needs.txt`, `research.txt`, `production.txt`,
+`materials.txt`, `calamities.txt`, `gangs.txt`/`gangdemands.txt`, `guardrank_settings.txt`,
+`crookedguards_settings.txt`, `ratsystem.txt`, `firePropagationSystem.txt`,
+`heatstrokesystem.txt`, `deepfreezesystem.txt`, `reform_programs.txt`, `dynamicRep.txt`, plus 24
+real campaign Lua scripts (`riot.lua`, `riot_hostages.lua`, `riot_roulette.lua`, etc) showing
+actual staged-escalation state-machine logic. Full extraction still sits at
+`C:\Users\imarl\AppData\Local\Temp\claude\...\scratchpad\pa_extract\data\` (a temp session
+directory -- may not survive a machine restart; re-extract via 7z from `main.dat` if it's gone,
+the archive itself is untouched at the Steam install path).
+
+**8-agent research pass** (4 RimWorld clusters, 4 PA clusters) read the real files and produced
+concrete numeric gap reports against this codebase -- not implemented directly from those
+reports, but immediately followed by:
+
+**15-agent implementation wave**, all landed and individually soak-tested, covering: needs/mood
+overhaul (real mood-threshold fix 0.12->0.35, stacking mood-events, break-severity tiers,
+cross-need throttling, hunger spiral, a new Hydration need wired to `water.js`), trait/backstory
+work-speed and break-threshold axes, a new Cleaning job category + room-quality flavor text,
+power retune (fixed wind/solar/generator capacity ranking, new battery + power-switch
+buildables), construction time now scales by building tier, weather now affects combat accuracy
++ a new Thunderstorm/lightning-fire mechanic + PA-real difficulty-scaled fire spread, a real
+armor-penetration-vs-armor stochastic combat roll (replacing the old flat multiplier table), a
+RimWorld-style points-budget wave composition (replacing fixed per-slot percentage rolls), a new
+Citizen Support Programs system (`programs.js`, reskinned non-carceral port of PA's reform
+programs), a two-stage production chain (`workshop` buildable), a real research-tree capstone
+node, tiered unrest + per-citizen unrest-proneness scoring + a reward-for-good-crisis-management
+loop, a rival faction/clique system (`factions.js`, reskinned non-carceral port of PA's gangs),
+corrupt/bribable staff + a held-citizen crisis event, and a rat/vermin infestation system
+(`rats.js`) + cold-weather pipe freezing + a heatwave movement-speed penalty.
+
+**Also fixed during this wave**: the wave-spawner's attacker-count formula had its bonus-term
+ramp capped too early (`Math.min(10, waveNumber*1.5)`, hit by wave ~7), which let per-tick
+`strengthFactor` variation invert the intended "later waves are at least as big" ordering once
+two waves were far enough apart in number but close in the flattened bonus term. Raised the ramp
+cap 10 -> 40 in `siege.js`'s `waveCount()`. Confirmed fixed: 89/89 tests now pass (test suite also
+grew from 85 as several agents added real assertions for their own new systems).
+
+**Final integration verification**: clean rebuild, zero duplicate top-level declarations across
+the full bundle, 89/89 `tests/run.html` passing, and a fresh hands-off soak test to game-over:
+22,156 ticks (wave 37, real colony wipe confirmed via `isAliveAt`, not a bug) -- solidly inside
+the established 22-36k baseline despite this being the largest single mechanics wave of the whole
+session. Zero console errors across the full soak.
+
+**Style/art note**: a separate research pass studied RimWorld's/Prison Architect's real sprite
+art (viewed only, nothing copied) and wrote a concrete style brief -- muted 2-4-tone material
+palettes, flat-fill-plus-single-highlight-band shading (current `assets.js` leans more toward
+full gradients than this), bolder/more opaque outlines, chunky low-detail pawn proportions. Not
+yet applied to any actual art -- next art pass should pull from this brief plus a UI/UX-layout
+pass (bottom-docked categorized build palette, top resource bar, tabbed side panels -- studied
+live from RimWorld/PA/SEA:R gameplay) to restructure both the sprite style and panel layout
+together. Neither has been executed yet as of this handoff update.
+
 ## Verification pattern to keep using
 
 1. Edit `src/*.js`

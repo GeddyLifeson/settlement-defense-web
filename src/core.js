@@ -39,6 +39,13 @@ export const StaffRoleKind = Object.freeze({
   Sniper: 'Sniper',
   K9Handler: 'K9Handler',
   Monitor: 'Monitor', // staffs a CCTV Monitor Station, see security.js / world.js wave-warning logic
+  // Structured-program staff roles (see programs.js -- Prison Architect's real reform-program
+  // schema, reskinned non-carceral: a scheduled group class needs a staffer with a real role,
+  // same "hold position" plumbing tickStaffDuty/tickStaffOffDuty already give Guard/Sniper/
+  // Monitor above -- no new staff-AI code needed, just three more role labels).
+  Foreman: 'Foreman',           // Skills Workshop
+  Psychologist: 'Psychologist', // Wellness Counseling
+  Facilitator: 'Facilitator',   // Community Circle
 });
 
 export const TerrainKind = Object.freeze({

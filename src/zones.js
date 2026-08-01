@@ -7,12 +7,21 @@ export const ZoneKind = Object.freeze({
   Bedroom: 1,
   Food: 2,
   Recreation: 3,
+  // Training (programs.js's Skills Workshop -- see rooms.js's RoomRole.Training): a dedicated
+  // zone kind rather than reusing Recreation, since the Skills Workshop program is a distinct
+  // room-role requirement (see the task doc / rooms.js's classifyRoomRole) and jobs.js needs a
+  // zone to path a Foreman-staffed program's attendees toward. Named "Training" rather than
+  // "Workshop" to avoid colliding with the unrelated 'workshop' materials-processing Structure
+  // kind (economy.js/siege.js/jobs.js's Processing job) -- different system, same English word,
+  // kept deliberately distinct here so a player never confuses the two "workshop" features.
+  Training: 4,
 });
 
 export const ZONE_COLOR = {
   [ZoneKind.Bedroom]: 'rgba(90,110,220,0.35)',
   [ZoneKind.Food]: 'rgba(220,160,60,0.35)',
   [ZoneKind.Recreation]: 'rgba(90,200,120,0.35)',
+  [ZoneKind.Training]: 'rgba(200,120,200,0.35)',
 };
 
 export class ZoneGrid {

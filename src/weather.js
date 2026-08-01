@@ -9,19 +9,66 @@
 // as a toast.
 import { roomContaining } from './rooms.js';
 import { HUNGER_DECAY, REST_DECAY } from './citizens.js';
+import { isFlammable, igniteStructure } from './fire.js';
 
+// Fog/Snow (real accuracy/move-speed modifiers) and Thunderstorm (Dry/Rainy split) added per
+// RimWorld's actual WeatherDefs/Weathers.xml data -- see weatherAccuracyMult/weatherMoveSpeedMult
+// below and tickThunderstorm's lightning-ignition hookup into fire.js.
 export const WeatherKind = Object.freeze({
   Clear: 'Clear', Rain: 'Rain', Cold: 'Cold', Heatwave: 'Heatwave',
+  Fog: 'Fog', Snow: 'Snow',
+  ThunderstormDry: 'ThunderstormDry', ThunderstormRainy: 'ThunderstormRainy',
 });
 
 // Weighted so Clear is the common case -- weather is flavor + a modest modifier, not a constant
-// stream of debuffs.
+// stream of debuffs. Thunderstorms are the rarest of all (deliberately dangerous per the task
+// brief, so they shouldn't be common) and Rainy is weighted slightly above Dry to match RimWorld's
+// own DryThunderstorm/RainyThunderstorm relative commonality (rain is the more frequent variant).
 const WEATHER_WEIGHTS = [
   [WeatherKind.Clear, 5],
   [WeatherKind.Rain, 2],
   [WeatherKind.Cold, 1.5],
   [WeatherKind.Heatwave, 1.5],
+  [WeatherKind.Fog, 1],
+  [WeatherKind.Snow, 1],
+  [WeatherKind.ThunderstormDry, 0.4],
+  [WeatherKind.ThunderstormRainy, 0.5],
 ];
+
+// ---------------------------------------------------------------- combat accuracy / move speed
+// Real RimWorld WeatherDefs/Weathers.xml combat-accuracy modifiers (see task brief): Clear 1.0
+// (no entry = no modifier), Rain 0.8, Fog 0.5 (the heaviest single modifier in the game), Snow
+// (Hard) 0.8, RainyThunderstorm inherits Rain's 0.8/0.8 pair. DryThunderstorm carries no accuracy
+// or move penalty of its own in the real game -- its danger is purely the unquenched lightning
+// fires (see tickThunderstorm below), not a combat debuff.
+const WEATHER_ACCURACY = Object.freeze({
+  [WeatherKind.Rain]: 0.8,
+  [WeatherKind.Fog]: 0.5,
+  [WeatherKind.Snow]: 0.8,
+  [WeatherKind.ThunderstormRainy]: 0.8,
+});
+
+/** Map-wide combat-accuracy multiplier for the current weather -- applied symmetrically to
+ *  turret/guard/sniper fire AND attacker hits vs citizens/structures (siege.js), matching
+ *  RimWorld's single map-wide modifier rather than a one-sided player buff/debuff. */
+export function weatherAccuracyMult(weather) {
+  return WEATHER_ACCURACY[weather] ?? 1;
+}
+
+// Real RimWorld move-speed modifiers for the same weather states (Rain 0.9, Snow(Hard) 0.8,
+// RainyThunderstorm 0.8 same as Rain+Snow stacked-equivalent per the task brief).
+const WEATHER_MOVE_SPEED = Object.freeze({
+  [WeatherKind.Rain]: 0.9,
+  [WeatherKind.Snow]: 0.8,
+  [WeatherKind.ThunderstormRainy]: 0.8,
+});
+
+/** Map-wide movement-speed multiplier for the current weather -- used for both citizen wander
+ *  (world.js's tickWander call, previously Rain-only) and attacker approach speed (siege.js's
+ *  tickAttackers), same symmetric application as accuracy above. */
+export function weatherMoveSpeedMult(weather) {
+  return WEATHER_MOVE_SPEED[weather] ?? 1;
+}
 
 const MIN_WEATHER_TICKS = 600;  // ~1 min at 10Hz
 const MAX_WEATHER_TICKS = 1800; // ~3 min at 10Hz
@@ -47,12 +94,35 @@ export function initWeather(world) {
   world._weatherTimer = rollDuration(world.rng);
 }
 
-// Rain: citizens amble slower underfoot -- hooks into tickWander's existing speed parameter
-// (world.js passes this straight through), rather than a parallel movement system.
-export const RAIN_WANDER_SPEED_MULT = 0.8;
-
+// Rain/Snow/RainyThunderstorm: citizens amble slower underfoot -- hooks into tickWander's
+// existing speed parameter (world.js passes this straight through), rather than a parallel
+// movement system. Now a thin alias over the real WEATHER_MOVE_SPEED table above (previously
+// Rain-only at a made-up 0.8 -- kept in sync with the real RimWorld numbers used for combat
+// move-speed too, so citizen wander and attacker approach speed read the same weather the same
+// way).
 export function weatherWanderSpeedMult(weather) {
-  return weather === WeatherKind.Rain ? RAIN_WANDER_SPEED_MULT : 1;
+  return weatherMoveSpeedMult(weather);
+}
+
+// ---------------------------------------------------------------- heatwave movement penalty
+// Real Prison Architect heatstrokeSpeedFactor: 0.75. Unlike Rain (a flat map-wide modifier the
+// instant it starts, see WEATHER_MOVE_SPEED above), the real heatstroke penalty only applies once
+// exposure has actually built up, and only outdoors -- so this is wired in separately rather than
+// folded into weatherWanderSpeedMult's flat per-weather table. "Sustained" reuses the same
+// world._weatherStreakTicks counter tickWeather maintains below for water.js's pipe-freeze tiers
+// (how long the CURRENT weather state has held); "outdoor" reuses the same rooms.js enclosed-room
+// check tickWeatherCitizenEffects already does for Cold/Heatwave's extra need-decay above. Applied
+// from world.js as a per-citizen multiplier passed into citizens.js's tickWander (see that file's
+// tickWander signature) rather than a flat scalar, since the indoor/outdoor split is per-citizen
+// and a flat scalar can't express that -- but it's still the exact same "one constant multiplies
+// the existing wander-speed knob" shape Rain's own code already uses, just evaluated per citizen.
+export const HEATWAVE_WANDER_SPEED_MULT = 0.75; // real PA number
+const HEATWAVE_SUSTAIN_TICKS = 300; // ~30s at 10Hz of continuous Heatwave before the slowdown kicks in
+
+/** True once Heatwave has been the active weather for at least HEATWAVE_SUSTAIN_TICKS in a row.
+ *  world.js reads this once per tick (cheap) rather than recomputing the streak duration itself. */
+export function isHeatwaveSlowdownActive(world) {
+  return world.weather === WeatherKind.Heatwave && (world._weatherStreakTicks || 0) >= HEATWAVE_SUSTAIN_TICKS;
 }
 
 // Cold/Heatwave: modest *extra* need decay on top of whatever tickNeedsAndMood already applied
@@ -97,13 +167,70 @@ export function tickWeather(world) {
     const next = pickWeather(world.rng, world.weather);
     world.weather = next;
     world._weatherTimer = rollDuration(world.rng);
+    // How long the CURRENT weather state has held -- read by water.js's pipe-freeze tiers and
+    // isHeatwaveSlowdownActive above, both of which escalate the longer their trigger weather
+    // persists uninterrupted. Reset to 0 right as the state actually changes.
+    world._weatherStreakTicks = 0;
     const text = `Weather turns to ${next}`;
     world.milestoneLog.push({ tick: world.currentTick, text });
     if (world.milestoneLog.length > 20) world.milestoneLog.shift();
     world.onRandomEvent?.(text);
   }
+  world._weatherStreakTicks = (world._weatherStreakTicks || 0) + 1;
 
   tickWeatherCitizenEffects(world);
+}
+
+// ---------------------------------------------------------------- thunderstorms
+// RimWorld's DryThunderstorm/RainyThunderstorm defs spawn lightning strikes on an
+// `averageInterval` of ~1200 game ticks at RimWorld's real 60 Hz tick rate -- 1200/60 = 20 real
+// seconds between strikes on average. Scaled proportionally to this project's 10 Hz tick rate
+// (see world.js's header comment / ARCHITECTURE.md section 2, and SESSION_HANDOFF.md's "10Hz"
+// references throughout): 1200 * (10/60) = 200 ticks. A strike doesn't guarantee an ignition
+// (LIGHTNING_IGNITE_CHANCE below) and reuses fire.js's exact bed/table/door flammable-target set
+// -- this is deliberately the *same* ignition mechanism as a sparking generator, just with no
+// generator required to trigger it (a lightning strike can hit anywhere on the map), which is
+// the "deliberately dangerous, nothing to put it out" half of the task brief for the Dry variant.
+const LIGHTNING_INTERVAL_TICKS = Math.round(1200 * (10 / 60)); // = 200
+const LIGHTNING_IGNITE_CHANCE = 0.35; // per interval, once due -- averageInterval is a mean, not a guarantee
+// RainyThunderstorm: the rain that comes with it douses fires it (or anything else) starts, same
+// as plain Rain extinguishing fire in the real game -- rolled per burning structure per tick
+// rather than a flat "all fires out instantly" so a fire that just started has a beat before it's
+// necessarily caught, same texture as fire.js's own per-tick damage/spread rolls.
+const RAIN_DOUSE_CHANCE_PER_TICK = 0.12;
+
+/** Thunderstorm hookup: lightning-strike ignition (both variants) + rain-dousing (Rainy variant
+ *  only). Call once per tick from SimWorld.tick(), alongside tickFireIgnition/tickFire -- this
+ *  runs before those so a strike this tick is visible to this same tick's tickFire damage pass. */
+export function tickThunderstorm(world) {
+  const weather = world.weather;
+  const isDry = weather === WeatherKind.ThunderstormDry;
+  const isRainy = weather === WeatherKind.ThunderstormRainy;
+  if (!isDry && !isRainy) return;
+
+  if (isRainy) {
+    for (const s of world.structures) {
+      if (!s.onFire || s.destroyed) continue;
+      if (world.rng() < RAIN_DOUSE_CHANCE_PER_TICK) s.onFire = false; // doused -- nothing left burning to re-ignite off of
+    }
+  }
+
+  if (world.currentTick % LIGHTNING_INTERVAL_TICKS !== 0) return;
+  if (world.rng() >= LIGHTNING_IGNITE_CHANCE) return;
+
+  const candidates = world.structures.filter(
+    (s) => isFlammable(s.kind) && !s.destroyed && !s.underConstruction && !s.onFire
+  );
+  if (candidates.length === 0) return;
+  const target = candidates[Math.floor(world.rng() * candidates.length)];
+  igniteStructure(target);
+
+  const text = isDry
+    ? 'Lightning strikes and ignites a fire -- with no rain, nothing will put it out'
+    : 'Lightning strikes and ignites a fire';
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
 }
 
 // ---------------------------------------------------------------- one-off random events

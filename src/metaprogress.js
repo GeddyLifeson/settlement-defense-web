@@ -44,9 +44,11 @@ export const ACHIEVEMENTS = [
   },
   {
     id: 'full_research', name: 'Master Engineers',
-    // research.js's RESEARCH_NODES is 14 entries as of this writing (3 free "core" nodes shown
-    // for legibility + 11 gated ones) -- "fully researched" means every one of them, not just the
-    // gated tier, so the panel can legitimately say 100%.
+    // research.js's RESEARCH_NODES is 16 entries as of this writing (3 free "core" nodes shown
+    // for legibility + 13 gated ones, including the reactor_engineering capstone) -- "fully
+    // researched" means every one of them, not just the gated tier, so the panel can legitimately
+    // say 100%. This check doesn't hardcode the count (iterates researchNodes.every(...)), so
+    // future additions here don't need this comment updated for correctness, just for accuracy.
     desc: 'Unlock every technology in the research tree.',
   },
   {

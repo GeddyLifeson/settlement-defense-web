@@ -3,26 +3,35 @@
 // rather than needs -- a starting skill nudge plus a "favored skill" that biases which skill(s)
 // this citizen is more likely to burn with Passion (see below). Complements traits.js, doesn't
 // replace it: a citizen has exactly one trait AND exactly one backstory.
+// skillConstructionStart/skillCombatStart double as both the starting bonus AND, when negative,
+// a starting penalty on the *other* tracked skill -- RimWorld routinely pairs a backstory's skill
+// gain with a loss elsewhere (e.g. real RimWorld: Construction +7 / Social -3). Since this project
+// only tracks construction/combat, a construction-favoring backstory can carry a small negative
+// skillCombatStart (and vice versa) instead of leaving the non-favored skill at a flat 0. Both
+// skills feed straight into jobs.js's (1 + skill) rate multiplier, so a negative start reads as a
+// genuine below-baseline penalty, not just "no bonus". At least half of the 8 pairs below carry
+// this tradeoff; the rest stay bonus-only where the flavor reads as a generalist/steady-hands type
+// rather than someone who traded one skill for another.
 export const BACKSTORIES = [
   {
     childhood: 'Farm Kid', adult: 'Ration Clerk',
     description: 'Grew up rationing a failing harvest; now keeps the settlement\'s ledgers straight.',
-    favoredSkill: 'construction', skillConstructionStart: 0.1, skillCombatStart: 0,
+    favoredSkill: 'construction', skillConstructionStart: 0.1, skillCombatStart: -0.05,
   },
   {
     childhood: 'Street Orphan', adult: 'Scrap Runner',
     description: 'Learned to scavenge before they learned to read; still fastest hands on a resource node.',
-    favoredSkill: 'construction', skillConstructionStart: 0.15, skillCombatStart: 0,
+    favoredSkill: 'construction', skillConstructionStart: 0.15, skillCombatStart: -0.05,
   },
   {
     childhood: 'Military Brat', adult: 'Militia Veteran',
     description: 'Grew up on base housing and old war stories; picked up a rifle before they picked a trade.',
-    favoredSkill: 'combat', skillConstructionStart: 0, skillCombatStart: 0.15,
+    favoredSkill: 'combat', skillConstructionStart: -0.05, skillCombatStart: 0.15,
   },
   {
     childhood: 'Gang Runner', adult: 'Reformed Enforcer',
     description: 'Ran errands for a bad crowd as a kid; the violence stuck, the crowd didn\'t.',
-    favoredSkill: 'combat', skillConstructionStart: 0, skillCombatStart: 0.1,
+    favoredSkill: 'combat', skillConstructionStart: -0.03, skillCombatStart: 0.1,
   },
   {
     childhood: 'Bookish Loner', adult: 'Machinist',

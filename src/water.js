@@ -19,7 +19,7 @@ function water_isSource(s) {
 }
 
 function water_isConductor(s) {
-  return (s.kind === 'pipe' || water_isSource(s)) && !s.destroyed && !s.underConstruction;
+  return (s.kind === 'pipe' || water_isSource(s)) && !s.destroyed && !s.underConstruction && !s.frozen;
 }
 
 // Cheap order-sensitive hash of every live conductor's tile+kind, so the O(n) rebuild only runs
@@ -97,4 +97,70 @@ export function isWateredAt(structures, x, y) {
     if (watered.has((tx + dx) * WATER_TILE_STRIDE + (ty + dy))) return true;
   }
   return false;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cold-weather pipe freezing, real Prison Architect numbers: the longer Cold weather persists
+// uninterrupted, the more likely each live pipe/pump tile is to freeze solid on a given check,
+// escalating through three real tiers (0.07/0.17/0.30) plus a +0.05 bonus when the tile sits
+// orthogonally next to another tile that's already frozen (ice spreading along the same run,
+// not an independent roll per tile). A frozen tile simply stops being a conductor (see
+// water_isConductor above) -- no repair job needed, it thaws back out the instant Cold weather
+// actually clears, same "wait out the weather" shape the real PA mechanic has. Flipping `.frozen`
+// on a structure is enough to make wateredTiles() recompute: water_layoutSignature already skips
+// non-conductors when hashing the layout, so a newly-frozen (or newly-thawed) tile changes the
+// hash on its own, no separate cache-bust needed.
+const FREEZE_CHECK_INTERVAL = 100; // ~10s at 10Hz -- rolled periodically, not every tick
+const FREEZE_TIER_TICKS = [0, 400, 900]; // ticks of continuous Cold before each tier below kicks in
+const FREEZE_TIER_CHANCE = [0.07, 0.17, 0.30]; // real PA numbers, escalating with Cold duration
+export const FREEZE_ADJACENT_BONUS = 0.05; // real PA number
+
+function freezeTierChance(coldStreakTicks) {
+  let chance = FREEZE_TIER_CHANCE[0];
+  for (let i = 0; i < FREEZE_TIER_TICKS.length; i++) {
+    if (coldStreakTicks >= FREEZE_TIER_TICKS[i]) chance = FREEZE_TIER_CHANCE[i];
+  }
+  return chance;
+}
+
+/** Call once per tick from SimWorld.tick(), after weather.js's tickWeather so world.weather /
+ *  world._weatherStreakTicks reflect this tick's state. Thaws every frozen pipe/pump instantly
+ *  the moment Cold weather isn't active; otherwise rolls each live, not-yet-frozen tile against
+ *  the current duration-scaled tier chance (+ the adjacency bonus). */
+export function tickPipeFreezing(world) {
+  if (world.weather !== 'Cold') {
+    for (const s of world.structures) {
+      if ((s.kind === 'pipe' || s.kind === 'pump') && s.frozen) s.frozen = false;
+    }
+    return;
+  }
+
+  if (world.currentTick % FREEZE_CHECK_INTERVAL !== 0) return;
+
+  const streak = world._weatherStreakTicks || 0;
+  const chance = freezeTierChance(streak);
+
+  const frozenKeys = new Set();
+  for (const s of world.structures) {
+    if ((s.kind === 'pipe' || s.kind === 'pump') && s.frozen && !s.destroyed) frozenKeys.add(waterTileKey(s.x, s.y));
+  }
+
+  let frozeAny = false;
+  for (const s of world.structures) {
+    if (s.kind !== 'pipe' && s.kind !== 'pump') continue;
+    if (s.destroyed || s.underConstruction || s.frozen) continue;
+    let roll = chance;
+    const tx = Math.floor(s.x), ty = Math.floor(s.y);
+    for (const [dx, dy] of WATER_NEIGHBORS) {
+      if (frozenKeys.has((tx + dx) * WATER_TILE_STRIDE + (ty + dy))) { roll += FREEZE_ADJACENT_BONUS; break; }
+    }
+    if (world.rng() < roll) { s.frozen = true; frozeAny = true; }
+  }
+
+  if (frozeAny) {
+    const text = 'Cold snap freezes part of the water system';
+    world.milestoneLog.push({ tick: world.currentTick, text });
+    if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    world.onRandomEvent?.(text);
+  }
 }

@@ -65,12 +65,29 @@ export const RESEARCH_NODES = [
     unlocks: ['garage_recycling_fossil', 'garage_garbage_fossil', 'garage_recycling', 'garage_garbage'],
     requires: [],
   },
+  {
+    // Real Prison Architect gates its whole SheetMetal -> WorkshopSaw -> WorkshopPress ->
+    // LicensePlate chain behind a single PrisonLabour-equivalent research node, not one node per
+    // station -- mirrored here as one gate for the whole processing chain rather than splitting it.
+    id: 'materials_processing', name: 'Materials Processing', cost: 55,
+    desc: 'A staffed processing station -- raw scrap in, higher-value Components out.',
+    unlocks: ['workshop'], requires: [],
+  },
 
   // ---- gated tier 2 ----
   {
     id: 'small_arms_doctrine', name: 'Small Arms Doctrine', cost: 70,
     desc: 'An armory: standardised weapons issued to the duty roster instead of whatever they found.',
     unlocks: ['armory'], requires: ['field_defense'],
+  },
+  {
+    id: 'staff_vetting', name: 'Staff Vetting', cost: 65,
+    desc: 'Background checks before someone joins the duty roster. Doesn\'t stop a bribe outright, ' +
+      'but cuts down how often someone slips through corruptible in the first place.',
+    // Unlocks nothing buildable -- purely read by security.js's staff-corruption system, which
+    // lowers the fraction of newly-assigned Guard/Sniper/Monitor staff flagged as bribable once
+    // this is researched (see security.js's CORRUPTION_VETTED_RATIO).
+    unlocks: [], requires: ['small_arms_doctrine'],
   },
   {
     id: 'surveillance', name: 'Surveillance', cost: 80,
@@ -110,8 +127,29 @@ export const RESEARCH_NODES = [
   },
   {
     id: 'fission', name: 'Nuclear Fission', cost: 200,
-    desc: 'A reactor and the shielded storage it needs. Enormous power, one very bad failure mode.',
-    unlocks: ['generator_nuclear', 'waste_storage'], requires: ['high_voltage', 'waste_reclamation'],
+    desc: 'Reactor theory and the shielded containment it demands, worked out and buildable -- '
+      + 'the reactor itself is still a step further out.',
+    unlocks: ['waste_storage'], requires: ['high_voltage', 'waste_reclamation'],
+  },
+
+  // ---- gated tier 4 (true capstone) ----
+  // The tree's one deliberate cost outlier: ~23x the cheapest gated node (perimeter_lighting,
+  // 30), echoing the real ~20-100x cheapest->capstone spreads Prison Architect's and RimWorld's
+  // actual research trees show (see research.txt/research_dlc.txt) -- this project's tree is far
+  // shorter than either, so the ratio is scaled down, but there was previously no genuine
+  // capstone tier at all (fission at 200 was only ~6.6x the cheapest node). Deepens the chain
+  // rather than widening it: both prereqs are themselves tier-3 nodes, so reaching this requires
+  // the full high_voltage -> {fission, electric_drivetrain} convergence, not just two cheap
+  // tier-1 picks. The reactor itself (generator_nuclear) -- previously the cheapest-priced
+  // "endgame" unlock in the tree at fission's 200 -- moves here instead of staying at fission, so
+  // the single most powerful generator in the game is now genuinely the most expensive thing to
+  // reach, not a side effect of one mid-tree node.
+  {
+    id: 'reactor_engineering', name: 'Reactor Engineering', cost: 700,
+    desc: 'Turning fission theory into a working reactor. Power output that dwarfs every other '
+      + 'generator in the settlement -- assuming the containment and the grid around it can '
+      + 'actually take the load.',
+    unlocks: ['generator_nuclear'], requires: ['fission', 'electric_drivetrain'],
   },
 ];
 
