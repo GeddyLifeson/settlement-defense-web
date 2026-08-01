@@ -36,3 +36,45 @@ export const TRAITS = [
 export function randomTrait(rng) {
   return TRAITS[Math.floor(rng() * TRAITS.length)];
 }
+
+// ---------------------------------------------------------------- age bands (RimWorld Biotech
+// LifeStageDef, condensed). Real RimWorld LifeStageDefs are just a bundle of flat multipliers
+// keyed by age band (bodySize/health/speed/melee/hunger) -- the exact same shape as the trait
+// multipliers above, so this is a second lookup table of the same kind rather than a parallel
+// system. `age` (citizens.js) is ticks-since-spawn; maxAge is the upper (exclusive) tick bound
+// for a band, Infinity for the last one. Looked up once per citizen per tick and multiplied
+// straight into the SAME rate expressions jobs.js already builds from trait.workSpeedMult
+// (`* ageBandFor(store.age[i]).workSpeedMult`) and siege.js's trait.healthMult (toughness --
+// higher healthMult means LESS damage taken per hit, see siege.js's `DAMAGE / healthMult`).
+//
+// Real RimWorld pre-teen anchor (MoveSpeed x0.85) adapted directionally for an elder band: reduced
+// work-speed (0.85-0.9 range, matching the ask) and a reduced health ceiling/toughness (elders take
+// real hits harder, same shape as a Neurotic/Glutton downside trait). Compensating "wisdom"
+// tradeoff, a genuine deliberate design call rather than pure decline: a real skill-gain-RATE
+// bonus (not a starting-skill bonus -- an elder isn't smarter on day one, they just learn faster
+// from the practice they're already getting, mirroring backstories.js's own Passion mechanic
+// exactly, see PASSION_GAIN_MULT). Applied as `ageBandFor(store.age[i]).skillGainMult` alongside
+// the existing PASSION_GAIN_MULT term at every skill-gain site in jobs.js/siege.js -- multiplicative
+// with passion, not a replacement for it, same "stacks, doesn't override" convention as every other
+// multiplier table in this file.
+export const AGE_BANDS = [
+  // Young: default band, every multiplier at baseline -- a citizen who never crosses either
+  // threshold behaves byte-for-byte as if this feature didn't exist.
+  { name: 'Young', maxAge: 20000, workSpeedMult: 1, healthMult: 1, skillGainMult: 1 },
+  // Veteran: real RimWorld pre-teen MoveSpeed anchor (x0.85) landed at the gentler end of the
+  // requested 0.85-0.9 workSpeedMult range; skillGainMult mirrors backstories.js's own Minor
+  // Passion tier (1.5x) so "experience" reads on the same scale as the existing wisdom-adjacent
+  // mechanic rather than inventing a new one.
+  { name: 'Veteran', maxAge: 45000, workSpeedMult: 0.9, healthMult: 0.95, skillGainMult: 1.5 },
+  // Elder: the top of the requested workSpeedMult range, a further-reduced health ceiling (more
+  // toughness lost than Veteran, same direction as real RimWorld's old-age HP/immunity decline),
+  // and a skillGainMult matching backstories.js's Burning Passion tier (2.5x) -- the "wisdom"
+  // payoff is at its largest exactly where the physical decline is also at its largest, a genuine
+  // tradeoff rather than a strict downgrade.
+  { name: 'Elder', maxAge: Infinity, workSpeedMult: 0.85, healthMult: 0.88, skillGainMult: 2.5 },
+];
+
+export function ageBandFor(age) {
+  for (const band of AGE_BANDS) if (age < band.maxAge) return band;
+  return AGE_BANDS[AGE_BANDS.length - 1];
+}

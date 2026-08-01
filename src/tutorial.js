@@ -321,7 +321,7 @@ function buildHelp() {
   helpBuilt = true;
   el('help-body').innerHTML = HELP_SECTIONS.map(sec =>
     `<section class="help-sec">` +
-      `<h3>${sec.title}</h3>` +
+      `<h3 class="report-section-title">${sec.title}</h3>` +
       (sec.intro ? `<p class="help-intro">${sec.intro}</p>` : '') +
       `<dl>` + sec.items.map(([term, def]) =>
         `<div class="help-row"><dt>${term}</dt><dd>${def}</dd></div>`).join('') + `</dl>` +

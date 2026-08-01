@@ -19,6 +19,7 @@
 import { StaffRoleKind } from './core.js';
 import { RoomRole } from './rooms.js';
 import { ScheduleBlock } from './schedule.js';
+import { addMoodEvent } from './citizens.js';
 
 const MINUTES_TO_TICKS = 2400 / (24 * 60); // see doc comment above
 
@@ -26,6 +27,25 @@ export const ProgramKind = Object.freeze({
   SkillsWorkshop: 'skills_workshop',
   WellnessCounseling: 'wellness_counseling',
   CommunityCircle: 'community_circle',
+  // Community Gathering (RimWorld Ideology DLC's real Party/Festival mechanic, reskinned
+  // non-carceral): a scheduled ONE-TIME group event, not an ongoing multi-session course like the
+  // three programs above. Rides the exact same ProgramSite/isSiteStaffed/findJoinableSite/
+  // completeSession machinery -- the only real difference is numSessions: 1 below (so
+  // completeSession's existing "course complete" check fires the instant a single session ends)
+  // and there's no per-tick applyAttendingTick effect for this kind at all (see that function --
+  // it simply has no branch for CommunityGathering, so attending it discharges nothing tick by
+  // tick). The payoff is entirely in the one-shot mood event fired by completeSession below,
+  // magnitude gated by the room's own computeRoomStats().quality at the moment the session ends.
+  CommunityGathering: 'community_gathering',
+  // Staff training-program track (Prison Architect reform_programs_dlc.txt's real staff-facing
+  // training tracks, distinct from every program above -- those are all citizen-facing). Reuses
+  // the exact same ProgramSite/room-role/staffing/session-loop machinery; the only real
+  // difference is WHO can attend (security.js's tickStaffTraining dispatches on-duty
+  // Guard/Sniper/Monitor staff directly, since staff never reach jobs.js's Idle branch --
+  // world.js's isStaffOnDutyAt gates them out of the citizen-facing findJoinableSite path
+  // entirely) and the payoff (combat-skill gain plus, on full-course graduation, a real reduction
+  // in this specific staffer's own bribery odds -- see completeSession below).
+  GuardResponseTraining: 'guard_response_training',
 });
 
 // PROGRAM_DEFS: the balance table, PA's real numbers (per the task doc) converted into this
@@ -87,9 +107,74 @@ export const PROGRAM_DEFS = Object.freeze({
     hydrationDischargePerTick: 0.015,
     moodGainPerTick: 0.0003,
   }),
+  [ProgramKind.CommunityGathering]: Object.freeze({
+    label: 'Community Gathering',
+    staffRole: StaffRoleKind.Organizer,
+    roomRole: RoomRole.RecreationRoom, // same reuse reasoning as Wellness Counseling/Community
+                                        // Circle above -- a gathering is a Recreation-block event,
+                                        // no dedicated "hall" Structure/RoomRole exists or is needed
+    sessionCost: 3,                               // PA analog: a light one-off social event, cheaper
+                                                    // than the ongoing-discharge programs above
+    places: 8,                                     // a real group event -- matches Community Circle's size
+    sessionLengthTicks: Math.round(60 * MINUTES_TO_TICKS), // one scheduled block, ~1 real hour
+    numSessions: 1,                                // ONE-TIME: the "course" completes the instant
+                                                     // the single session ends -- see completeSession
+    scheduleBlock: ScheduleBlock.Recreation,
+    // RimWorld Ideology's real Party/Festival mood range is roughly -3 (poor venue) / -1 (mediocre)
+    // / +8 (good) / +16 (great) on RimWorld's own mood-point scale -- scaled 1:1 onto this
+    // project's 0-1 mood scale (i.e. /100) per the task brief, tiered off the room's
+    // computeRoomStats().quality (0..1) at the moment the session ends. See
+    // GATHERING_MOOD_TIERS/gatheringMoodMagnitude below -- kept here as documentation of the real
+    // anchor numbers, the actual tier table lives next to the function that reads it.
+    gatheringMoodDurationTicks: 1000, // ~half this project's DAY_NIGHT_CYCLE_TICKS -- a festival's
+                                       // afterglow (or letdown) fades over the following day, not
+                                       // instantly and not forever
+  }),
+  [ProgramKind.GuardResponseTraining]: Object.freeze({
+    label: 'Guard Response Training',
+    staffRole: StaffRoleKind.Instructor,
+    // Reuses Skills Workshop's RoomRole.Training -- a training room can validate BOTH a citizen
+    // Skills Workshop site and this staff-facing site at once (syncProgramSites makes one
+    // ProgramSite per (room, matching kind) pair), same as how RecreationRoom already hosts three
+    // different citizen program kinds simultaneously above. No dedicated "armory classroom" role
+    // is needed for this.
+    roomRole: RoomRole.Training,
+    sessionCost: 6,                                // between Community Circle (4) and Skills Workshop (8)
+    places: 2,                                      // a small drill pairing, not a whole-roster muster
+    sessionLengthTicks: Math.round(90 * MINUTES_TO_TICKS), // PA SessionLength 60-120 real-minutes, same range as Wellness/Community Circle
+    numSessions: 4,
+    scheduleBlock: ScheduleBlock.Work,              // a duty-shift drill, not off-hours recreation
+    // Direct combat-skill boost per tick attended -- same shape/scale as SkillsWorkshop's
+    // skillGainPerTick above but targeting skillCombat, the stat this trainee's actual job (guard
+    // duty) draws on.
+    skillGainPerTick: 0.02 / Math.round(90 * MINUTES_TO_TICKS) * 6,
+  }),
 });
 
-export const PROGRAM_ORDER = [ProgramKind.SkillsWorkshop, ProgramKind.WellnessCounseling, ProgramKind.CommunityCircle];
+export const PROGRAM_ORDER = [
+  ProgramKind.SkillsWorkshop, ProgramKind.WellnessCounseling, ProgramKind.CommunityCircle,
+  ProgramKind.CommunityGathering, ProgramKind.GuardResponseTraining,
+];
+
+// Community Gathering's mood-magnitude ladder (see the PROGRAM_DEFS.gatheringMoodDurationTicks
+// doc comment above for the real RimWorld Party/Festival numbers this is anchored on): poor-quality
+// venue gives a small negative, good-to-great gives the +0.08..+0.16 positive range the task brief
+// asked for. Tiers checked ascending, last matching one wins (same pattern as citizens.js's
+// breakTierForDepth).
+const GATHERING_MOOD_TIERS = [
+  { minQuality: 0, magnitude: -0.03 },   // poor room (RimWorld's -3 real points / 100)
+  { minQuality: 0.3, magnitude: -0.01 }, // mediocre (RimWorld's -1 real points / 100)
+  { minQuality: 0.5, magnitude: 0.08 },  // good (RimWorld's +8 real points / 100)
+  { minQuality: 0.75, magnitude: 0.16 }, // great (RimWorld's +16 real points / 100)
+];
+
+export function gatheringMoodMagnitude(quality) {
+  let magnitude = GATHERING_MOOD_TIERS[0].magnitude;
+  for (const tier of GATHERING_MOOD_TIERS) {
+    if (quality >= tier.minQuality) magnitude = tier.magnitude; else break;
+  }
+  return magnitude;
+}
 
 // One ProgramSite per validated room matching a program kind's roomRole. Sites are synced (not
 // rebuilt) so an assigned staffId/attendee list survives room stat recomputation each tick --
@@ -173,6 +258,10 @@ function citizenBenefits(kind, store, i) {
   if (kind === ProgramKind.SkillsWorkshop) return store.skillConstruction[i] < 2.5; // below "Master", see main.js SKILL_LEVELS
   if (kind === ProgramKind.WellnessCounseling) return store.mood[i] < 0.75;
   if (kind === ProgramKind.CommunityCircle) return store.social[i] < 0.85 || (store.hydration != null && store.hydration[i] < 0.85);
+  // Community Gathering: broader gate than the other three, matching a real "everyone's invited"
+  // social event rather than a targeted need-refill -- benefits anyone not already thoroughly
+  // content, same threshold style as WellnessCounseling's mood gate just above.
+  if (kind === ProgramKind.CommunityGathering) return store.mood[i] < 0.9 || store.social[i] < 0.9;
   return false;
 }
 
@@ -181,7 +270,11 @@ function citizenBenefits(kind, store, i) {
 // for citizen i to walk to. Returns the site if one was found and claimed (attendeeIds gains i's
 // citizenId as a placeholder reservation -- see jobs.js SeekingProgram/Attending handling for how
 // it actually gets added for real on arrival), or null.
-export function findJoinableSite(world, store, i, scheduleBlock) {
+// isAllowed: optional (x, y) -> bool predicate (jobs.js's per-citizen Allowed Area check) --
+// checked against the site's actual post tile (roomPostFor), since that's where the citizen
+// would actually have to walk to. Omitted for every pre-existing call site, byte-for-byte the
+// old behavior.
+export function findJoinableSite(world, store, i, scheduleBlock, isAllowed = null) {
   if (!world.programSites) return null;
   for (const site of world.programSites) {
     const def = PROGRAM_DEFS[site.kind];
@@ -189,6 +282,10 @@ export function findJoinableSite(world, store, i, scheduleBlock) {
     if (site.attendeeIds.length >= def.places) continue;
     if (!isSiteStaffed(world, site)) continue;
     if (!citizenBenefits(site.kind, store, i)) continue;
+    if (isAllowed) {
+      const post = roomPostFor(site.room, world.grid);
+      if (!isAllowed(post.x, post.y)) continue;
+    }
     return site;
   }
   return null;
@@ -207,6 +304,8 @@ export function applyAttendingTick(site, store, i) {
     store.social[i] = Math.min(1, store.social[i] + def.socialDischargePerTick);
     if (store.hydration != null) store.hydration[i] = Math.min(1, store.hydration[i] + def.hydrationDischargePerTick);
     store.mood[i] = Math.min(1, store.mood[i] + def.moodGainPerTick);
+  } else if (site.kind === ProgramKind.GuardResponseTraining) {
+    store.skillCombat[i] += def.skillGainPerTick;
   }
 }
 
@@ -223,9 +322,37 @@ export function completeSession(world, site, store, i, sessionsDone) {
   // framing; Skills Workshop/Community Circle always "graduate" since their whole benefit is the
   // continuous per-tick effect already applied above, not a pass/fail outcome).
   let graduated = true;
+  let moodMagnitude;
   if (site.kind === ProgramKind.WellnessCounseling) {
     graduated = (world.rng ? world.rng() : Math.random()) * 100 < def.difficultyPct;
     if (graduated) store.mood[i] = Math.min(1, store.mood[i] + def.graduationMoodBonus);
+  } else if (site.kind === ProgramKind.CommunityGathering) {
+    // ONE-TIME completion mood event (see the ProgramKind.CommunityGathering doc comment above):
+    // unlike every other program kind here, this has no continuous applyAttendingTick effect at
+    // all -- the whole payoff is this single addMoodEvent, magnitude gated by the room's current
+    // computeRoomStats().quality (site.room.quality, recomputed every tick by world.js before
+    // programs are ticked, so this reads a fresh value, not a stale one from claim time).
+    const quality = site.room?.quality ?? 0.5;
+    moodMagnitude = gatheringMoodMagnitude(quality);
+    graduated = moodMagnitude > 0; // reused purely as a "went well" flag for jobs.js's flavor text
+    addMoodEvent(store, i, world.currentTick, {
+      magnitude: moodMagnitude,
+      durationTicks: def.gatheringMoodDurationTicks,
+      stackKey: 'communityGathering',
+    });
+  } else if (site.kind === ProgramKind.GuardResponseTraining) {
+    // Always "graduates" -- the combat-skill gain already happened tick-by-tick in
+    // applyAttendingTick above, same always-succeeds framing as SkillsWorkshop/CommunityCircle.
+    // Real PA anchor for the graduation payoff (task brief: "reducing corrupt-staff chance"):
+    // clears this specific staffer's crooked-eligible flag on the roster if they had one --
+    // security.js's tickStaffCorruption never rolls a bribe-activation for anyone not in
+    // roster._corruptEligible, so this is a real, permanent, per-citizen reduction in their own
+    // future bribery odds, not a colony-wide stat tweak.
+    graduated = true;
+    const citizenId = store.id[i];
+    if (world.roster?.isCorruptEligible(citizenId)) {
+      world.roster._corruptEligible.delete(citizenId);
+    }
   }
-  return { courseComplete: true, graduated };
+  return { courseComplete: true, graduated, moodMagnitude };
 }

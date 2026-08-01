@@ -1,19 +1,41 @@
 // Ported/condensed from SD.Sim (CitizenStore, NeedsDecaySystem, NeedsMoodBreakTickGroup,
 // SocialInteractionSystem). Struct-of-arrays store, same shape as the C# CitizenStore.
-import { randomTrait } from './traits.js';
-import { roomContaining } from './rooms.js';
+import { randomTrait, ageBandFor } from './traits.js';
+import { roomContaining, RoomRole } from './rooms.js';
 import { randomBackstory, randomPassions } from './backstories.js';
 import { isWateredAt } from './water.js';
+import { StaffRoleKind } from './core.js';
 
 export const CitizenFlags = Object.freeze({
   None: 0,
   Dead: 1 << 0,
   OnBreak: 1 << 1,
   Downed: 1 << 2, // incapacitated but alive (RimWorld-style) -- see siege.js for the transition rules
+  Drafted: 1 << 3, // RimWorld-style manual control -- see draft.js for the full command system this
+                    // flag gates. A drafted citizen is pulled out of jobs.js's autonomous
+                    // priority state machine entirely (jobs.js checks this flag first thing in
+                    // tickJobs) and only moves/fights on a direct player order.
 });
 
 const DOWNED_RECOVERY_RATE = 0.0015; // per tick, passive -- no dedicated first-aid job yet
-const DOWNED_RECOVER_THRESHOLD = 0.3;
+// Exported so coverageplans.js's Medical Response Plan call-in can stabilize a downed citizen to
+// exactly the same "no longer incapacitated" bar this file already uses, rather than duplicating
+// the number.
+export const DOWNED_RECOVER_THRESHOLD = 0.3;
+// First-aid tending (jobs.js's JobState.SeekingTend/Tending): a citizen with construction or
+// combat skill invested can walk to and actively tend a Downed ally, swapping the passive rate
+// above for this one -- real RimWorld tending gives roughly a 4x recovery-speed bonus over
+// untended healing, mirrored here as a flat 4x (0.0015 * 4 = 0.006). store.beingTended (set by
+// jobs.js's Tending job tick, read-then-cleared here every tick -- see the doc comment at its use
+// below) is the single signal this file needs; it doesn't need to know jobs.js's JobState values.
+const TEND_RECOVERY_RATE = 0.006;
+// Infirmary bonus (rooms.js RoomRole.Medical, PA full prefab/object catalog): a tended citizen
+// recovers faster while inside a validated Medical room (a Medical zone + at least 1 Medical Bed,
+// see rooms.js's classifyRoomRole) -- RimWorld's real hospital-bed medical-tend-quality bonus is
+// the closest real analog, mirrored here as a flat 2x on top of the active-tend rate (only
+// stacks with an actual tender present; an untended Downed citizen gets no bonus from merely
+// lying in the room, matching "Medical" being about treatment quality, not passive rest).
+const MEDICAL_ROOM_TEND_MULT = 2;
 
 // Exported so weather.js can scale its extra Cold/Heatwave decay proportionally to these base
 // rates rather than hardcoding a second copy of the numbers.
@@ -54,6 +76,22 @@ const HYDRATION_BURST_REFILL = 0.2; // per tick while on/adjacent to a watered t
 // hunger/rest/social, rather than a separate raw additive term -- see that function's doc
 // comment for why an earlier raw-additive version of this destabilized a fresh colony badly.
 
+// ---------------------------------------------------------------- exercise (PA's Exercise need)
+// Real Prison Architect data (needs.txt): gym equipment refills Exercise in a fast burst while
+// actively used -- Treadmill/TyreApparatus at the high end (-3.0/tick), PullUpBars/PushUpStones/
+// GymMat at the low end (-0.3 to -1.5/tick) -- on top of a slow ambient per-tick drain, the same
+// two-speed shape this codebase already uses for every other need (a slow *_DECAY drain here vs.
+// jobs.js's REFILL_RATE fast active-use refill). Consolidated into ONE new buildable for v1 (the
+// Fitness Station, siege.js Structure kind 'fitness_station') standing in for PA's whole ~10-object
+// gym-equipment catalog, matching the same real-object-consolidation precedent every other
+// buildable in this codebase already follows. No trait multiplier applied here (deliberately
+// matching HYDRATION_DECAY just above -- the most recent need added, and also unmultiplied), and
+// the decay rate itself is pinned to the same order of magnitude as HUNGER_DECAY/REST_DECAY per
+// the "don't over-tune, match existing needs' proportions" brief rather than being independently
+// tuned against PA's raw per-use numbers, which don't translate directly onto this project's
+// per-tick decay model anyway.
+export const EXERCISE_DECAY = 0.00045; // same order of magnitude as HUNGER_DECAY/REST_DECAY/HYDRATION_DECAY
+
 // ---------------------------------------------------------------- hunger spiral (malnutrition)
 // RimWorld's real malnutrition ramps hungerRateFactorOffset 0.5 -> 0.6 across its severity stages
 // (a mild compounding ramp, not a cliff) once a pawn has been starving for a while. Mirrored here
@@ -73,6 +111,11 @@ const HUNGER_SPIRAL_MAX_MULT = 1.2; // RimWorld's 0.5->0.6 is a 20% relative inc
 export const MOOD_EVENT_STACK_LIMITS = {
   witnessedDeath: 3,
   finishedBuild: 2,
+  // Community Gathering (programs.js's ProgramKind.CommunityGathering, RimWorld Ideology's real
+  // Party/Festival Thought): a one-time completion event, same low stack cap as finishedBuild --
+  // a citizen shouldn't be able to carry more than a couple live "just had a gathering" (or "that
+  // gathering was a letdown") thoughts at once.
+  communityGathering: 2,
 };
 const DEFAULT_MOOD_EVENT_STACK_LIMIT = 3;
 
@@ -166,23 +209,60 @@ export class CitizenStore {
     this.y = new Float32Array(capacity);
     this.targetX = new Float32Array(capacity);
     this.targetY = new Float32Array(capacity);
+    // Age (RimWorld Biotech LifeStageDef-style, see traits.js's AGE_BANDS): ticks-since-spawn,
+    // NOT wall-clock/real age -- a starting citizen gets a randomized starting age (spawn() below)
+    // so the colony isn't uniformly "born at tick 0", then increments by 1 every tick for every
+    // alive citizen (tickNeedsAndMood below, same per-tick loop everything else in this file
+    // already walks) regardless of downed/on-break state -- aging is passive and doesn't pause for
+    // an incapacitated citizen, same convention as DOWNED_RECOVERY_RATE's passive recovery above.
+    this.age = new Float32Array(capacity);
     this.hunger = new Float32Array(capacity).fill(1);
     this.rest = new Float32Array(capacity).fill(1);
     this.social = new Float32Array(capacity).fill(1);
     this.hydration = new Float32Array(capacity).fill(1); // PA-style Hydration need, see HYDRATION_DECAY above
+    this.exercise = new Float32Array(capacity).fill(1); // PA-style Exercise need, see EXERCISE_DECAY above
     this.mood = new Float32Array(capacity).fill(1);
     this.health = new Float32Array(capacity).fill(1);
+    // Vest armor (siege.js's CITIZEN_VEST_ARMOR_RATING/resolveCitizenArmorRoll, economy.js
+    // BUILD_COST.vest) -- 1 once a citizen has been equipped via world.buyVest, 0 (Uint8Array
+    // zero-init) otherwise. Read by siege.js's tickAttackerVsCitizens every contact-damage tick;
+    // read here rather than a Set so it's a plain SoA field like every other per-citizen combat
+    // stat in this store (health, skillCombat, ...).
+    this.hasVest = new Uint8Array(capacity);
     this.flags = new Uint8Array(capacity);
     this.alive = new Uint8Array(capacity);
     this._hungerSpiralTicks = new Float32Array(capacity); // ticks spent near-zero hunger, see HUNGER_SPIRAL_*
+    // Sickness (sickness.js -- real RimWorld Flu numbers, rescaled): 0 = healthy, >0 = currently
+    // sick. _sickOffset staggers the per-citizen onset-roll/mood-refresh check the same way
+    // rats.js's Rat._offset staggers each rat's periodic-action roll, so SICKNESS_CHECK_INTERVAL
+    // citizens don't all roll on the exact same tick. Hardcoded modulus (50) rather than importing
+    // sickness.js's SICKNESS_CHECK_INTERVAL constant here -- citizens.js loads before sickness.js
+    // in build.py's ORDER and sickness.js already imports addMoodEvent from this file, so importing
+    // back would be circular; keep the two values in sync by hand if either ever changes.
+    this.sickSeverity = new Float32Array(capacity);
+    this._sickOffset = new Uint16Array(capacity);
     this.moodEvents = new Array(capacity).fill(null); // index -> array of {magnitude, startTick, durationTicks, stackKey}, see addMoodEvent
     this.breakSeverity = new Uint8Array(capacity); // index into BREAK_TIERS, set when a break triggers
     this._breakTicksRemaining = new Float32Array(capacity); // MTB-style: break runs its own course instead of clearing on mood alone
     this.jobState = new Uint8Array(capacity); // JobState from jobs.js
     this.skillCombat = new Float32Array(capacity);
     this.skillConstruction = new Float32Array(capacity);
+    // Citizen Rank / Prestige (ranks.js -- RimWorld Royalty-style seniority ladder, condensed
+    // non-carceral). Index into ranks.js's RANKS array, 0 = 'Settler' (starting rank, no bonus).
+    // A plain Uint8Array like breakSeverity above -- 7 tiers fits comfortably, no need for a
+    // wider type.
+    this.citizenRank = new Uint8Array(capacity);
     this._staffCooldown = new Float32Array(capacity); // used by siege.js tickStaffCombat
     this._jobRef = {}; // used by jobs.js: index -> blueprint/resource-node object currently targeted
+    // First-aid tending (jobs.js's JobState.SeekingTend/Tending, see TEND_RECOVERY_RATE above).
+    // tendClaimedBy: -1 = no tender assigned, else the tender's stable id (idOf(i), NOT an index
+    // -- same "id, not index" precedent as blueprint.claimedBy elsewhere) currently walking to or
+    // actively tending this Downed citizen. Prevents two citizens converging on the same patient,
+    // same role findNearestBlueprint's claimedBy plays for construction. beingTended: a plain
+    // per-tick flag (0/1), set by jobs.js's Tending handler and read-then-cleared by
+    // tickNeedsAndMood below every tick -- see that function's doc comment for the exact ordering.
+    this.tendClaimedBy = new Int32Array(capacity).fill(-1);
+    this.beingTended = new Uint8Array(capacity);
     this.trait = new Array(capacity).fill(null);
     this.backstory = new Array(capacity).fill(null); // see backstories.js -- childhood/adult flavor pair + skill nudge
     this.passionCombat = new Uint8Array(capacity); // Passion tier (backstories.js), biases skillCombat gain rate
@@ -196,7 +276,8 @@ export class CitizenStore {
     // Idle branch runs its original fixed-order ladder for them, completely untouched. Only once
     // a citizen has been customized (see main.js's Work Priorities panel) does hasWorkPriorities
     // flip to 1 and these four arrays start mattering: each cell is 0 (never do this job) or a
-    // 1-3 priority tier, lower number = higher priority (RimWorld's inverted-number convention).
+    // 1-4 priority tier, lower number = higher priority (RimWorld's inverted-number convention --
+    // matches RimWorld's real Work-tab granularity of Off/1/2/3/4, not a coarser tier scheme).
     this.hasWorkPriorities = new Uint8Array(capacity);
     this.workPriorityConstruction = new Uint8Array(capacity); // JobState SeekingBuild/Building
     this.workPriorityProcessing = new Uint8Array(capacity); // JobState SeekingWorkshop/Processing
@@ -216,6 +297,45 @@ export class CitizenStore {
     this.programSessionsDone = new Uint8Array(capacity);
     this.programAttendTicks = new Float32Array(capacity);
 
+    // Draft/undraft order state (draft.js -- RimWorld-style manual control, see CitizenFlags.
+    // Drafted above). Kept as its own small set of arrays, same SoA precedent as everything else
+    // in this store, rather than a non-typed-array object per citizen -- there's exactly one
+    // active order per citizen at a time, so this is cheap and matches jobState's own shape.
+    // orderKind: 0 = none (drafted but idle, "stand and hold"), 1 = Move, 2 = Attack.
+    this.orderKind = new Uint8Array(capacity);
+    this.orderTargetX = new Float32Array(capacity);
+    this.orderTargetY = new Float32Array(capacity);
+    // Index into world.attackers (AttackerStore, siege.js) for an Attack order -- NOT a stable
+    // id (AttackerStore has no id field, see draft.js's header comment for why this is an
+    // accepted, documented simplification), -1 means "no attack order".
+    this.orderAttackIndex = new Int32Array(capacity).fill(-1);
+
+    // Force Job pending state (forcejob.js -- RimWorld-style "Prioritize", see that file's header
+    // comment for the full design). forcedJobKind[i] is a ForceJobKind string ('blueprint'/'node'/
+    // 'room'/'workshop') or null; _forcedJobRef (a plain object map, index -> target object, same
+    // non-typed-array precedent as _jobRef above) holds the actual blueprint/node/room/station
+    // reference. Deliberately separate from jobState/_jobRef (the ACTIVE job) and from
+    // orderKind/orderTargetX/Y (draft.js's very different always-on manual-control orders) -- this
+    // is a one-shot future instruction consumed once by jobs.js's tickJobs Idle branch, then
+    // cleared, whether or not the claim actually succeeds.
+    this.forcedJobKind = new Array(capacity).fill(null);
+    this._forcedJobRef = {};
+
+    // Per-citizen Schedule override (schedule.js's ScheduleOverride) -- RimWorld Schedule-tab
+    // style. 0 (Uint8Array zero-init) = ScheduleOverride.None = no override, the colony-wide
+    // schedule.js cycle applies exactly as before this feature existed. Only a citizen the player
+    // has explicitly set an override for (see main.js's inspector control) ever reads as nonzero.
+    this.scheduleOverride = new Uint8Array(capacity);
+
+    // Per-citizen Allowed Area restriction (RimWorld Restrict-tab style). null (the Array default
+    // below) = unrestricted, identical to every citizen's behavior before this feature existed.
+    // Once the player paints an area for a citizen (main.js's "Restrict Area" tool, reusing
+    // zones.js's per-cell paint UX pattern -- see input.js), this becomes a Uint8Array(width*height)
+    // bitmask (1 = allowed cell) lazily allocated by paintAllowedAreaCell below. One mask per
+    // citizen, not a shared grid -- these are expected to be painted for at most a handful of
+    // citizens at once, not the whole colony, so the per-citizen memory cost is trivial.
+    this.allowedAreaMask = new Array(capacity).fill(null);
+
     this._nextId = 1;
   }
 
@@ -227,11 +347,19 @@ export class CitizenStore {
     this.name[i] = name;
     this.x[i] = x; this.y[i] = y;
     this.targetX[i] = x; this.targetY[i] = y;
-    this.hunger[i] = 1; this.rest[i] = 1; this.social[i] = 1; this.hydration[i] = 1;
+    // Randomized starting age: 2000-24000 ticks, spanning most of the Young band (see
+    // traits.js's AGE_BANDS -- Young/Veteran cutoff is 20000) with some overlap into Veteran, so a
+    // freshly-spawned colony already reads as a mixed-age population rather than everyone being
+    // "born" at tick 0 together.
+    this.age[i] = 2000 + rng() * 22000;
+    this.hunger[i] = 1; this.rest[i] = 1; this.social[i] = 1; this.hydration[i] = 1; this.exercise[i] = 1;
     this.mood[i] = 1; this.health[i] = 1;
     this.flags[i] = CitizenFlags.None;
+    this.hasVest[i] = 0;
     this.alive[i] = 1;
     this._hungerSpiralTicks[i] = 0;
+    this.sickSeverity[i] = 0;
+    this._sickOffset[i] = Math.floor(rng() * 50); // keep '50' in sync with sickness.js's SICKNESS_CHECK_INTERVAL
     this.moodEvents[i] = [];
     this.breakSeverity[i] = 0;
     this._breakTicksRemaining[i] = 0;
@@ -240,6 +368,7 @@ export class CitizenStore {
     this.backstory[i] = backstory;
     this.skillCombat[i] = backstory.skillCombatStart ?? 0;
     this.skillConstruction[i] = backstory.skillConstructionStart ?? 0;
+    this.citizenRank[i] = 0; // ranks.js RANKS[0] 'Settler' -- everyone starts here
     const passions = randomPassions(rng, backstory);
     this.passionCombat[i] = passions.combat;
     this.passionConstruction[i] = passions.construction;
@@ -257,6 +386,15 @@ export class CitizenStore {
     this.programSite[i] = null;
     this.programSessionsDone[i] = 0;
     this.programAttendTicks[i] = 0;
+    this.orderKind[i] = 0;
+    this.orderTargetX[i] = x; this.orderTargetY[i] = y;
+    this.orderAttackIndex[i] = -1;
+    this.forcedJobKind[i] = null;
+    this._forcedJobRef[i] = null;
+    this.scheduleOverride[i] = 0;
+    this.allowedAreaMask[i] = null;
+    this.tendClaimedBy[i] = -1;
+    this.beingTended[i] = 0;
     return i;
   }
 
@@ -268,29 +406,105 @@ export class CitizenStore {
     return (this.flags[i] & CitizenFlags.Downed) !== 0;
   }
 
+  isSickAt(i) {
+    return this.sickSeverity[i] > 0;
+  }
+
   isOnBreakAt(i) {
     return (this.flags[i] & CitizenFlags.OnBreak) !== 0;
+  }
+
+  isDraftedAt(i) {
+    return (this.flags[i] & CitizenFlags.Drafted) !== 0;
+  }
+
+  // Vest armor (see hasVest field above / siege.js's resolveCitizenArmorRoll).
+  isVestedAt(i) {
+    return this.hasVest[i] === 1;
+  }
+
+  // Force Job pending (forcejob.js) -- true from the moment forceJob() marks a target until
+  // jobs.js's tickJobs Idle branch consumes it (claim success or failure), same "cheap glance
+  // check" convention as isDraftedAt/isOnBreakAt above. Used by render.js for the pending-order
+  // indicator and by forcejob.js itself.
+  hasForcedJobAt(i) {
+    return !!this.forcedJobKind[i];
+  }
+
+  // ---- Allowed Area restriction (RimWorld Restrict-tab style) -----------------------------
+  hasAllowedArea(i) {
+    return this.allowedAreaMask[i] != null;
+  }
+
+  // True if (x, y) is inside citizen i's painted area, or if they have no restriction at all
+  // (the default -- every citizen behaves exactly as before this feature existed unless the
+  // player has explicitly painted an area for them). gridWidth is passed in rather than stored
+  // on the store itself since CitizenStore has no grid reference of its own (same reason
+  // paintAllowedAreaCell below takes width/height as params instead of caching them).
+  isInAllowedArea(i, gridWidth, x, y) {
+    const mask = this.allowedAreaMask[i];
+    if (!mask) return true;
+    const gx = Math.floor(x), gy = Math.floor(y);
+    if (gx < 0 || gy < 0) return false;
+    const idx = gy * gridWidth + gx;
+    if (idx < 0 || idx >= mask.length) return false;
+    return mask[idx] === 1;
+  }
+
+  // Paints (allowed=true) or erases (allowed=false) one grid cell of citizen i's restriction
+  // mask, lazily allocating it on first paint -- mirrors zones.js's ZoneGrid.set, the existing
+  // player-painted-area UX pattern this feature reuses (see input.js's 'restrict-area' tool).
+  paintAllowedAreaCell(i, gridWidth, gridHeight, x, y, allowed) {
+    if (x < 0 || y < 0 || x >= gridWidth || y >= gridHeight) return;
+    if (!this.allowedAreaMask[i]) this.allowedAreaMask[i] = new Uint8Array(gridWidth * gridHeight);
+    this.allowedAreaMask[i][y * gridWidth + x] = allowed ? 1 : 0;
+  }
+
+  // Clears citizen i's restriction entirely -- back to "can go anywhere", the default.
+  clearAllowedArea(i) {
+    this.allowedAreaMask[i] = null;
   }
 }
 
 // ---------------------------------------------------------------- per-citizen unrest score
 // Prison Architect dynamicRep.txt's per-prisoner riot-proneness, reframed genre-neutral: built
-// additively from state this codebase already tracks per-citizen, mirroring the real file's
-// factor list (Is Riled Up +20, Is Violent +15 (trait-based), Fighting Nearby +10, offset by
-// Good Room Quality +40, Per Program Passed +5). Deliberately a SEPARATE per-citizen readout from
-// world.js's colony-wide unrestLevel blend -- one citizen can carry a high score here well before
-// the aggregate ever crosses a tier threshold, which is the point: it gives the player (and
-// future features) something concrete to target instead of the pure aggregate. Surfaced in the
-// inspector panel, see main.js.
+// additively from state this codebase already tracks per-citizen, calibrated directly against
+// the REAL boilingpoint_settings.txt weight table (see SESSION_HANDOFF.md's round-9 research
+// notes): Good Room Quality -40 (the single biggest protective factor in the real data), Armed
+// Guard Presence +30, Is Riled Up +20, Has Withdrawal +40, Fighting Nearby +10, Is Violent +15,
+// Per Program Passed -5. Deliberately a SEPARATE per-citizen readout from world.js's colony-wide
+// unrestLevel blend -- one citizen can carry a high score here well before the aggregate ever
+// crosses a tier threshold, which is the point: it gives the player (and future features)
+// something concrete to target instead of the pure aggregate. Surfaced in the inspector panel,
+// see main.js.
+//
+// Calibration pass (this session): the four factors this codebase already modeled (Riled Up,
+// Violent, Fighting Nearby, Room Quality) already matched the real magnitudes/signs exactly --
+// no change needed there. But TWO real factors were entirely unmodeled (an effective weight of 0
+// vs. the real 30 and 40), which is the actual mis-proportion worth fixing: Armed Guard Presence
+// and Has Withdrawal. Both are now wired to real per-citizen state this codebase already tracks
+// rather than adding new fields:
+//   - Armed Guard Presence: an on-duty Guard/Sniper (security.js's StaffRoster) within sight --
+//     reskinned as "an armed protector working nearby is itself a tension factor", the same
+//     ambient-provocation reading the real data gives it, not a judgment about the guard.
+//   - Has Withdrawal: this codebase's closest analog to PA's drug-withdrawal craving is the
+//     hunger spiral (citizens.js's _hungerSpiralTicks -- sustained near-zero hunger, a real
+//     "crashing need" state already tracked per-citizen, see HUNGER_SPIRAL_* above).
 const UNREST_SCORE_RILED_UP = 20;       // currently OnBreak -- PA's "Is Riled Up" is also a live state, not a trait
 const UNREST_SCORE_VOLATILE_TRAIT = 15; // Neurotic (raised break threshold, see traits.js) is this codebase's
                                          // closest trait-based analog to PA's Violent trait -- both mean "flips
                                          // into distress more easily than average"
 const UNREST_SCORE_FIGHT_NEARBY = 10;   // relationships.js's fight-event log, see hasFightNearby
-const UNREST_SCORE_ROOM_QUALITY_OFFSET = 40; // scaled by the citizen's current room quality (rooms.js, 0..1)
+const UNREST_SCORE_ROOM_QUALITY_OFFSET = 40; // scaled by the citizen's current room quality (rooms.js, 0..1) --
+                                              // real PA's single LARGEST factor, matched 1:1 here already
 const UNREST_SCORE_PROGRAM_OFFSET = 5;       // per skill track advanced past Novice -- this codebase's closest
                                               // analog to PA's "Per Program Passed" (see main.js's SKILL_LEVELS)
 const SKILL_INVESTED_THRESHOLD = 0.15;       // matches main.js's SKILL_LEVELS Novice cutoff exactly
+const UNREST_SCORE_ARMED_PRESENCE = 30; // real PA "Armed Guard Presence" weight, previously unmodeled (was 0)
+const ARMED_PRESENCE_RADIUS = 4;        // grid cells -- same order of magnitude as this file's other
+                                         // nearby-state checks (e.g. relationships.js's hasFightNearby radius)
+const UNREST_SCORE_WITHDRAWAL = 40; // real PA "Has Withdrawal" weight, previously unmodeled (was 0) -- tied
+                                     // for the single largest magnitude in the real table, alongside room quality
 
 export function computeCitizenUnrestScore(store, i, world) {
   if (!store.isAliveAt(i)) return 0;
@@ -301,6 +515,21 @@ export function computeCitizenUnrestScore(store, i, world) {
   if ((trait?.breakThresholdOffset ?? 0) > 0) score += UNREST_SCORE_VOLATILE_TRAIT;
   if (world?.relationships?.hasFightNearby?.(store.x[i], store.y[i], world.currentTick)) {
     score += UNREST_SCORE_FIGHT_NEARBY;
+  }
+  if ((store._hungerSpiralTicks?.[i] ?? 0) > 0) score += UNREST_SCORE_WITHDRAWAL;
+
+  if (world?.roster?.isStaff && world?.isStaffAt) {
+    for (let j = 0; j < store.count; j++) {
+      if (j === i || !store.isAliveAt(j)) continue;
+      if (!world.isStaffAt(j)) continue;
+      const kind = world.roster.kindOf(store.id[j]);
+      if (kind !== StaffRoleKind.Guard && kind !== StaffRoleKind.Sniper) continue;
+      const dx = store.x[i] - store.x[j], dy = store.y[i] - store.y[j];
+      if (dx * dx + dy * dy <= ARMED_PRESENCE_RADIUS * ARMED_PRESENCE_RADIUS) {
+        score += UNREST_SCORE_ARMED_PRESENCE;
+        break;
+      }
+    }
   }
 
   if (world?.rooms && world?.grid) {
@@ -325,12 +554,31 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
 
+    store.age[i]++;
+
     if (store.isDownedAt(i)) {
       // Incapacitated: needs don't spiral further while down, but health slowly recovers
-      // (RimWorld-style "downed, not dead" reprieve -- no dedicated first-aid job yet, so
-      // recovery is passive rather than requiring a medic to tend them).
-      store.health[i] = Math.min(1, store.health[i] + DOWNED_RECOVERY_RATE);
-      if (store.health[i] >= DOWNED_RECOVER_THRESHOLD) store.flags[i] &= ~CitizenFlags.Downed;
+      // (RimWorld-style "downed, not dead" reprieve). store.beingTended[i] is set every tick by
+      // jobs.js's Tending job handler (world.js calls tickNeedsAndMood *before* tickJobs each
+      // tick, so this reads the PREVIOUS tick's tend status -- a harmless one-tick lag on a
+      // per-tick-continuous system). Read it, then immediately clear it: if a tender is still
+      // actively tending this same tick, jobs.js's Tending handler re-sets it before the next
+      // tickNeedsAndMood call; if the tender left, it stays cleared and recovery falls straight
+      // back to the passive rate on the very next tick.
+      const tended = store.beingTended[i] === 1;
+      store.beingTended[i] = 0;
+      let recoveryRate = tended ? TEND_RECOVERY_RATE : DOWNED_RECOVERY_RATE;
+      // Infirmary bonus (see MEDICAL_ROOM_TEND_MULT doc comment above) -- only applies to an
+      // actively-tended citizen who happens to be lying inside a validated Medical room.
+      if (tended && world?.rooms && world?.grid) {
+        const room = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+        if (room && room.role === RoomRole.Medical && room.roleValid) recoveryRate *= MEDICAL_ROOM_TEND_MULT;
+      }
+      store.health[i] = Math.min(1, store.health[i] + recoveryRate);
+      if (store.health[i] >= DOWNED_RECOVER_THRESHOLD) {
+        store.flags[i] &= ~CitizenFlags.Downed;
+        if (store.tendClaimedBy[i] !== -1) store.tendClaimedBy[i] = -1; // recovered out from under an active tender
+      }
       continue;
     }
 
@@ -362,18 +610,25 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
       store.hydration[i] = Math.max(0, store.hydration[i] - HYDRATION_DECAY);
     }
 
-    // Hydration folds into the SAME eased need-average as hunger/rest/social, not a separate raw
-    // additive nudge -- an earlier version of this added a small unbounded (hydration-0.5)*weight
-    // term directly to mood every tick, same shape as the room-quality term below, but unlike a
-    // room (which simply has no term at all until the citizen stands inside one) an un-plumbed
-    // colony has EVERY citizen's hydration pinned at 0 for the entire early game, so that raw term
-    // permanently dragged mood toward 0 tick after tick with nothing to counteract it -- caught in
-    // this pass's soak test (population collapsed from 24 to 3 by tick ~9000 on a fresh Calm
-    // colony with no pump built yet). Folding it into avgNeed instead means it only pulls mood
-    // toward a lower *target* (proportionally diluted 1-in-4 rather than 1-in-3), which the
-    // existing 0.05 easing already keeps gentle -- same bounded behavior as hunger/rest/social,
-    // no separate uncapped accumulation path.
-    const avgNeed = (store.hunger[i] + store.rest[i] + store.social[i] + store.hydration[i]) / 4;
+    // Exercise (see EXERCISE_DECAY doc comment above): pure ambient drain here, no passive burst
+    // path like Hydration's isWateredAt check -- refill is entirely job-driven (jobs.js's
+    // SeekingExercise/Exercising states, which walk a citizen to the new Fitness Station buildable
+    // and refill at the same REFILL_RATE every other zone-seeking need uses), matching the
+    // Hunger/Rest/Social precedent more closely than Hydration's passive-plumbing one.
+    store.exercise[i] = Math.max(0, store.exercise[i] - EXERCISE_DECAY);
+
+    // Hydration/Exercise fold into the SAME eased need-average as hunger/rest/social, not a
+    // separate raw additive nudge -- an earlier version of this added a small unbounded
+    // (hydration-0.5)*weight term directly to mood every tick, same shape as the room-quality term
+    // below, but unlike a room (which simply has no term at all until the citizen stands inside
+    // one) an un-plumbed colony has EVERY citizen's hydration pinned at 0 for the entire early
+    // game, so that raw term permanently dragged mood toward 0 tick after tick with nothing to
+    // counteract it -- caught in that pass's soak test (population collapsed from 24 to 3 by tick
+    // ~9000 on a fresh Calm colony with no pump built yet). Folding it into avgNeed instead means
+    // it only pulls mood toward a lower *target* (proportionally diluted 1-in-5 now that Exercise
+    // is included, was 1-in-4), which the existing 0.05 easing already keeps gentle -- same bounded
+    // behavior as hunger/rest/social, no separate uncapped accumulation path.
+    const avgNeed = (store.hunger[i] + store.rest[i] + store.social[i] + store.hydration[i] + store.exercise[i]) / 5;
 
     // Stacking mood events (RimWorld "Thought" mechanic, see addMoodEvent above): each live
     // event's magnitude decays linearly to zero over its duration. RimWorld recomputes mood fresh
@@ -435,6 +690,7 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
       store.flags[i] |= CitizenFlags.OnBreak;
       store.breakSeverity[i] = tierIdx;
       store._breakTicksRemaining[i] = BREAK_TIERS[tierIdx].durationTicks;
+      world?.onCitizenOnBreak?.();
     }
   }
 }
@@ -449,7 +705,13 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
 // Heatwave's real penalty only applies to citizens who are actually outdoors right now, which a
 // single flat scalar for the whole population can't express -- this callback lets world.js supply
 // that per-citizen variance without citizens.js needing to know anything about weather.js itself.
-export function tickWander(store, grid, rng, speed = 0.04, skipIf = null, perCitizenMult = null) {
+// isAllowedAt: optional (i, x, y) -> bool (jobs.js/world.js's per-citizen Allowed Area check,
+// see citizens.js's isInAllowedArea). Omitted for every pre-existing call site, byte-for-byte
+// the old behavior. This is the one autonomous-movement path jobs.js's per-target filtering
+// doesn't cover on its own (an idle citizen with no job just wanders to a random nearby point,
+// not through any of jobs.js's finder functions) -- caught during this feature's own soak-test
+// verification, see world.js's call site for the real closure passed in.
+export function tickWander(store, grid, rng, speed = 0.04, skipIf = null, perCitizenMult = null, isAllowedAt = null) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
     if (store.isDownedAt(i)) continue;
@@ -459,12 +721,18 @@ export function tickWander(store, grid, rng, speed = 0.04, skipIf = null, perCit
     const dy = store.targetY[i] - store.y[i];
     const dist = Math.hypot(dx, dy);
     if (dist < 0.15) {
-      let tx, ty, tries = 0;
+      let tx, ty, tries = 0, valid = false;
       do {
         tx = Math.max(1, Math.min(grid.width - 2, store.x[i] + (rng() - 0.5) * 10));
         ty = Math.max(1, Math.min(grid.height - 2, store.y[i] + (rng() - 0.5) * 10));
         tries++;
-      } while (grid.isBlocked(tx | 0, ty | 0) && tries < 8);
+        valid = !grid.isBlocked(tx | 0, ty | 0) && (!isAllowedAt || isAllowedAt(i, tx, ty));
+      } while (!valid && tries < 8);
+      // Ran out of retries without ever landing a point inside a restricted citizen's area (a
+      // small painted area, or bad luck) -- hold in place rather than wandering out. Matches
+      // every other autonomous-target filter in this feature: "no valid option found" means
+      // "don't move", never "fall back to ignoring the restriction".
+      if (!valid && isAllowedAt) { tx = store.x[i]; ty = store.y[i]; }
       store.targetX[i] = tx;
       store.targetY[i] = ty;
     } else {

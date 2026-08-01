@@ -40,3 +40,37 @@ export function isNight(timeOfDay) {
   const t = ((timeOfDay % 1) + 1) % 1;
   return t < 0.25 || t >= 0.85;
 }
+
+// Per-citizen Schedule override (RimWorld Schedule-tab style, the stretch goal referenced in the
+// doc comment above -- now built). Lets the player pin one specific citizen to a fixed behavior
+// bias regardless of the colony-wide cycle, e.g. force a citizen toward Work priority through the
+// night, or toward Recreation/Sleep during the colony's normal workday. Values mirror
+// ScheduleBlock exactly, offset by +1 so 0 can mean "no override" -- citizens.js's
+// scheduleOverride field is a Uint8Array (zero-init), matching the same "0 means untouched"
+// convention hasWorkPriorities/workPriority* already established for the per-citizen Work
+// Priorities table.
+export const ScheduleOverride = Object.freeze({
+  None: 0,
+  Sleep: ScheduleBlock.Sleep + 1,
+  Work: ScheduleBlock.Work + 1,
+  Recreation: ScheduleBlock.Recreation + 1,
+});
+
+export const SCHEDULE_OVERRIDE_LABELS = {
+  [ScheduleOverride.None]: 'Colony schedule',
+  [ScheduleOverride.Sleep]: 'Sleep (forced)',
+  [ScheduleOverride.Work]: 'Work (forced)',
+  [ScheduleOverride.Recreation]: 'Recreation (forced)',
+};
+
+// Resolves the effective schedule block jobs.js should use for one citizen this tick: their own
+// override if the player has set one, otherwise the colony-wide block computed from
+// world.timeOfDay via getScheduleBlock above. jobs.js's tickJobs calls this once per citizen and
+// reuses the result everywhere it previously used the raw colony block (the Sleep-block
+// interrupt check, the Idle-branch threshold bias, and findJoinableSite's scheduleBlock param) --
+// so a citizen with no override (the default, every existing citizen/save) behaves byte-for-byte
+// as before this feature existed.
+export function effectiveScheduleBlock(overrideValue, colonyBlock) {
+  if (overrideValue == null || overrideValue === ScheduleOverride.None) return colonyBlock;
+  return overrideValue - 1;
+}

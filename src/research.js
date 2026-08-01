@@ -73,6 +73,18 @@ export const RESEARCH_NODES = [
     desc: 'A staffed processing station -- raw scrap in, higher-value Components out.',
     unlocks: ['workshop'], requires: [],
   },
+  {
+    // Real PA anchor (needs.txt/production.txt materials pass): farming buildables carry real
+    // Work-provider rates and feed the fertilizer/compost chain -- v1 here is deliberately just
+    // the single production loop (one buildable, one citizen-tended cycle), not the full
+    // multi-crop/fertilizer system that real data implies; see jobs.js's Farming job state.
+    // Distinct from Harvesting: a resource NODE is a finite deposit that depletes, a Farm Plot is
+    // a built, renewable producer a citizen returns to tend cycle after cycle.
+    id: 'agronomy', name: 'Agronomy', cost: 55,
+    desc: 'Tilled farm plots -- a citizen tending one produces a steady trickle of food/scrap, ' +
+      'renewable rather than a depleting resource node.',
+    unlocks: ['farm_plot'], requires: [],
+  },
 
   // ---- gated tier 2 ----
   {
@@ -95,6 +107,18 @@ export const RESEARCH_NODES = [
     unlocks: ['camera', 'monitor_station'], requires: ['early_warning'],
   },
   {
+    // Real PA anchor: CCTVImprovement, cost 1000/time 180. Scaled against this tree's
+    // established 30-700 range and priced relative to its prereq (surveillance, 80) the same way
+    // the real file prices it as a follow-up upgrade to the base CCTV research, not a fresh
+    // unlock -- unlocks nothing buildable, purely read by world.js's wave-warning-window calc
+    // (CCTV_IMPROVEMENT_RESEARCH_MULT there), a real +35% boost to both the unmanned-camera and
+    // staffed-monitor early-warning windows.
+    id: 'cctv_improvement', name: 'CCTV Improvement', cost: 50,
+    desc: 'Better lenses and signal routing for the CCTV network -- cameras and the monitor '
+      + 'station both see meaningfully further ahead of a wave.',
+    unlocks: [], requires: ['surveillance'],
+  },
+  {
     id: 'refined_fuels', name: 'Refined Fuels', cost: 90,
     desc: 'Gas and ethanol drivetrains -- faster hauls, or cleaner ones.',
     unlocks: [
@@ -107,6 +131,18 @@ export const RESEARCH_NODES = [
     id: 'waste_reclamation', name: 'Waste Reclamation', cost: 110,
     desc: 'A recycling center that eats pollution and pays it back as scrap.',
     unlocks: ['recycling_center'], requires: ['plumbing'],
+  },
+  {
+    // Real PA anchor: RecyclingIncentive, cost 2500/time 720 -- roughly 2.5x CCTVImprovement's
+    // real cost and 4x its real time, mirrored here as a proportionally pricier follow-up than
+    // cctv_improvement (50) above. Unlocks nothing buildable -- purely read by world.js's
+    // pollution-tick recycling-capacity calc (RECYCLING_THROUGHPUT_RESEARCH_MULT there), a real
+    // +40% multiplier on every Recycling Center's per-tick processing capacity, stacking with the
+    // existing water-grid bonus rather than replacing it.
+    id: 'recycling_throughput', name: 'Recycling Throughput', cost: 125,
+    desc: 'Sorting-line incentives and tuning for the Recycling Center -- meaningfully more '
+      + 'pollution processed into scrap per tick, on every center you\'ve already built.',
+    unlocks: [], requires: ['waste_reclamation'],
   },
   {
     id: 'alternative_power', name: 'Alternative Power', cost: 85,

@@ -3,17 +3,23 @@
 import { SimWorld } from './world.js';
 import { Renderer } from './render.js';
 import { InputController, TOOLS } from './input.js';
-import { isNight } from './schedule.js';
+import { topbarIconUri } from './assets.js';
+import { isNight, ScheduleOverride, SCHEDULE_OVERRIDE_LABELS } from './schedule.js';
 import { PASSION_ICON } from './backstories.js';
-import { worldMap } from './worldmap.js';
+import { worldMap, EXPANSION_FUEL_COST, MAX_TRAVEL_RANGE } from './worldmap.js';
 import {
   playBuildComplete, playWaveAlert, playTurretFire, playKill, playCitizenDowned,
+  playMoodBreak, playRandomEventCue,
+  playUnrestTier1, playUnrestTier2, playUnrestTier3, playUnrestResolve,
+  playProgramComplete, playFactionSatisfied, playFactionUnmet, playCorruptDiscovered,
+  playRatTierChange, playSevereWeatherOnset,
   isMuted, toggleMute, getVolume, setVolume, getMasterGainValue,
 } from './audio.js';
 import { WeatherKind, tryWandererEvent, tryBlightEvent } from './weather.js';
-import { WEAPON_TIERS, fireCorruptStaff, forceCorruptionRoll, forceActivateCorruption, CORRUPTION_FIRE_REWARD } from './security.js';
+import { WEAPON_TIERS, WeaponTier, fireCorruptStaff, forceCorruptionRoll, forceActivateCorruption, CORRUPTION_FIRE_REWARD, K9_UPGRADE_SCRAP_COST } from './security.js';
 import { forceHeldCitizenCrisis } from './siege.js';
-import { AggressionPreset } from './core.js';
+import { buildCost } from './economy.js'; // vest purchase price display, see the inspector's Buy Vest button
+import { AggressionPreset, makeRng, rngInt } from './core.js';
 import { STORYTELLERS } from './director.js';
 import {
   RESEARCH_NODES, isNodeUnlocked, isToolUnlocked, researchBlockedReason, tryResearch,
@@ -23,8 +29,22 @@ import {
   toggleHelp, isHelpOpen, hasSeenTutorial, resetTutorialSeen, TUTORIAL_SEEN_KEY, TUTORIAL_STEPS,
 } from './tutorial.js';
 import { WorkCategory, WORK_CATEGORY_ORDER, WORK_CATEGORY_LABELS, WORK_CATEGORY_FIELD } from './jobs.js';
-import { ProgramKind, PROGRAM_DEFS, PROGRAM_ORDER, isSiteStaffed } from './programs.js';
+import { ProgramKind, PROGRAM_DEFS, PROGRAM_ORDER, isSiteStaffed, assignProgramStaff } from './programs.js';
+import {
+  GRANT_DEFS, GRANT_ORDER, CharterKind, charterStatus, InvestmentTerm, startInvestment, resolveText,
+  INVEST_COST, INVEST_SHORT_TICKS, INVEST_LONG_TICKS, INVEST_SHORT_PAYOUT, INVEST_LONG_PAYOUT,
+} from './grants.js';
 import { computeCitizenUnrestScore } from './citizens.js';
+import {
+  COVERAGE_PLAN_DEFS, COVERAGE_PLAN_ORDER, isPlanActive, purchaseCoveragePlan,
+  isCallInReady, callInLiveCount, triggerCallIn,
+} from './coverageplans.js';
+import { RANKS, rankOf, canRankUp, tryRankUp } from './ranks.js';
+import {
+  DRONE_CATEGORIES, DRONE_COST, DRONE_GESTATION_TICKS, droneCapacity, droneSlotsUsed,
+  queueDroneFabrication,
+} from './drones.js';
+import { draftCitizen, undraftCitizen, isDrafted, OrderKind } from './draft.js';
 import { CLIQUES, DEMAND_BASE_TARGET, DEMAND_ESCALATED_TARGET } from './factions.js';
 import {
   roomContaining, impressivenessLabel, beautyLabel, cleanlinessLabel, ROOM_ROLE_LABEL,
@@ -57,7 +77,48 @@ const AUTOSAVE_INTERVAL_TICKS = 1200;
 // otherwise the three schemes don't read or write each other's keys.
 const SLOTS_KEY = 'settlement-defense-save-slots';
 const SLOT_COUNT = 5;
-const WEATHER_ICON = { Clear: '🌤', Rain: '🌧', Cold: '❄', Heatwave: '🔥' };
+// Maps a WeatherKind string (weather.js) to a topbar glyph name (assets.js's TOPBAR_ICONS) --
+// replaces the old emoji lookup table 1:1, same fallback-to-Clear behavior on an unrecognized key.
+const WEATHER_ICON = { Clear: 'weatherClear', Rain: 'weatherRain', Cold: 'weatherCold', Heatwave: 'weatherHeatwave' };
+
+// Static topbar stat icons (element id -> assets.js TOPBAR_ICONS name) that never change once
+// set. Day/night and weather are handled separately in updateTopbar() below since their glyph
+// swaps with live state; everything here is baked in once at boot by initTopbarIcons().
+const STATIC_TOPBAR_ICONS = {
+  'stat-scrap-icon': 'scrap',
+  'stat-pollution-icon': 'pollution',
+  'stat-population-icon': 'population',
+  'stat-attackers-icon': 'attackers',
+  'stat-wave-icon': 'wave',
+  'stat-unrest-icon': 'unrest',
+  'stat-grading-icon': 'grading',
+  'stat-research-icon': 'research',
+};
+
+// Swaps an <span class="icon"> element's content for a real hand-drawn SVG <img> glyph (see
+// assets.js's TOPBAR_ICONS / topbarIconUri) -- called once per icon at boot for the static set,
+// and again on demand for the two state-driven icons (day/night, weather) whenever their state
+// changes. Alt text carries the accessible label since the glyph itself has no text.
+function setTopbarIcon(elId, iconName, alt) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  let img = el.querySelector('img');
+  if (!img) {
+    img = document.createElement('img');
+    img.className = 'icon-svg';
+    el.appendChild(img);
+  }
+  const uri = topbarIconUri(iconName);
+  if (img.src !== uri) img.src = uri;
+  img.alt = alt || iconName;
+}
+
+function initTopbarIcons() {
+  for (const [elId, iconName] of Object.entries(STATIC_TOPBAR_ICONS)) {
+    setTopbarIcon(elId, iconName, iconName);
+  }
+}
+initTopbarIcons();
 
 const canvas = document.getElementById('game');
 const renderer = new Renderer(canvas);
@@ -74,9 +135,12 @@ function attachAudioHooks(w) {
   w.onTurretFire = () => playTurretFire();
   w.onKill = () => playKill();
   w.onCitizenDowned = () => playCitizenDowned();
-  // Weather changes + one-off random events (weather.js) surface as a toast, same mechanism as
-  // every other player-visible notification in this file.
-  w.onRandomEvent = (text) => showToast(text);
+  w.onCitizenOnBreak = () => playMoodBreak();
+  // Weather changes + one-off random events (weather.js/factions.js/rats.js/security.js/jobs.js)
+  // surface as a toast, same mechanism as every other player-visible notification in this file,
+  // AND get discriminated by playRandomEventCue's text matching for the 6 new PA-catalog cues
+  // (unrest x4/program/faction/corrupt/rats/severe-weather) that share this one hook.
+  w.onRandomEvent = (text) => { showToast(text); playRandomEventCue(text); };
 }
 
 // LAZY BOOT: no SimWorld exists until the player starts or loads one from the title screen (see
@@ -212,7 +276,15 @@ window.__debug = {
   researchNodes: RESEARCH_NODES,
   isToolUnlocked: (tool) => isToolUnlocked(world.research, tool),
   doResearch: (id) => tryResearch(world.research, id),
-  audio: { isMuted, toggleMute, getVolume, setVolume, getMasterGainValue, playBuildComplete, playTurretFire, playKill, playWaveAlert, playCitizenDowned },
+  audio: {
+    isMuted, toggleMute, getVolume, setVolume, getMasterGainValue,
+    playBuildComplete, playTurretFire, playKill, playWaveAlert, playCitizenDowned,
+    // PA-catalog cues added this pass (see audio.js) -- exposed here for the same soak-test-time
+    // manual-trigger convenience the original 5 cues already have.
+    playUnrestTier1, playUnrestTier2, playUnrestTier3, playUnrestResolve, playMoodBreak,
+    playProgramComplete, playFactionSatisfied, playFactionUnmet, playCorruptDiscovered,
+    playRatTierChange, playSevereWeatherOnset, playRandomEventCue,
+  },
   // Settings/Options panel (see the "settings" section below) -- reachable from the title screen's
   // main menu and, in-game, from the pause menu's Settings button (that button was built by a
   // concurrent agent looking for exactly this openSettings/toggleSettings hook name). Also exposes
@@ -260,6 +332,16 @@ window.__debug = {
     fire: (citizenId) => fireCorruptStaff(world, citizenId),
     forceRoll: () => forceCorruptionRoll(world),
     forceActivate: (citizenId) => forceActivateCorruption(world, citizenId),
+    // Non-lethal takedown (WeaponTier.StunBaton) -- console-verification helpers so a soak test
+    // doesn't have to wait on the real ~40% stun-chance roll or the 1-in-game-hour cooldown.
+    K9_UPGRADE_SCRAP_COST,
+    dogs: () => world.dogs,
+    upgradeDog: (citizenId) => world.upgradeDog(citizenId),
+    isStunnedAt: (attackerIdx) => world.attackers.isStunnedAt(attackerIdx),
+    stunTicksRemaining: (attackerIdx) => world.attackers.stunTicksRemaining[attackerIdx],
+    isTrainingGraduated: (citizenId) => world.roster.isTrainingGraduated(citizenId),
+    programSites: () => world.programSites,
+    assignProgramStaff: (siteIndex, citizenId) => assignProgramStaff(world, world.programSites[siteIndex], citizenId),
   },
   // Held-citizen crisis (siege.js) -- same console-verification pattern. force() bypasses the
   // unrest-tier/probability gates so a soak test doesn't have to grind out a genuine tier-3 unrest
@@ -268,30 +350,228 @@ window.__debug = {
     getEvent: () => world.heldCitizenEvent,
     force: () => forceHeldCitizenCrisis(world),
   },
+  // Labor drones (drones.js) -- same console-verification pattern as every other feature above.
+  // queue()/toggle() drive the exact same functions the Fabrication panel's buttons use, so a
+  // soak test can fabricate a drone of a specific category without clicking through the UI.
+  drones: {
+    DRONE_CATEGORIES, DRONE_COST, DRONE_GESTATION_TICKS,
+    capacity: () => droneCapacity(world.structures),
+    used: () => droneSlotsUsed(world),
+    queue: (category) => queueDroneFabrication(world, category),
+    list: () => world.drones,
+    fabricationQueue: () => world.droneFabricationQueue,
+    toggle: (v) => toggleDronesPanel(v),
+  },
 };
 
-// ---------------------------------------------------------------- toolbar (built once)
+// ---------------------------------------------------------------- toolbar (categorized, built once)
+// Restructured from a single flat scrolling list (26+ items, hard to scan) into a two-level
+// category -> item-list -> detail-before-commit UI -- the same information hierarchy live-observed
+// in Super Energy Apocalypse: Recycled's build panel (category icon row, then that category's
+// buildables, then a detail readout before placing). Only the STRUCTURE is adopted; every pixel
+// here (colors, icons, layout classes) is this project's own -- see the CSS in index.html.
+// Every hotkey binding in input.js's TOOLS/TOOL_KEYS is completely untouched by this rework: a
+// keypress still calls input.setTool() directly, and syncToolbarHighlight() below just makes the
+// two-level UI follow along so the right category/detail is visible after a hotkey press too.
 const toolbarEl = document.getElementById('toolbar');
-for (const t of TOOLS) {
-  const btn = document.createElement('div');
-  btn.className = 'tool-btn';
-  btn.dataset.tool = t.tool ?? '';
-  btn.innerHTML = `<span><span class="key">[${t.key}]</span>${t.label}</span>` +
-    (t.cost != null ? `<span class="cost">$${t.cost}</span>` : '');
-  // Research gate (research.js): clicking a locked tool doesn't select it at all -- it says why
-  // and opens the Research panel, so the gate is discoverable rather than a dead button. The
-  // authoritative gate is still input.js's _place(), this is just the UI mirroring it.
-  btn.addEventListener('click', () => {
-    if (!world) return; // toolbar is hidden pregame, but never trust that as the only guard
-    if (!isToolUnlocked(world.research, t.tool)) {
-      const node = researchNodeForToolLocal(t.tool);
-      showToast(`Locked -- research "${node ? node.name : 'unknown'}" first`);
-      toggleResearch(true);
-      return;
-    }
-    input.setTool(t.tool);
+
+// Logical categories, inferred from economy.js's BUILD_COST grouping comments and each tool's own
+// kind: Defense (blocks/damages attackers), Power & Water (the two mirrored utility grids),
+// Economy & Vehicles (scrap/haul/production loop), Furniture (needs-refill objects), Security
+// (early warning + armed-staff force multipliers), Zones (paint-only, no structure/cost).
+const CATEGORY_ORDER = ['defense', 'power', 'economy', 'furniture', 'security', 'zones'];
+const CATEGORY_LABEL = {
+  defense: 'Defense', power: 'Power & Water', economy: 'Economy & Vehicles',
+  furniture: 'Furniture', security: 'Security', zones: 'Zones',
+};
+// Plain unicode glyphs, same convention already used for #topbar's stat icons (🔩👥☠ etc.) --
+// not artwork of any kind, just short original label glyphs for each category button.
+const CATEGORY_ICON = {
+  defense: '🛡', power: '⚡', economy: '🚚', furniture: '🛋', security: '👁', zones: '🧭',
+};
+const TOOL_CATEGORY = {
+  wall: 'defense', turret: 'defense', fence: 'defense', trap: 'defense',
+  floodlight: 'defense', tesla: 'defense', watchtower: 'defense', lightning_rod: 'defense',
+  generator: 'power', generator_coal: 'power', generator_wind: 'power', generator_solar: 'power',
+  generator_nuclear: 'power', waste_storage: 'power', wire: 'power', battery: 'power',
+  power_switch: 'power', pump: 'power', pipe: 'power',
+  garage_recycling_fossil: 'economy', garage_recycling_gas: 'economy',
+  garage_recycling_ethanol: 'economy', garage_recycling_electric: 'economy',
+  garage_garbage_fossil: 'economy', garage_garbage_gas: 'economy',
+  garage_garbage_ethanol: 'economy', garage_garbage_electric: 'economy',
+  recycling_center: 'economy', workshop: 'economy',
+  bed: 'furniture', table: 'furniture', door: 'furniture',
+  camera: 'security', monitor_station: 'security', armory: 'security', rat_trap: 'security',
+  stabilizer: 'security', // anomaly.js's counter-buildable, same "hazard-management, not combat" bucket as Rat Trap
+  'zone-food': 'zones', 'zone-bedroom': 'zones', 'zone-recreation': 'zones', 'zone-training': 'zones',
+};
+// One-line "Makes:"-style effect/description per buildable, written fresh in this project's own
+// voice from each tool's real cost/effect in economy.js/BUILD_COST comments, siege.js, power.js,
+// water.js, vehicles.js FUEL_TYPES -- not copied from any reference game's text.
+const TOOL_BLURB = {
+  wall: 'Blocks attacker movement and sight entirely. A citizen must walk over the blueprint and build it before it works.',
+  turret: 'Automated gun; fires at any attacker in range. +50% damage and +25% range while powered.',
+  fence: 'Soft barrier -- slows attackers crossing it instead of blocking them outright. Cheap perimeter filler.',
+  trap: 'Hidden one-shot damage trap. No power needed, but it has to be re-armed after triggering.',
+  floodlight: 'Soft barrier like Fence: slows attackers 35% inside its radius rather than stopping them.',
+  tesla: 'Chains a shock to every attacker in range per activation -- crowd control, not a single-target upgrade.',
+  watchtower: 'Extends early-warning lead time before a wave arrives (longer while powered).',
+  lightning_rod: 'Deflects 85% of lightning strikes on anything nearby during a Lightning Storm, and halves the storm\'s movement-speed penalty in the same radius.',
+  generator: 'Baseline power source. Feeds Wire to anything nearby that benefits from being powered.',
+  generator_coal: 'Cheapest generator of the bunch, but pollutes more per tick than the plain model.',
+  generator_wind: 'Zero pollution, but only counts as a power source when sited on open, unobstructed ground.',
+  generator_solar: 'Zero pollution, but only counts as a power source under open sky -- not inside an enclosed room.',
+  generator_nuclear: 'High-output wireless power radius, but accrues hazardous waste until a Waste Storage sits nearby.',
+  waste_storage: 'Contains nuclear waste within its radius, keeping citizens and structures nearby safe from it.',
+  wire: 'Near-free power conduit. Carries electricity from a generator to whatever is connected to the network.',
+  battery: 'Stores and discharges power, buffering the grid against overload spikes.',
+  power_switch: 'Manual breaker. Place a new one, or click an existing one with this tool to flip it on/off.',
+  pump: 'Water source -- the root of the water grid, same role Generator plays for the power grid.',
+  pipe: 'Near-free water conduit. Boosts Food/Recreation zone refill and the Recycling Center\'s throughput.',
+  garage_recycling_fossil: 'Recycling truck garage, fossil fuel: cheapest to build, dirtiest per haul.',
+  garage_recycling_gas: 'Recycling truck garage, gas fuel: balanced cost and pollution -- the default choice.',
+  garage_recycling_ethanol: 'Recycling truck garage, ethanol fuel: clean, but temporarily dents Food zone refill after each haul.',
+  garage_recycling_electric: 'Recycling truck garage, electric fuel: cleanest, but hauls crawl unless the garage itself is powered.',
+  garage_garbage_fossil: 'Garbage truck garage, fossil fuel: cheapest to build, dirtiest per haul.',
+  garage_garbage_gas: 'Garbage truck garage, gas fuel: balanced cost and pollution -- the default choice.',
+  garage_garbage_ethanol: 'Garbage truck garage, ethanol fuel: clean, but temporarily dents Food zone refill after each haul.',
+  garage_garbage_electric: 'Garbage truck garage, electric fuel: cleanest, but hauls crawl unless the garage itself is powered.',
+  recycling_center: 'Passively trickles pollution into scrap over time. Complements the truck haul cycle, doesn\'t replace it.',
+  workshop: 'Staffed processing station -- turns raw scrap into finished Components at a real 2x uplift.',
+  bed: 'Lets a citizen sleep to refill Rest. Pair with a Bedroom Zone for the formal room-role bonus.',
+  table: 'Lets citizens eat together, refilling Social and Rest. Pair with a Recreation/Dining zone for the room bonus.',
+  door: 'Passable wall opening -- keeps a room enclosed for room-detection bonuses while still letting citizens through.',
+  camera: 'Cheap, short-range early warning. Staff it with a Monitor Station for a much longer warning window.',
+  monitor_station: 'Staffed CCTV hub -- roughly doubles the early-warning window versus an unmanned Camera.',
+  armory: 'Auto-issues Rifle-tier weapons to every Guard/Sniper on the roster. A second Armory unlocks Heavy tier.',
+  rat_trap: 'Catches rats before an infestation spreads. Does nothing against attackers -- vermin control only.',
+  stabilizer: 'Passively decays the settlement\'s anomaly pressure meter. Does nothing against attackers -- hazard management only.',
+  'zone-food': 'Marks ground for foraging/food production. Refills Hunger when a citizen visits.',
+  'zone-bedroom': 'Marks ground as a bedroom area. Pair with a Bed on it for the formal room-role bonus.',
+  'zone-recreation': 'Marks ground for recreation. Refills Social and Mood when a citizen visits.',
+  'zone-training': 'Marks ground for the Skills Workshop program -- boosts skill-gain for citizens who use it.',
+};
+
+// ---- DOM scaffold (header + collapsible body: Select shortcut, category grid, item list, detail) ----
+toolbarEl.innerHTML = `
+  <div id="toolbar-head" title="Collapse/expand the build panel">
+    <span class="tb-title">🔨 Build</span>
+    <button id="toolbar-collapse-btn">&#9662;</button>
+  </div>
+  <div id="toolbar-body">
+    <div id="toolbar-select-btn" class="tool-btn select-btn"><span><span class="key">[0]</span>Select</span></div>
+    <div id="toolbar-categories"></div>
+    <div id="toolbar-items"></div>
+    <div id="toolbar-detail"></div>
+  </div>
+`;
+const toolbarBodyEl = document.getElementById('toolbar-body');
+const toolbarCatsEl = document.getElementById('toolbar-categories');
+const toolbarItemsEl = document.getElementById('toolbar-items');
+const toolbarDetailEl = document.getElementById('toolbar-detail');
+
+let tbCategory = null;   // currently-open category id, or null (category grid only)
+let tbDetailTool = null; // currently-detailed tool string, or null (item list, not detail)
+
+document.getElementById('toolbar-select-btn').addEventListener('click', () => {
+  if (!world) return;
+  input.setTool(null);
+});
+
+document.getElementById('toolbar-collapse-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  toolbarBodyEl.classList.toggle('hidden');
+  document.getElementById('toolbar-collapse-btn').innerHTML =
+    toolbarBodyEl.classList.contains('hidden') ? '&#9656;' : '&#9662;';
+});
+// Clicking anywhere on the header (not just the tiny arrow button) also toggles -- bigger, more
+// discoverable hit target for the same collapse/expand action.
+document.getElementById('toolbar-head').addEventListener('click', () => {
+  document.getElementById('toolbar-collapse-btn').click();
+});
+
+for (const catId of CATEGORY_ORDER) {
+  const b = document.createElement('div');
+  b.className = 'tb-cat-btn';
+  b.dataset.cat = catId;
+  b.innerHTML = `<span class="tb-cat-icon">${CATEGORY_ICON[catId]}</span><span class="tb-cat-label">${CATEGORY_LABEL[catId]}</span>`;
+  b.addEventListener('click', () => {
+    tbCategory = catId;
+    tbDetailTool = null;
+    renderToolbarLower();
   });
-  toolbarEl.appendChild(btn);
+  toolbarCatsEl.appendChild(b);
+}
+
+function renderToolbarLower() {
+  // Detail view wins if a tool is selected; otherwise show the open category's item list;
+  // otherwise (no category open) show neither -- just the category grid above.
+  if (tbDetailTool) {
+    toolbarItemsEl.classList.add('hidden');
+    toolbarDetailEl.classList.remove('hidden');
+    renderToolbarDetail();
+  } else if (tbCategory) {
+    toolbarDetailEl.classList.add('hidden');
+    toolbarItemsEl.classList.remove('hidden');
+    renderToolbarItems();
+  } else {
+    toolbarItemsEl.classList.add('hidden');
+    toolbarDetailEl.classList.add('hidden');
+  }
+}
+
+function renderToolbarItems() {
+  toolbarItemsEl.innerHTML = '';
+  const back = document.createElement('div');
+  back.className = 'tb-items-back';
+  back.textContent = '‹ Categories';
+  back.addEventListener('click', () => { tbCategory = null; tbDetailTool = null; renderToolbarLower(); });
+  toolbarItemsEl.appendChild(back);
+
+  for (const t of TOOLS) {
+    if (TOOL_CATEGORY[t.tool] !== tbCategory) continue;
+    const btn = document.createElement('div');
+    btn.className = 'tool-btn';
+    btn.dataset.tool = t.tool ?? '';
+    btn.innerHTML = `<span><span class="key">[${t.key}]</span>${t.label}</span>` +
+      (t.cost != null ? `<span class="cost">$${t.cost}</span>` : '');
+    // Research gate (research.js): clicking a locked tool doesn't select it at all -- it says why
+    // and opens the Research panel, so the gate is discoverable rather than a dead button. The
+    // authoritative gate is still input.js's _place(), this is just the UI mirroring it.
+    btn.addEventListener('click', () => {
+      if (!world) return; // toolbar is hidden pregame, but never trust that as the only guard
+      if (!isToolUnlocked(world.research, t.tool)) {
+        const node = researchNodeForToolLocal(t.tool);
+        showToast(`Locked -- research "${node ? node.name : 'unknown'}" first`);
+        toggleResearch(true);
+        return;
+      }
+      input.setTool(t.tool);
+      tbDetailTool = t.tool;
+      renderToolbarLower();
+    });
+    toolbarItemsEl.appendChild(btn);
+  }
+}
+
+function renderToolbarDetail() {
+  const t = TOOLS.find(x => x.tool === tbDetailTool);
+  if (!t) { toolbarDetailEl.innerHTML = ''; return; }
+  const locked = world && !isToolUnlocked(world.research, t.tool);
+  const costHtml = t.cost != null
+    ? `<span class="tb-detail-cost"><span class="icon">🔩</span>${t.cost}</span>`
+    : `<span class="tb-detail-cost tb-free">Free (paint-only)</span>`;
+  toolbarDetailEl.innerHTML = `
+    <div class="tb-detail-name">${t.label}</div>
+    <div class="tb-detail-cost-row">${costHtml}</div>
+    <div class="tb-detail-effect">${TOOL_BLURB[t.tool] || ''}</div>
+    ${locked ? `<div class="tb-detail-locked">🔒 Research-locked -- see the Research panel.</div>` : ''}
+    <button class="tb-detail-back">‹ Go Back</button>
+  `;
+  toolbarDetailEl.querySelector('.tb-detail-back').addEventListener('click', () => {
+    tbDetailTool = null;
+    renderToolbarLower();
+  });
 }
 
 // Local lookup rather than importing researchNodeForTool -- main.js only ever needs it for the
@@ -300,8 +580,30 @@ function researchNodeForToolLocal(tool) {
   return RESEARCH_NODES.find(n => n.unlocks.includes(tool)) || null;
 }
 
+let tbLastSyncedTool; // undefined on purpose: forces one real sync pass on the very first frame
 function syncToolbarHighlight() {
-  for (const btn of toolbarEl.children) {
+  document.getElementById('toolbar-select-btn')?.classList.toggle('active', input.tool === null);
+
+  // Follow a hotkey (or a New Game reset) that changed input.tool from outside this panel's own
+  // clicks -- jump the category/item/detail view to match, so pressing a hotkey is just as
+  // discoverable as clicking through the panel would have been. Every hotkey in input.js's
+  // TOOL_KEYS keeps working identically either way; this only decides what the panel *shows*.
+  if (input.tool !== tbLastSyncedTool) {
+    tbLastSyncedTool = input.tool;
+    if (input.tool) {
+      tbCategory = TOOL_CATEGORY[input.tool] || tbCategory;
+      tbDetailTool = input.tool;
+    } else {
+      tbDetailTool = null;
+    }
+    renderToolbarLower();
+  }
+
+  for (const b of toolbarCatsEl.children) {
+    b.classList.toggle('active', b.dataset.cat === tbCategory);
+  }
+  for (const btn of toolbarItemsEl.children) {
+    if (btn.dataset.tool === undefined) continue; // the "‹ Categories" back row
     const btnTool = btn.dataset.tool || null;
     btn.classList.toggle('active', btnTool === input.tool);
     btn.classList.toggle('locked', !isToolUnlocked(world?.research, btnTool));
@@ -326,6 +628,12 @@ document.getElementById('btn-research').addEventListener('click', () => toggleRe
 document.getElementById('btn-research-close').addEventListener('click', () => toggleResearch(false));
 document.getElementById('btn-programs').addEventListener('click', () => toggleProgramsPanel());
 document.getElementById('btn-programs-close').addEventListener('click', () => toggleProgramsPanel(false));
+document.getElementById('btn-grants').addEventListener('click', () => toggleGrantsPanel());
+document.getElementById('btn-grants-close').addEventListener('click', () => toggleGrantsPanel(false));
+document.getElementById('btn-coverage').addEventListener('click', () => toggleCoveragePlansPanel());
+document.getElementById('btn-coverage-close').addEventListener('click', () => toggleCoveragePlansPanel(false));
+document.getElementById('btn-drones').addEventListener('click', () => toggleDronesPanel());
+document.getElementById('btn-drones-close').addEventListener('click', () => toggleDronesPanel(false));
 document.getElementById('btn-factions').addEventListener('click', () => toggleFactions());
 document.getElementById('btn-factions-close').addEventListener('click', () => toggleFactions(false));
 
@@ -498,7 +806,7 @@ function renderSettings() {
     ['Menus', [
       ['Pause / Resume', 'Space'], ['Speed down / up', '- / +'],
       ['Conquest Map', 'Shift+M'], ['Budget Report', 'Shift+B'], ['Research', 'Shift+T'],
-      ['Cliques', 'Shift+F'], ['Programs', 'Shift+P'],
+      ['Cliques', 'Shift+F'], ['Programs', 'Shift+P'], ['Fabrication (Drones)', 'Shift+N'],
       ['Help Reference', 'F1 or ?'], ['Deselect tool / close Map-Research-Budget-Cliques-Programs', 'Escape'],
     ]],
     ['Save / Load', [
@@ -1081,6 +1389,8 @@ function makeWorld({ width, height, seed, aggression, startingCitizens, storytel
 const worldmapEl = document.getElementById('worldmap');
 const worldmapGridEl = document.getElementById('worldmap-grid');
 const worldmapSubEl = document.getElementById('worldmap-sub');
+const worldmapRangeLabelEl = document.getElementById('worldmap-range-label');
+const btnUpgradeRangeEl = document.getElementById('btn-worldmap-upgrade-range');
 
 function toggleWorldMap(force) {
   const show = force != null ? force : worldmapEl.classList.contains('hidden');
@@ -1089,6 +1399,25 @@ function toggleWorldMap(force) {
   if (show) renderWorldMap();
 }
 input.onToggleMap = () => toggleWorldMap();
+
+/** Refresh the "Upgrade travel range" row -- current range, next cost, capped/afford state. */
+function refreshRangeRow() {
+  if (!worldmapRangeLabelEl || !btnUpgradeRangeEl) return;
+  const maxed = worldMap.travelRange >= MAX_TRAVEL_RANGE;
+  worldmapRangeLabelEl.textContent = maxed
+    ? `Travel range: ${worldMap.travelRange} (max)`
+    : `Travel range: ${worldMap.travelRange} · next upgrade ${worldMap.rangeUpgradeCost()} scrap`;
+  btnUpgradeRangeEl.disabled = maxed || world.scrap < worldMap.rangeUpgradeCost();
+  btnUpgradeRangeEl.classList.toggle('hidden', maxed);
+}
+btnUpgradeRangeEl?.addEventListener('click', () => {
+  if (worldMap.upgradeTravelRange(world)) {
+    showToast(`Travel range upgraded to ${worldMap.travelRange}`);
+    renderWorldMap();
+  } else {
+    showToast('Cannot upgrade travel range');
+  }
+});
 input.onCloseMap = () => toggleWorldMap(false);
 input.onToggleFinance = () => toggleFinance();
 input.onCloseFinance = () => toggleFinance(false);
@@ -1127,6 +1456,29 @@ function toggleFactions(force) {
 }
 input.onToggleFactions = () => toggleFactions();
 input.onCloseFactions = () => toggleFactions(false);
+
+// ---------------------------------------------------------------- draft/undraft (draft.js)
+// Shared by the Shift+D hotkey (input.js's onToggleDraft) and the inspector's draft button (see
+// its click handler near updateInspector below) -- both just need "toggle draft for whichever
+// citizen(s) are currently selected", so this is the one place that logic lives. Mixed selections
+// (some already drafted, some not) draft everyone if ANY are undrafted, same "unify to the
+// majority action" convention RimWorld's own multi-select draft button uses, rather than a
+// per-citizen toggle that could leave a marquee-selected group in a split state from one click.
+function toggleDraftSelection() {
+  const indices = (input.selectedCitizens && input.selectedCitizens.length > 0)
+    ? input.selectedCitizens
+    : (input.selectedCitizen >= 0 ? [input.selectedCitizen] : []);
+  const alive = indices.filter(i => i >= 0 && i < world.citizens.count && world.citizens.isAliveAt(i));
+  if (alive.length === 0) return;
+  const anyUndrafted = alive.some(i => !isDrafted(world, world.citizens.id[i]));
+  for (const i of alive) {
+    const id = world.citizens.id[i];
+    if (anyUndrafted) draftCitizen(world, id); else undraftCitizen(world, id);
+  }
+  showToast(anyUndrafted ? `Drafted ${alive.length}` : `Undrafted ${alive.length}`);
+  updateInspector();
+}
+input.onToggleDraft = () => toggleDraftSelection();
 
 /** Full rebuild of the clique cards -- cheap (3 cliques) to redraw wholesale, same "no diffing
  *  needed, small enough list" reasoning as renderResearch/renderWorldMap. Shows "not formed yet"
@@ -1230,6 +1582,228 @@ function refreshPrograms() {
   renderPrograms();
 }
 
+// ---------------------------------------------------------------- outpost charter contracts overlay (grants.js)
+// Same full-screen-overlay-with-a-toggle-button convention as every panel above. One card per
+// GRANT_ORDER entry (fixed 6: Bootstrap, the 4-rung population ladder, the Emergency Stabilization
+// bailout), plus a standing Invest section below the grid for the time-locked instrument -- that
+// one isn't milestone-gated, it's a player-initiated action available any time there's enough
+// scrap on hand, so it doesn't fit the locked/available/completed card shape the others share.
+const grantsEl = document.getElementById('grants');
+const grantsGridEl = document.getElementById('grants-grid');
+const grantsSubEl = document.getElementById('grants-sub');
+const investSubEl = document.getElementById('invest-sub');
+const investPendingEl = document.getElementById('invest-pending');
+const btnInvestShort = document.getElementById('btn-invest-short');
+const btnInvestLong = document.getElementById('btn-invest-long');
+
+function toggleGrantsPanel(force) {
+  const show = force != null ? force : grantsEl.classList.contains('hidden');
+  grantsEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-grants').classList.toggle('active', show);
+  if (show) renderGrants();
+}
+input.onToggleGrants = () => toggleGrantsPanel();
+input.onCloseGrants = () => toggleGrantsPanel(false);
+
+btnInvestShort.textContent = `Short-Term (${INVEST_SHORT_TICKS}t): pay ${INVEST_COST} -> get ${INVEST_SHORT_PAYOUT}`;
+btnInvestLong.textContent = `Long-Term (${INVEST_LONG_TICKS}t): pay ${INVEST_COST} -> get ${INVEST_LONG_PAYOUT}`;
+btnInvestShort.addEventListener('click', () => {
+  const res = startInvestment(world, InvestmentTerm.Short);
+  if (!res.ok) { showToast(res.reason); return; }
+  showToast(`Invested ${INVEST_COST} scrap, matures in ${INVEST_SHORT_TICKS} ticks`);
+  renderGrants();
+});
+btnInvestLong.addEventListener('click', () => {
+  const res = startInvestment(world, InvestmentTerm.Long);
+  if (!res.ok) { showToast(res.reason); return; }
+  showToast(`Invested ${INVEST_COST} scrap, matures in ${INVEST_LONG_TICKS} ticks`);
+  renderGrants();
+});
+
+/** Full rebuild of the charter cards + investment section. ~6 cards, only while the overlay is
+ *  open -- same "cheap enough not to diff" reasoning as renderResearch/renderPrograms. */
+function renderGrants() {
+  const state = world.grants;
+  grantsGridEl.innerHTML = '';
+  let completedCount = 0;
+  for (const id of GRANT_ORDER) {
+    const def = GRANT_DEFS[id];
+    const status = charterStatus(world, id);
+    if (status === 'completed') completedCount++;
+    const card = document.createElement('div');
+    card.className = 'node' + (status === 'completed' ? ' done' : status === 'available' ? ' available' : ' blocked');
+
+    const checklistHtml = def.checklist.map(item => {
+      const ok = status === 'completed' || item.check(world, state);
+      return `<div class="chk ${ok ? 'ok' : ''}">${ok ? '✓' : '○'} ${resolveText(item.label, world)}</div>`;
+    }).join('');
+    const doneN = def.checklist.filter(item => status === 'completed' || item.check(world, state)).length;
+    const pct = def.checklist.length > 0 ? (doneN / def.checklist.length) * 100 : (status === 'completed' ? 100 : 0);
+
+    const badge = status === 'completed' ? `Fulfilled (+${def.reward} scrap)`
+      : status === 'available' ? 'Available -- clear the checklist'
+        : id === CharterKind.Bailout ? 'Hidden until the settlement is in real trouble'
+          : `Requires ${GRANT_DEFS[def.requires]?.label ?? 'a prior charter'}`;
+
+    card.innerHTML =
+      `<div class="rname">${def.label}</div>` +
+      `<div class="badge">${badge}</div>` +
+      `<div class="desc">${resolveText(def.desc, world)}</div>` +
+      (status !== 'locked' ? `<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>${checklistHtml}` : '') +
+      `<div class="unlocks">Reward: ${def.reward} scrap</div>`;
+    grantsGridEl.appendChild(card);
+  }
+  grantsSubEl.textContent = `${completedCount} / ${GRANT_ORDER.length} charters fulfilled &middot; ${Math.round(world.scrap)} scrap on hand`;
+
+  investSubEl.textContent = `Pay ${INVEST_COST} scrap now, collect more later. Longer terms pay a bigger multiple.`;
+  btnInvestShort.disabled = world.scrap < INVEST_COST;
+  btnInvestLong.disabled = world.scrap < INVEST_COST;
+  const pending = state.investments;
+  investPendingEl.innerHTML = pending.length === 0 ? 'No pending investments.' : pending.map(inv =>
+    `<div class="chk">${inv.term === InvestmentTerm.Short ? 'Short-term' : 'Long-term'}: ${inv.cost} staked -> ${inv.payout} in ${Math.max(0, inv.matureTick - world.currentTick)} ticks</div>`
+  ).join('');
+}
+
+function refreshGrants() {
+  if (grantsEl.classList.contains('hidden')) return;
+  renderGrants();
+}
+
+// ---------------------------------------------------------------- fabrication / labor drones overlay (drones.js)
+// One card per DRONE_CATEGORIES entry with a "Fabricate" button (spends scrap immediately, queues
+// gestation -- see queueDroneFabrication's own doc comment for why), plus a live capacity readout
+// and a plain list of drones/queue entries below the grid. Deliberately not gated on a Fabrication
+// Bay's existence to hide the panel -- opening it with no Bay built yet is exactly how a player
+// discovers they need one (queueDroneFabrication's own reason string surfaces that on click).
+const dronesEl = document.getElementById('drones');
+const dronesGridEl = document.getElementById('drones-grid');
+const dronesSubEl = document.getElementById('drones-sub');
+const dronesActiveEl = document.getElementById('drones-active');
+
+function toggleDronesPanel(force) {
+  const show = force != null ? force : dronesEl.classList.contains('hidden');
+  dronesEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-drones').classList.toggle('active', show);
+  if (show) renderDrones();
+}
+input.onToggleDrones = () => toggleDronesPanel();
+input.onCloseDrones = () => toggleDronesPanel(false);
+
+function renderDrones() {
+  const cap = droneCapacity(world.structures);
+  const used = droneSlotsUsed(world);
+  dronesGridEl.innerHTML = '';
+  for (const cat of DRONE_CATEGORIES) {
+    const card = document.createElement('div');
+    card.className = 'node';
+    card.innerHTML =
+      `<div class="rname">${WORK_CATEGORY_LABELS[cat]} Drone</div>` +
+      `<div class="desc">Locked to ${WORK_CATEGORY_LABELS[cat]} for its whole lifetime. No hunger/rest/social/mood -- works this one job category autonomously, tirelessly.</div>` +
+      `<button data-cat="${cat}">Fabricate (${DRONE_COST} scrap, ${DRONE_GESTATION_TICKS}t)</button>`;
+    const btn = card.querySelector('button');
+    btn.disabled = used >= cap || world.scrap < DRONE_COST;
+    btn.addEventListener('click', () => {
+      const reason = queueDroneFabrication(world, cat);
+      if (reason) { showToast(reason); return; }
+      showToast(`Queued a ${WORK_CATEGORY_LABELS[cat]} drone -- gestating`);
+      renderDrones();
+    });
+    dronesGridEl.appendChild(card);
+  }
+  dronesSubEl.textContent = `${used} / ${cap} drone capacity used &middot; ${Math.round(world.scrap)} scrap on hand` +
+    (cap === 0 ? ' -- build a Fabrication Bay to unlock capacity' : '');
+
+  const rows = [];
+  for (const order of world.droneFabricationQueue) {
+    rows.push(`<div class="row"><span class="cat">${WORK_CATEGORY_LABELS[order.category]} (gestating)</span><span>${order.ticksRemaining}t left</span></div>`);
+  }
+  for (const drone of world.drones) {
+    const status = drone.state === 'idle' ? 'idle' : drone.state === 'seeking' ? 'travelling' : drone.state === 'driving' ? 'hauling' : 'working';
+    rows.push(`<div class="row"><span class="cat">${WORK_CATEGORY_LABELS[drone.category]} drone</span><span>${status}</span></div>`);
+  }
+  dronesActiveEl.innerHTML = rows.length ? rows.join('') : 'No drones fabricated yet.';
+}
+
+function refreshDrones() {
+  if (dronesEl.classList.contains('hidden')) return;
+  renderDrones();
+}
+
+// ---------------------------------------------------------------- coverage plans overlay (coverageplans.js)
+// Same full-screen-overlay-with-a-toggle-button convention as every panel above. One card per
+// COVERAGE_PLAN_ORDER entry (fixed 2): a one-time Buy button while unpurchased, then a live
+// threshold readout ("N / threshold structures on fire") and a Call In button once owned, gated
+// on isCallInReady the exact same way Research's button is gated on affordableNow.
+const coverageEl = document.getElementById('coverage');
+const coverageGridEl = document.getElementById('coverage-grid');
+const coverageSubEl = document.getElementById('coverage-sub');
+
+function toggleCoveragePlansPanel(force) {
+  const show = force != null ? force : coverageEl.classList.contains('hidden');
+  coverageEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-coverage').classList.toggle('active', show);
+  if (show) renderCoveragePlans();
+}
+input.onToggleCoverage = () => toggleCoveragePlansPanel();
+input.onCloseCoverage = () => toggleCoveragePlansPanel(false);
+
+function renderCoveragePlans() {
+  coverageGridEl.innerHTML = '';
+  let ownedCount = 0;
+  for (const kind of COVERAGE_PLAN_ORDER) {
+    const def = COVERAGE_PLAN_DEFS[kind];
+    const owned = isPlanActive(world, kind);
+    if (owned) ownedCount++;
+    const ready = owned && isCallInReady(world, kind);
+    const current = callInLiveCount(world, kind);
+    const card = document.createElement('div');
+    card.className = 'node' + (owned ? (ready ? ' available' : ' done') : (world.scrap >= def.cost ? '' : ' blocked'));
+    card.dataset.planId = kind;
+
+    const discountLine = Object.entries(def.discounts).map(([k, pct]) => `${k} -${Math.round(pct * 100)}%`).join(', ');
+    const badge = !owned ? `Not purchased -- ${def.cost} scrap` : ready ? 'Call-in ready' : 'Purchased -- call-in not ready';
+
+    card.innerHTML =
+      `<div class="rname">${def.label}</div>` +
+      `<div class="badge">${badge}</div>` +
+      `<div class="desc">Discounts: ${discountLine}</div>` +
+      `<div class="desc">${def.callIn.label} -- ${def.callIn.description}</div>` +
+      `<div class="badge cost-line">${current} / ${def.callIn.threshold} ${def.callIn.thresholdNoun}</div>`;
+
+    if (!owned) {
+      const btn = document.createElement('button');
+      btn.textContent = `Buy Plan (${def.cost})`;
+      btn.disabled = world.scrap < def.cost;
+      btn.addEventListener('click', () => {
+        if (!purchaseCoveragePlan(world, kind)) { showToast('Not enough scrap for this plan'); return; }
+        showToast(`Purchased: ${def.label}`);
+        renderCoveragePlans();
+      });
+      card.appendChild(btn);
+    } else {
+      const btn = document.createElement('button');
+      btn.textContent = def.callIn.label;
+      btn.disabled = !ready;
+      btn.addEventListener('click', () => {
+        if (!triggerCallIn(world, kind)) { showToast('Call-in not ready yet'); return; }
+        showToast(`${def.callIn.label}: dispatched`);
+        renderCoveragePlans();
+      });
+      card.appendChild(btn);
+    }
+    coverageGridEl.appendChild(card);
+  }
+  coverageSubEl.textContent = `${ownedCount} / ${COVERAGE_PLAN_ORDER.length} plans purchased &middot; ${Math.round(world.scrap)} scrap on hand`;
+}
+
+/** Live progress while the overlay stays open -- same "only redraw while visible" gate as the
+ *  other refresh* functions. Full rebuild every call: only 2 cards, cheap, and the readiness gate
+ *  needs to flip a button's disabled state live as fires/downed-counts change tick to tick. */
+function refreshCoveragePlans() {
+  if (coverageEl.classList.contains('hidden')) return;
+  renderCoveragePlans();
+}
+
 // ---------------------------------------------------------------- work priorities panel
 // RimWorld Work-tab-style grid: every living citizen (row) x jobs.js's 4 non-needs WorkCategory
 // columns (Construction/Hauling/Harvesting/Animal Handling). Reached from the citizen inspector's
@@ -1248,6 +1822,56 @@ function toggleWorkPriorities(force) {
 document.getElementById('insp-workprio-btn').addEventListener('click', () => toggleWorkPriorities());
 document.getElementById('btn-workprio-close').addEventListener('click', () => toggleWorkPriorities(false));
 
+// Rank Up (ranks.js) -- single-selection only, same convention as Schedule/Restrict Area/weapon
+// tier below. canRankUp's gate is re-checked inside tryRankUp itself (not just trusted from the
+// last inspector paint), so a stale button state from a mid-tick UI refresh can't spend scrap
+// without actually clearing every requirement.
+document.getElementById('insp-rankup-btn').addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || !world.citizens.isAliveAt(sel)) return;
+  const result = tryRankUp(world.citizens, sel, world);
+  if (result.ok) showToast(`${world.citizens.name[sel]} promoted to ${result.rank.name}!`);
+  updateInspector();
+});
+
+// Draft/undraft button (draft.js) -- shares toggleDraftSelection with the Shift+D hotkey, see
+// that function's doc comment above.
+document.getElementById('insp-draft-btn').addEventListener('click', () => toggleDraftSelection());
+
+// Per-citizen Schedule override (schedule.js's ScheduleOverride) -- click-to-cycle
+// None -> Sleep -> Work -> Recreation -> None. Single-selection only (mirrors the weapon-tier
+// row and Work Priorities button, both of which also only ever act on one inspected citizen).
+const SCHEDULE_OVERRIDE_CYCLE = [ScheduleOverride.None, ScheduleOverride.Sleep, ScheduleOverride.Work, ScheduleOverride.Recreation];
+document.getElementById('insp-schedule-btn').addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const cur = world.citizens.scheduleOverride[sel];
+  const idx = SCHEDULE_OVERRIDE_CYCLE.indexOf(cur);
+  world.citizens.scheduleOverride[sel] = SCHEDULE_OVERRIDE_CYCLE[(idx + 1) % SCHEDULE_OVERRIDE_CYCLE.length];
+  updateInspector();
+});
+
+// Allowed Area restriction (RimWorld Restrict-tab style, see input.js's 'restrict-area' tool /
+// citizens.js's paintAllowedAreaCell). "Restrict Area" arms paint mode targeting whichever
+// citizen is currently selected -- input.js reads input.selectedCitizen directly when painting,
+// so this deliberately does NOT require re-selecting after entering paint mode. "Clear Area"
+// removes the whole restriction and exits paint mode if it was active.
+document.getElementById('insp-restrict-btn').addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  input.setTool(input.tool === 'restrict-area' ? null : 'restrict-area');
+  updateInspector();
+  syncToolbarHighlight();
+});
+document.getElementById('insp-restrict-clear-btn').addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  world.citizens.clearAllowedArea(sel);
+  if (input.tool === 'restrict-area') { input.setTool(null); syncToolbarHighlight(); }
+  updateInspector();
+  showToast('Area restriction cleared');
+});
+
 // Corrupt/bribable staff (security.js): fires the currently-inspected citizen if (and only if)
 // they've actually been caught -- updateInspector below is what shows/hides this button in the
 // first place, so a click here always has a real discovered-corrupt id behind it.
@@ -1259,13 +1883,64 @@ document.getElementById('insp-fire-corrupt-btn').addEventListener('click', () =>
   if (result.ok) showToast(`Fired for corruption -- +${result.reward} scrap`);
 });
 
-const WORKPRIO_CYCLE_MAX = 3; // priority tiers 1-3, plus 0 (Off) -- matches WORK_CATEGORY_FIELD's 4 categories
+// Vest purchase (world.js's buyVest / citizens.js's hasVest, siege.js's CITIZEN_VEST_ARMOR_RATING)
+// -- the citizen-side counterpart to the manual weapon-tier row above, but a one-shot buy rather
+// than a togglable tier since there's only one Vest, not a ladder. updateInspector below hides
+// this once a citizen already has one.
+document.getElementById('insp-buy-vest-btn')?.addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const citizenId = world.citizens.id[sel];
+  const result = world.buyVest(citizenId);
+  if (result.ok) { showToast('Vest equipped'); updateInspector(); }
+  else if (result.reason === 'cost') showToast('Not enough scrap');
+});
+
+// Upgraded K9 tier (security.js's upgradeDog/world.upgradeDog) -- only enabled/shown for a
+// K9Handler with a real, not-yet-upgraded dog assigned, see updateInspector's insp-upgrade-dog-btn
+// toggle below.
+document.getElementById('insp-upgrade-dog-btn')?.addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const citizenId = world.citizens.id[sel];
+  const result = world.upgradeDog(citizenId);
+  if (result.ok) { showToast('K9 upgraded'); updateInspector(); }
+  else if (result.reason === 'cost') showToast('Not enough scrap');
+});
+
+// Manual weapon-tier override buttons (security.js's StaffRoster.setManualWeapon/
+// clearManualWeapon). Delegated on the row rather than one listener per tier button -- same
+// pattern as the work-priority grid's per-cell clicks below, just a flat row instead of a grid.
+document.getElementById('insp-weapon-row')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const citizenId = world.citizens.id[sel];
+  if (btn.id === 'insp-weapon-auto-btn') {
+    world.roster.clearManualWeapon(citizenId);
+  } else if (btn.dataset.tier) {
+    world.roster.setManualWeapon(citizenId, btn.dataset.tier);
+  } else {
+    return;
+  }
+  updateInspector();
+});
+
+const WORKPRIO_CYCLE_MAX = 4; // priority tiers 1-4 (RimWorld's real Work-tab granularity), plus 0 (Off)
 
 /** Full rebuild of the citizen x category grid. Only ever called while the overlay is open
  *  (toggleWorkPriorities/the per-cell click handler below), so a rebuild-on-every-click is cheap
- *  enough -- same "no diffing needed, small enough list" reasoning as renderResearch. */
+ *  enough -- same "no diffing needed, small enough list" reasoning as renderResearch. Highlights
+ *  and scrolls to whichever citizen was actually selected/inspected when the panel was opened
+ *  (see toggleWorkPriorities), so the panel visibly reads as "this specific colonist's priorities"
+ *  rather than a disconnected colony-wide report -- per the user's explicit complaint that this
+ *  didn't feel tied to the selected citizen. */
 function renderWorkPriorities() {
   const c = world.citizens;
+  const highlightIdx = (input.selectedCitizens && input.selectedCitizens.length === 1)
+    ? input.selectedCitizens[0]
+    : (input.selectedCitizen >= 0 ? input.selectedCitizen : -1);
   workprioTableEl.innerHTML = '';
   const thead = document.createElement('thead');
   thead.innerHTML = '<tr><th>Citizen</th>' +
@@ -1279,6 +1954,7 @@ function renderWorkPriorities() {
     if (!c.isAliveAt(i)) continue;
     anyRows = true;
     const tr = document.createElement('tr');
+    if (i === highlightIdx) tr.className = 'wp-row-selected';
     const role = world.roster.isStaff(c.id[i]) ? world.roster.kindOf(c.id[i]) : 'Citizen';
     const nameTd = document.createElement('td');
     nameTd.innerHTML = `<div class="wp-name">${c.name[i]}</div><div class="wp-role">${role}</div>`;
@@ -1337,6 +2013,10 @@ function renderWorkPriorities() {
     empty.className = 'wp-empty';
     empty.textContent = 'No living citizens.';
     workprioTableEl.appendChild(empty);
+  }
+  if (highlightIdx >= 0) {
+    const selectedRow = workprioTableEl.querySelector('.wp-row-selected');
+    if (selectedRow) selectedRow.scrollIntoView({ block: 'center' });
   }
 }
 
@@ -1467,6 +2147,7 @@ function renderWorldMap() {
     `${held} of ${worldMap.regions.length} regions held · currently running ${active.name} ` +
     `(${Math.round(active.control)}% control)` +
     (shipping > 0 ? ` · ${shipping} allied settlement${shipping > 1 ? 's' : ''} shipping scrap in` : '');
+  refreshRangeRow();
 }
 
 /** Move the operation: bank what we've got here, then stand up a FRESH SimWorld in the new
@@ -1474,7 +2155,15 @@ function renderWorldMap() {
  *  relocating, not managing two live sims. */
 function expandTo(regionId) {
   worldMap.bankActive(world);
-  if (!worldMap.setActive(regionId)) { showToast('Cannot expand there'); return; }
+  // setActive() charges EXPANSION_FUEL_COST scrap against the settlement being left (mirrors a
+  // real gravship needing chemfuel already banked before it'll launch) and refuses the move if
+  // it's short -- give the player the real reason rather than a generic failure toast.
+  if (!worldMap.isExpandable(regionId)) { showToast('Cannot expand there'); return; }
+  if (world.scrap < EXPANSION_FUEL_COST) {
+    showToast(`Not enough scrap to launch the expedition (need ${EXPANSION_FUEL_COST})`);
+    return;
+  }
+  if (!worldMap.setActive(regionId, world)) { showToast('Cannot expand there'); return; }
   const seed = Math.floor(Math.random() * 0xffffffff);
   // Same settings the player picked for this campaign (map size, aggression, storyteller) --
   // only the seed and the region change. startGame() does the camera/selection/log resets.
@@ -1482,6 +2171,20 @@ function expandTo(regionId) {
   world.milestoneLog.push({ tick: 0, text: `Expedition established in ${worldMap.active.name}` });
   showToast(`Expanded to ${worldMap.active.name}`);
   console.log(`[WorldMap] Expanded to ${worldMap.active.name} (region ${regionId}), seed ${seed}.`);
+  // Apply the arrival mishap (if any) rolled by setActive() to the FRESH settlement -- worldmap.js
+  // can't do this itself (no world.js import, avoids a circular import), so the caller applies it
+  // once the new world actually exists. See worldmap.js's setActive()/rollArrivalMishap() comments.
+  const mishap = worldMap.pendingMishap;
+  worldMap.pendingMishap = null;
+  if (mishap?.kind === 'scrapLoss') {
+    world.scrap = Math.max(0, world.scrap - mishap.amount);
+    world.milestoneLog.push({ tick: 0, text: `Rough landing: lost ${mishap.amount} scrap in transit` });
+    showToast(`Mishap: lost ${mishap.amount} scrap on arrival`);
+  } else if (mishap?.kind === 'debuff') {
+    world.arrivalMishapTicks = mishap.ticks;
+    world.milestoneLog.push({ tick: 0, text: 'Rough landing: crew shaken, work is slower for a while' });
+    showToast('Mishap: crew shaken, work speed reduced temporarily');
+  }
   renderWorldMap();
 }
 
@@ -1506,6 +2209,7 @@ function refreshWorldMapValues() {
         `${s.citizens} citizens · ${s.waves} waves · ${s.scrap} scrap${s.fallen ? ' · fallen' : ''}`;
     }
   }
+  refreshRangeRow();
 }
 
 window.addEventListener('keydown', (e) => {
@@ -1546,8 +2250,10 @@ const FINANCE_CATEGORIES = [
   ['harvestScrap', '⛏ Harvesting', 'income'],
   ['haulScrap', '🚚 Vehicle hauls', 'income'],
   ['recyclingScrap', '♻ Recycling Center', 'income'],
+  ['farmScrap', '🌾 Farm Plots', 'income'],
   ['conquestScrap', '🗺 Conquest supply lines', 'income'],
   ['factionScrap', '🤝 Clique demands', 'income'],
+  ['grantScrap', '📜 Charter contracts & investments', 'income'],
   ['otherScrap', '❓ Other', 'income'],
   ['buildSpend', '🔨 Construction spend', 'expense'],
 ];
@@ -1582,10 +2288,11 @@ function refreshFinance() {
 // ---------------------------------------------------------------- inspector panel
 const inspectorEl = document.getElementById('inspector');
 function updateInspector() {
-  // Marquee multi-select (see input.js InputController._onUp) has no per-citizen command system
-  // to hook into -- there's no "move here"/"build this" order in this game, citizens are fully
-  // autonomous via jobs.js's priority system. So a 2+ selection is honestly just an aggregate
-  // info view (group averages + a name list), not a fake commands UI.
+  // Marquee multi-select (see input.js InputController._onUp): still mostly an aggregate info
+  // view (group averages + a name list) rather than per-citizen detail, but draft.js's command
+  // system DOES apply group-wide here -- the draft button below drafts/undrafts the whole
+  // selection together, and a drafted multi-select's right-click move/attack orders (input.js's
+  // _tryIssueOrder) go to every drafted citizen in it at once.
   if (input.selectedCitizens && input.selectedCitizens.length > 1) {
     updateInspectorMulti(input.selectedCitizens);
     return;
@@ -1618,20 +2325,68 @@ function updateInspector() {
   }
   const statusEl = document.getElementById('insp-status');
   const isDiscoveredCorrupt = world.roster.isCorruptDiscovered(c.id[sel]);
+  const drafted = c.isDraftedAt(sel);
   if (isDiscoveredCorrupt) {
     statusEl.textContent = 'Caught diverting supplies -- fire them below for a reward';
   } else if (c.isDownedAt(sel)) {
     statusEl.textContent = 'Downed';
+  } else if (drafted) {
+    // Order-progress readout (draft.js's orderKind) -- lets the player see at a glance whether a
+    // drafted citizen is actively moving/fighting or just standing at attention awaiting an order.
+    const ok = c.orderKind[sel];
+    statusEl.textContent = ok === OrderKind.Move ? 'Drafted -- moving to order'
+      : ok === OrderKind.Attack ? 'Drafted -- engaging target'
+      : 'Drafted -- standing by (right-click a tile to move, right-click an attacker to engage)';
   } else if (c.isOnBreakAt(sel)) {
     statusEl.textContent = 'On Break (mood too low to work at full speed)';
   } else {
     statusEl.textContent = '';
   }
   document.getElementById('insp-fire-corrupt-btn').classList.toggle('hidden', !isDiscoveredCorrupt);
+  // Vest purchase button (world.js's buyVest) -- hidden once already vested, same "one-shot
+  // purchase, then disappears" convention as nothing else in this panel needing a fresh precedent.
+  const buyVestBtn = document.getElementById('insp-buy-vest-btn');
+  if (buyVestBtn) {
+    const vested = c.isVestedAt(sel);
+    buyVestBtn.classList.toggle('hidden', vested);
+    buyVestBtn.textContent = `🛡️ Buy Vest (${buildCost(world, 'vest')} scrap)`;
+  }
+  // Upgraded K9 tier -- only meaningful for a K9Handler who actually has a dog assigned (should
+  // always be true given security.js's assignDogHandler wires both sides together, but a dog
+  // could in principle be missing on an old/hand-edited save, hence the explicit find() check
+  // rather than assuming one exists). Hidden entirely once already upgraded, same one-shot-
+  // purchase convention as the Vest button above.
+  const upgradeDogBtn = document.getElementById('insp-upgrade-dog-btn');
+  if (upgradeDogBtn) {
+    const dog = role === 'K9Handler' ? world.dogs.find(d => d.ownerId === c.id[sel]) : null;
+    upgradeDogBtn.classList.toggle('hidden', !dog || dog.upgraded);
+    if (dog) upgradeDogBtn.textContent = `🐕 Upgrade K9 (${K9_UPGRADE_SCRAP_COST} scrap)`;
+  }
+  const draftBtn = document.getElementById('insp-draft-btn');
+  draftBtn.textContent = drafted ? '🎯 Undraft' : '🎯 Draft';
+  draftBtn.classList.toggle('active', drafted);
+  // Per-citizen Schedule override (schedule.js) -- button label always names the CURRENT setting
+  // (same "no separate description line" convention as the draft button above), and .active
+  // marks any real override (colors it) so a glance at the panel shows whether this citizen is
+  // pinned off the colony-wide cycle.
+  const scheduleBtn = document.getElementById('insp-schedule-btn');
+  scheduleBtn.classList.remove('hidden');
+  const scheduleVal = c.scheduleOverride[sel];
+  scheduleBtn.textContent = `🕒 Schedule: ${SCHEDULE_OVERRIDE_LABELS[scheduleVal] ?? 'Colony schedule'}`;
+  scheduleBtn.classList.toggle('active', scheduleVal !== ScheduleOverride.None);
+  // Allowed Area restriction (citizens.js's hasAllowedArea) -- "Clear Area" only shows once a
+  // restriction actually exists, and the "Restrict Area" button highlights while its paint mode
+  // is the currently-armed tool so the player can see they're mid-paint.
+  const restrictBtn = document.getElementById('insp-restrict-btn');
+  restrictBtn.parentElement?.classList.remove('hidden');
+  const hasArea = c.hasAllowedArea(sel);
+  restrictBtn.classList.toggle('active', input.tool === 'restrict-area');
+  document.getElementById('insp-restrict-clear-btn').classList.toggle('hidden', !hasArea);
   setBar('hp', c.health[sel]);
   setBar('hunger', c.hunger[sel]);
   setBar('rest', c.rest[sel]);
   setBar('social', c.social[sel]);
+  setBar('hydration', c.hydration[sel]);
   setBar('mood', c.mood[sel]);
   // Per-citizen unrest-contribution score (citizens.js's computeCitizenUnrestScore, Prison
   // Architect dynamicRep.txt-style) -- 0-100 like every other bar here, distinct from the
@@ -1641,29 +2396,108 @@ function updateInspector() {
   document.getElementById('insp-skill').textContent =
     `Combat: ${skillLevel(c.skillCombat[sel])}${PASSION_ICON[c.passionCombat[sel]]} · ` +
     `Construction: ${skillLevel(c.skillConstruction[sel])}${PASSION_ICON[c.passionConstruction[sel]]}`;
-  document.getElementById('insp-room').textContent = roomStatLine(c.x[sel], c.y[sel]);
+  updateInspectorRank(sel);
+  updateInspectorWeapon(c.id[sel], role);
+  updateInspectorRoom(c.x[sel], c.y[sel]);
+}
+
+// Citizen Rank (ranks.js). Shows the current rank name + accumulated skill (skillConstruction +
+// skillCombat, ranks.js's combined "favor" stat) against the next tier's requirement, and enables
+// the Rank Up button only when canRankUp() clears every gate (skill threshold, scrap cost, and --
+// from tier 3 up -- a room-impressiveness "veteran's quarters" requirement). The button's title
+// always names the specific unmet requirement rather than just disabling silently, so a player who
+// hovers a grayed-out button can tell what's actually missing.
+function updateInspectorRank(sel) {
+  const c = world.citizens;
+  const rank = rankOf(c, sel);
+  const rankLineEl = document.getElementById('insp-rank-line');
+  const rankBtn = document.getElementById('insp-rankup-btn');
+  const check = canRankUp(c, sel, world);
+  const isMax = c.citizenRank[sel] >= RANKS.length - 1;
+  rankLineEl.textContent = isMax
+    ? `Rank: ${rank.name} (maximum)`
+    : `Rank: ${rank.name} -> ${RANKS[c.citizenRank[sel] + 1].name}`;
+  rankBtn.classList.toggle('hidden', isMax);
+  if (!isMax) {
+    rankBtn.disabled = !check.ok;
+    rankBtn.title = check.ok
+      ? `Rank up to ${check.rank.name} for ${check.rank.scrapCost} scrap -- +${Math.round((check.rank.workSpeedMult - 1) * 100)}% work speed, +${Math.round((check.rank.healthMult - 1) * 100)}% health.`
+      : `Rank Up: ${check.reason}`;
+  }
+}
+
+// Manual weapon-tier override (RimWorld-style "player picks this one's gear" -- security.js's
+// StaffRoster.setManualWeapon/clearManualWeapon, tickArmoryIssuance honors it every tick). Only
+// shown for Guard/Sniper, the only roles WEAPON_TIERS actually affects (siege.js's
+// tickStaffCombat). A button per tier, highlighting whichever is currently equipped; clicking a
+// tier the armory doesn't stock yet still sets the override (queued -- see tickArmoryIssuance's
+// doc comment) and this readout shows "(queued)" until enough Armories exist to actually issue it.
+const insWeaponRow = document.getElementById('insp-weapon-row');
+const insWeaponButtons = insWeaponRow ? Array.from(insWeaponRow.querySelectorAll('button[data-tier]')) : [];
+function updateInspectorWeapon(citizenId, role) {
+  if (!insWeaponRow) return;
+  if (role !== 'Guard' && role !== 'Sniper') {
+    insWeaponRow.classList.add('hidden');
+    return;
+  }
+  insWeaponRow.classList.remove('hidden');
+  const equipped = world.roster.weaponOf(citizenId);
+  const manual = world.roster.manualWeaponOf(citizenId);
+  const pending = world.roster.isManualWeaponPending(citizenId);
+  for (const btn of insWeaponButtons) {
+    const tier = btn.dataset.tier;
+    const isEquipped = tier === equipped;
+    const isRequested = manual != null && tier === manual;
+    btn.classList.toggle('active', isRequested ? true : (manual == null && isEquipped));
+    btn.classList.toggle('queued', isRequested && pending);
+    btn.textContent = (isRequested && pending) ? `${WEAPON_TIERS[tier].label} (queued)` : WEAPON_TIERS[tier].label;
+  }
+  const autoBtn = document.getElementById('insp-weapon-auto-btn');
+  if (autoBtn) autoBtn.classList.toggle('active', manual == null);
 }
 
 // RimWorld-style flavor labels (rooms.js's impressivenessLabel/beautyLabel/cleanlinessLabel) next
 // to the existing raw .beauty/.cleanliness/.impressiveness numbers -- cosmetic text only, the
-// numbers stay so nothing is lost, this just makes them legible at a glance the way RimWorld's
-// own room-inspect tooltip does. Reused by both the single-citizen inspector above (whichever
-// room the selected citizen currently stands in) and nothing else yet -- there's no separate
-// tile/structure inspector in this game to hook a second call site into.
-function roomStatLine(x, y) {
+// numbers stay so nothing is lost. Cleanliness and Impressiveness are genuine clamp01'd 0-1
+// values (see rooms.js's computeRoomStats doc comment) so they get real inline bar-fills like
+// every other 0-1 stat in this panel; Beauty is a raw unbounded sum (same doc comment, roughly
+// -6..+15+), not a 0-1 range, so it stays a number+label line rather than a misleading bar.
+// Reused by both the single-citizen inspector above (whichever room the selected citizen
+// currently stands in) and nothing else yet -- there's no separate tile/structure inspector in
+// this game to hook a second call site into.
+function updateInspectorRoom(x, y) {
+  const roleEl = document.getElementById('insp-room-role');
+  const cleanRow = document.getElementById('insp-clean-row');
+  const impressRow = document.getElementById('insp-impress-row');
+  const beautyEl = document.getElementById('insp-beauty');
   const room = roomContaining(world.rooms, world.grid, x, y);
-  if (!room) return 'Not in an enclosed room';
+  if (!room) {
+    roleEl.textContent = 'Not in an enclosed room';
+    cleanRow.classList.add('hidden');
+    impressRow.classList.add('hidden');
+    beautyEl.textContent = '';
+    return;
+  }
   // world.js runs computeRoomStats() BEFORE the wall-signature check that (re)builds this.rooms
   // via detectRooms -- so a room detected fresh this very tick hasn't had its .beauty/.cleanliness/
   // .impressiveness populated yet and won't until next tick. Rare (one tick right after a wall
   // completes an enclosure) but real, so this guards rather than throwing on undefined.toFixed().
   if (room.beauty == null || room.cleanliness == null || room.impressiveness == null) {
-    return 'Room stats settling...';
+    roleEl.textContent = 'Room stats settling...';
+    cleanRow.classList.add('hidden');
+    impressRow.classList.add('hidden');
+    beautyEl.textContent = '';
+    return;
   }
   const roleLabel = ROOM_ROLE_LABEL[room.role] ?? 'Unroofed Area';
-  return `${roleLabel} · Beauty ${room.beauty.toFixed(1)} (${beautyLabel(room.beauty)}) · ` +
-    `Cleanliness ${room.cleanliness.toFixed(2)} (${cleanlinessLabel(room.cleanliness)}) · ` +
-    `Impressiveness ${room.impressiveness.toFixed(2)} (${impressivenessLabel(room.impressiveness)})`;
+  roleEl.textContent = roleLabel;
+  cleanRow.classList.remove('hidden');
+  impressRow.classList.remove('hidden');
+  setBar('clean', room.cleanliness);
+  setBar('impress', room.impressiveness);
+  document.getElementById('insp-clean-pct').textContent = `${cleanlinessLabel(room.cleanliness)} (${Math.round(room.cleanliness * 100)}%)`;
+  document.getElementById('insp-impress-pct').textContent = `${impressivenessLabel(room.impressiveness)} (${Math.round(room.impressiveness * 100)}%)`;
+  beautyEl.textContent = `Beauty ${room.beauty.toFixed(1)} (${beautyLabel(room.beauty)})`;
 }
 
 function updateInspectorMulti(indices) {
@@ -1679,17 +2513,43 @@ function updateInspectorMulti(indices) {
   const names = alive.slice(0, 5).map(i => c.name[i]).join(', ');
   document.getElementById('insp-role').textContent = names + (alive.length > 5 ? `, +${alive.length - 5} more` : '');
   document.getElementById('insp-backstory').textContent = '';
-  document.getElementById('insp-status').textContent = 'Group averages below';
+  const draftedCount = alive.filter(i => c.isDraftedAt(i)).length;
+  document.getElementById('insp-status').textContent = draftedCount > 0
+    ? `${draftedCount}/${alive.length} drafted -- Group averages below`
+    : 'Group averages below';
   document.getElementById('insp-fire-corrupt-btn').classList.add('hidden'); // no per-citizen action in a multi-select, see this function's own header comment above
+  document.getElementById('insp-buy-vest-btn')?.classList.add('hidden'); // same per-citizen-only reasoning as the corrupt-fire button above
+  document.getElementById('insp-weapon-row')?.classList.add('hidden'); // per-citizen weapon override, same reasoning as the corrupt-fire button above
+  // Schedule override / Allowed Area are both single-citizen concepts (one override value, one
+  // area mask per citizen) -- hidden in a multi-select rather than guessing which citizen a click
+  // should act on, same reasoning as the weapon-tier row above.
+  document.getElementById('insp-schedule-btn')?.classList.add('hidden');
+  document.getElementById('insp-restrict-btn')?.parentElement?.classList.add('hidden');
+  // Draft button in a multi-select: same "unify to majority action" toggle as toggleDraftSelection
+  // itself -- shows Draft (about to draft everyone not yet drafted) unless the WHOLE selection is
+  // already drafted, in which case it shows Undraft.
+  const allDrafted = alive.length > 0 && draftedCount === alive.length;
+  const draftBtnMulti = document.getElementById('insp-draft-btn');
+  draftBtnMulti.textContent = allDrafted ? '🎯 Undraft' : '🎯 Draft';
+  draftBtnMulti.classList.toggle('active', allDrafted);
   const avg = (arr) => alive.reduce((s, i) => s + arr[i], 0) / alive.length;
   setBar('hp', avg(c.health));
   setBar('hunger', avg(c.hunger));
   setBar('rest', avg(c.rest));
   setBar('social', avg(c.social));
+  setBar('hydration', avg(c.hydration));
   setBar('mood', avg(c.mood));
   setBar('unrest', alive.reduce((s, i) => s + computeCitizenUnrestScore(c, i, world), 0) / alive.length / 100);
   document.getElementById('insp-skill').textContent = '';
-  document.getElementById('insp-room').textContent = '';
+  // Rank Up is a single-citizen action (one rank-up target, one scrap spend) -- hidden in a
+  // multi-select rather than guessing which citizen a click should act on, same reasoning as the
+  // weapon-tier row / Schedule / Restrict Area controls above.
+  document.getElementById('insp-rank-line').textContent = '';
+  document.getElementById('insp-rankup-btn').classList.add('hidden');
+  document.getElementById('insp-room-role').textContent = 'Group averages -- select one citizen for room detail';
+  document.getElementById('insp-clean-row').classList.add('hidden');
+  document.getElementById('insp-impress-row').classList.add('hidden');
+  document.getElementById('insp-beauty').textContent = '';
 }
 
 // Raw skill floats are unbounded accrual values (see jobs.js/siege.js gain rates), not
@@ -1749,9 +2609,9 @@ function updateTopbar() {
     unrestEl.classList.toggle('danger', world.unrestActive);
   }
   const night = isNight(world.timeOfDay);
-  document.getElementById('stat-daynight-icon').textContent = night ? '🌙' : '☀';
+  setTopbarIcon('stat-daynight-icon', night ? 'night' : 'day', night ? 'Night' : 'Day');
   document.getElementById('stat-daynight').textContent = (night ? 'Night ' : 'Day ') + Math.round(world.timeOfDay * 100) + '%';
-  document.getElementById('stat-weather-icon').textContent = WEATHER_ICON[world.weather] || '🌤';
+  setTopbarIcon('stat-weather-icon', WEATHER_ICON[world.weather] || 'weatherClear', world.weather);
   document.getElementById('stat-weather').textContent = world.weather;
   pauseBtn.textContent = world.paused ? '▶ Resume' : '⏸ Pause';
   pauseBtn.classList.toggle('active', world.paused);
@@ -1870,7 +2730,7 @@ function showTitleScreen() {
   titleMainEl.classList.remove('hidden');
   titleSetupEl.classList.add('hidden');
   // Any overlay left open by the game being torn down would otherwise reappear on the next start.
-  for (const id of ['worldmap', 'finance', 'research', 'workprio', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
+  for (const id of ['worldmap', 'finance', 'research', 'factions', 'programs', 'grants', 'drones', 'workprio', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
     document.getElementById(id).classList.add('hidden');
   }
   // Quitting to title mid-tour shouldn't burn the first-run flag -- the player hasn't actually
@@ -1906,30 +2766,120 @@ const setupSeedEl = document.getElementById('setup-seed');
 let setupAggression = AggressionPreset.Standard;
 let setupStoryteller = 'Cassandra';
 
-function buildCards(containerId, cards, getSelected, onSelect) {
+/** Radio-list rendering for the left-column setup options (aggression/storyteller): a vertical
+ *  list of plain rows (dot + name only, no per-row description -- the SEA:R-style pattern this
+ *  screen is following shows exactly one description line, next to whichever option is currently
+ *  selected, not one per option). `descId`'s element is kept in sync with the selected entry's
+ *  third tuple field on both initial render and every click. */
+function buildRadioList(containerId, descId, cards, getSelected, onSelect, onChange) {
   const el = document.getElementById(containerId);
+  const descEl = document.getElementById(descId);
   el.innerHTML = '';
+  const syncDesc = () => {
+    const sel = cards.find(([value]) => value === getSelected());
+    descEl.textContent = sel ? sel[2] : '';
+  };
   for (const [value, name, desc] of cards) {
-    const card = document.createElement('div');
-    card.className = 'card' + (value === getSelected() ? ' selected' : '');
-    card.dataset.value = value;
-    card.innerHTML = `<div class="cname">${name}</div><div class="cdesc">${desc}</div>`;
-    card.addEventListener('click', () => {
+    const row = document.createElement('div');
+    row.className = 'radio-option' + (value === getSelected() ? ' selected' : '');
+    row.dataset.value = value;
+    row.innerHTML = `<span class="dot"></span><span class="rname">${name}</span>`;
+    row.addEventListener('click', () => {
       onSelect(value);
       for (const sib of el.children) sib.classList.toggle('selected', sib.dataset.value === value);
+      syncDesc();
+      if (onChange) onChange();
     });
-    el.appendChild(card);
+    el.appendChild(row);
   }
+  syncDesc();
 }
 
 function randomSeed() { return Math.floor(Math.random() * 0xffffffff); }
 
+/** Plain-English summary of the current width/height pair -- this project's own voice, not
+ *  copied from anywhere. Three rough bands (small/mid/large) plus the exact numbers, since the
+ *  two sliders no longer carry their own per-field description now that Map Size is one field. */
+function mapSizeDescription(width, height) {
+  const avg = (width + height) / 2;
+  const band = avg <= 60 ? 'A tight, easy-to-defend footprint -- short walks, short walls, less ground to lose.'
+    : avg <= 80 ? 'A mid-sized settlement -- plenty of room to sprawl without turning defense into a full perimeter project.'
+    : 'A sprawling settlement -- lots of room to build, but a lot more perimeter for attackers to probe.';
+  return `${width} x ${height}. ${band}`;
+}
+
 function syncSetupLabels() {
-  document.getElementById('setup-width-val').textContent = setupWidthEl.value;
-  document.getElementById('setup-height-val').textContent = setupHeightEl.value;
+  document.getElementById('setup-mapsize-val').textContent = `${setupWidthEl.value} x ${setupHeightEl.value}`;
+  document.getElementById('setup-mapsize-desc').textContent =
+    mapSizeDescription(Number(setupWidthEl.value), Number(setupHeightEl.value));
   document.getElementById('setup-citizens-val').textContent = setupCitizensEl.value;
 }
-for (const el of [setupWidthEl, setupHeightEl, setupCitizensEl]) el.addEventListener('input', syncSetupLabels);
+for (const el of [setupWidthEl, setupHeightEl, setupCitizensEl]) {
+  el.addEventListener('input', () => { syncSetupLabels(); drawSetupPreview(); });
+}
+
+// ---- Setup-screen preview (right column) ----------------------------------------------------
+// Not a real terrain render (that's `render.js`'s job once a SimWorld exists) -- a lightweight,
+// seeded, purely decorative sketch so the seed field isn't just a blind number. Uses the exact
+// same seeded RNG (`makeRng`, core.js) the real world construction uses, so re-picking a seed here
+// visibly changes the sketch the same way it'll visibly change the real settlement. Aspect ratio
+// follows the current width/height, and the citizen-count dial changes how many "starting camp"
+// dots cluster at the center, so all three right/left-column controls are reflected in one place.
+const setupPreviewEl = document.getElementById('setup-preview');
+const setupPreviewCtx = setupPreviewEl.getContext('2d');
+
+function drawSetupPreview() {
+  const w = setupPreviewEl.width, h = setupPreviewEl.height;
+  const ctx = setupPreviewCtx;
+  const mapW = Number(setupWidthEl.value) || 64;
+  const mapH = Number(setupHeightEl.value) || 64;
+  const typedSeed = Number.parseInt(setupSeedEl.value, 10);
+  const seed = Number.isFinite(typedSeed) ? (typedSeed >>> 0) : 0;
+  const rng = makeRng(seed);
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#20301f';
+  ctx.fillRect(0, 0, w, h);
+
+  // Playable rect scaled to the map's aspect ratio, centered in the canvas.
+  const margin = 8;
+  const availW = w - margin * 2, availH = h - margin * 2;
+  const aspect = mapW / mapH;
+  let rectW = availW, rectH = availW / aspect;
+  if (rectH > availH) { rectH = availH; rectW = availH * aspect; }
+  const rx = (w - rectW) / 2, ry = (h - rectH) / 2;
+  ctx.fillStyle = '#2c3d28';
+  ctx.fillRect(rx, ry, rectW, rectH);
+  ctx.strokeStyle = '#4a5c40';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(rx + 0.5, ry + 0.5, rectW - 1, rectH - 1);
+
+  // Scattered scrap-node-flavored dots -- count and placement both come from the seed, echoing
+  // resources.js's ResourceNode scatter without duplicating its (much heavier) real logic.
+  const nodeCount = 10 + rngInt(rng, 0, 6);
+  ctx.fillStyle = '#8a7550';
+  for (let i = 0; i < nodeCount; i++) {
+    const px = rx + rngInt(rng, 2, Math.max(3, rectW - 2));
+    const py = ry + rngInt(rng, 2, Math.max(3, rectH - 2));
+    ctx.beginPath();
+    ctx.arc(px, py, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // A small starting-camp cluster near the center, sized by the starting-citizen count.
+  const citizens = Number(setupCitizensEl.value) || 24;
+  const dotCount = Math.round(citizens / 2);
+  const cx = rx + rectW / 2, cy = ry + rectH / 2;
+  ctx.fillStyle = '#e8c15a';
+  for (let i = 0; i < dotCount; i++) {
+    const ang = rng() * Math.PI * 2;
+    const dist = rng() * Math.min(rectW, rectH) * 0.16;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(ang) * dist, cy + Math.sin(ang) * dist, 1.3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+setupSeedEl.addEventListener('input', drawSetupPreview);
 
 /** Read the form into a settings object, sanitising anything the player typed. A non-numeric or
  *  empty seed falls back to a fresh random one rather than producing NaN. */
@@ -2004,8 +2954,11 @@ function showSetupScreen() {
   titleSetupEl.classList.remove('hidden');
   setupSeedEl.value = String(randomSeed()); // fresh random seed every time the form is opened
   syncSetupLabels();
-  buildCards('setup-aggression', AGGRESSION_CARDS, () => setupAggression, (v) => { setupAggression = v; });
-  buildCards('setup-storyteller', STORYTELLER_CARDS, () => setupStoryteller, (v) => { setupStoryteller = v; });
+  buildRadioList('setup-aggression', 'setup-aggression-desc', AGGRESSION_CARDS,
+    () => setupAggression, (v) => { setupAggression = v; });
+  buildRadioList('setup-storyteller', 'setup-storyteller-desc', STORYTELLER_CARDS,
+    () => setupStoryteller, (v) => { setupStoryteller = v; });
+  drawSetupPreview();
 }
 
 document.getElementById('btn-title-new').addEventListener('click', () => showSetupScreen());
@@ -2078,6 +3031,20 @@ document.getElementById('btn-setup-back').addEventListener('click', () => {
 });
 document.getElementById('btn-setup-randomize').addEventListener('click', () => {
   setupSeedEl.value = String(randomSeed());
+  drawSetupPreview();
+});
+// Prev/next "browse" arrows next to the preview thumbnail -- SEA:R's map-picker interaction
+// pattern (arrows step through candidate maps), adopted here as stepping the seed by 1 so the
+// player can nudge to a neighboring layout without retyping/rerolling the whole number.
+document.getElementById('btn-setup-prev-seed').addEventListener('click', () => {
+  const cur = Number.parseInt(setupSeedEl.value, 10);
+  setupSeedEl.value = String(((Number.isFinite(cur) ? cur : 0) - 1) >>> 0);
+  drawSetupPreview();
+});
+document.getElementById('btn-setup-next-seed').addEventListener('click', () => {
+  const cur = Number.parseInt(setupSeedEl.value, 10);
+  setupSeedEl.value = String(((Number.isFinite(cur) ? cur : 0) + 1) >>> 0);
+  drawSetupPreview();
 });
 document.getElementById('btn-begin').addEventListener('click', () => beginSettlement(readSetupForm()));
 
@@ -2109,6 +3076,9 @@ function frame() {
   refreshFinance();
   refreshFactions();
   refreshPrograms();
+  refreshCoveragePlans();
+  refreshGrants();
+  refreshDrones();
   updateGrading();
   syncPauseMenu();
 

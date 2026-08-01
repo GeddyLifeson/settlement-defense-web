@@ -4,7 +4,7 @@ import { makeRng, AggressionPreset, StaffRoleKind } from './core.js';
 import { SettlementGrid } from './grid.js';
 import { CitizenStore, tickNeedsAndMood, tickWander, CitizenFlags, addMoodEvent } from './citizens.js';
 import { JobState } from './jobs.js';
-import { StaffRoster, tickStaffDuty, tickStaffOffDuty, tickDogs, maybeSpawnWildAnimal, tickWildAnimals, tickDogBreeding, tickArmoryIssuance, tickStaffCorruption } from './security.js';
+import { StaffRoster, tickStaffDuty, tickStaffOffDuty, tickDogs, maybeSpawnWildAnimal, tickWildAnimals, tickDogBreeding, tickArmoryIssuance, tickStaffCorruption, tickStaffTraining, upgradeDog } from './security.js';
 import {
   AttackerStore, Structure, WaveSpawner, tickAttackers, tickTurrets,
   tickAttackerVsCitizens, tickStaffCombat, tickNuclearHazard, isNuclearContained,
@@ -12,6 +12,8 @@ import {
 } from './siege.js';
 import { ZoneGrid, ZoneKind } from './zones.js';
 import { tickJobs, isOnJob } from './jobs.js';
+import { tickDrones, tickDroneFabrication, Drone, bumpDroneIdCounter } from './drones.js';
+import { tickDrafted } from './draft.js';
 import { RelationshipWeb } from './relationships.js';
 import { directWaveSpawner } from './director.js';
 import { TRAITS } from './traits.js';
@@ -24,13 +26,17 @@ import { tickFireIgnition, tickFire, igniteStructure, FIRE_SPREAD_DIFFICULTY_MUL
 import { DAY_NIGHT_CYCLE_TICKS } from './schedule.js';
 import { FactionState, tickFactions, serializeFactions, deserializeFactions } from './factions.js';
 import { tickWorldMap } from './worldmap.js';
-import { createResearchState, tickResearch, serializeResearch, deserializeResearch } from './research.js';
-import { initWeather, tickWeather, tickRandomEvents, tickThunderstorm, weatherWanderSpeedMult, weatherAccuracyMult, weatherMoveSpeedMult, isHeatwaveSlowdownActive, HEATWAVE_WANDER_SPEED_MULT } from './weather.js';
+import { createResearchState, tickResearch, serializeResearch, deserializeResearch, isNodeUnlocked } from './research.js';
+import { initWeather, tickWeather, tickRandomEvents, tickThunderstorm, weatherWanderSpeedMult, weatherAccuracyMult, weatherMoveSpeedMult, isHeatwaveSlowdownActive, HEATWAVE_WANDER_SPEED_MULT, tickLightningStorm, lightningStormMoveMult } from './weather.js';
 import { computeGrading, GRADING_INTERVAL_TICKS } from './grading.js';
+import { canAfford, spend } from './economy.js'; // buyVest below -- see citizens.js's hasVest field
 import { checkWaveAchievements, checkPopulationAchievement, recordGameEnd } from './metaprogress.js';
 import { initRats, tickRatInfestation, tickRats, Rat } from './rats.js';
+import { tickSickness } from './sickness.js';
+import { initAnomaly, tickAnomalyPressure, tickAnomalyEvents } from './anomaly.js';
 import { tickPipeFreezing } from './water.js';
 import { syncProgramSites } from './programs.js';
+import { createGrantState, tickGrants, serializeGrants, deserializeGrants } from './grants.js';
 
 // Exported: weather.js's wanderer-joins event draws from this same pool (via world._namePool)
 // rather than importing it directly, to avoid a circular import (world.js already imports
@@ -46,6 +52,12 @@ export const STARTER_NAMES = [
 ];
 
 const RECYCLING_WATER_BONUS = 1.4; // see the pump/pipe check in the pollution tick below
+// Recycling Throughput research node (real PA anchor: RecyclingIncentive, cost 2500/time 720 --
+// see research.js's 'recycling_throughput' node): a real +40% multiplier on each Recycling
+// Center's per-tick processing capacity once researched, applied on top of (not instead of) the
+// existing water-grid bonus above -- both stack, same "provisioned beats unprovisioned, upgraded
+// beats stock" logic as the rest of this system.
+const RECYCLING_THROUGHPUT_RESEARCH_MULT = 1.4;
 // Mood-event trigger radius for "witnessed a nearby combat death" (citizens.js's addMoodEvent,
 // see the tickAttackerVsCitizens call below) -- generous enough that a citizen fleeing a raid
 // still counts as having witnessed it, without being map-wide.
@@ -162,6 +174,9 @@ export class SimWorld {
     // colony can still wall up and put down turrets on tick 0.
     this.research = createResearchState();
     this._lastWaveLogged = 0;
+    // Coverage Plans (coverageplans.js): set of purchased plan kinds, one-time economy-sink
+    // buildable-discount + threshold-gated call-in bundles. Empty Set is the fresh-colony default.
+    this.coveragePlans = new Set();
 
     // Per-run counters feeding metaprogress.js's cross-run lifetime stats (see that module's
     // header comment) -- purely additive bookkeeping here, this world instance dies at
@@ -187,7 +202,9 @@ export class SimWorld {
       recyclingScrap: 0,  // passive Recycling Center trickle (this file, tick())
       conquestScrap: 0,   // held-region supply lines trickling scrap in (worldmap.js)
       processingScrap: 0, // net of the 'workshop' Processing job's raw-in/Components-out chain (jobs.js)
+      farmScrap: 0,       // 'farm_plot' Farming job's per-cycle payout (jobs.js, research.js's Agronomy node)
       factionScrap: 0,    // rewards from satisfied clique demands (factions.js)
+      grantScrap: 0,      // Outpost Charter Contract payouts + matured investments (grants.js)
       otherScrap: 0,      // catch-all for any future/uncategorized income source
       buildSpend: 0,      // total scrap spent on construction (economy.js spend())
       history: [],        // rolling snapshots of net scrap change, one per FINANCE_SNAPSHOT_INTERVAL
@@ -219,6 +236,13 @@ export class SimWorld {
     this._unrestCrisisMinWellbeing = Infinity;
     this.unrestResolutionBuffTicks = 0;
 
+    // worldmap.js's arrival-mishap system (Odyssey LandingOutcomeDef-style, toned down): a fresh
+    // settlement can land with a short work-speed debuff instead of/alongside a minor scrap loss.
+    // main.js's expandTo() sets this to the mishap's duration right after constructing the new
+    // SimWorld; tick() below counts it down. jobs.js's arrivalMishapRateMultFor() reads it the
+    // same way unrestRateMultFor() reads unrestActive/unrestResolutionBuffTicks above.
+    this.arrivalMishapTicks = 0;
+
     // Citizen cliques + faction demands (factions.js, reskinned Prison Architect gang-demand
     // system -- see that file's header comment for the real numbers this was ported from). Owns
     // its own state object (same "own store, ticked from here" pattern as this.roster/
@@ -234,6 +258,12 @@ export class SimWorld {
     this.heldCitizenEvent = { active: false, citizenId: null, beat: 0, beatCount: 0, beatEndTick: 0, pauseUntilTick: null };
     this._heldCitizenCooldownUntil = 0;
 
+    // Outpost Charter Contracts + time-locked investments (grants.js, reskinned Prison Architect
+    // grants.lua): own small state object, same pattern as this.factions/this.heldCitizenEvent
+    // above -- see grants.js's header comment for the full mechanic and the real numbers it was
+    // scaled from.
+    this.grants = createGrantState();
+
     // Presentation-layer audio hooks (see audio.js) -- optional callbacks the host app (main.js)
     // can assign after construction. Left null by default so world.js/siege.js never need to
     // know audio.js exists; called via optional chaining everywhere below.
@@ -243,6 +273,7 @@ export class SimWorld {
     this.onKill = null;          // () => void, fires whenever an attacker is killed
     this.onCitizenDowned = null; // () => void, fires when a citizen goes down or dies to an attacker
     this.onRandomEvent = null;   // (text) => void, fires on a weather change or a one-off random event (weather.js)
+    this.onCitizenOnBreak = null; // () => void, fires the instant a citizen newly enters CitizenFlags.OnBreak (citizens.js)
 
     initWeather(this); // sets this.weather / this._weatherTimer, see weather.js
 
@@ -292,10 +323,17 @@ export class SimWorld {
     for (let x = 22; x <= 25; x++) for (let y = 22; y <= 23; y++) this.zones.set(x, y, ZoneKind.Training);
 
     initRats(this); // rats.js -- infestation level/rat pool, see that file's header comment
+    initAnomaly(this); // anomaly.js -- colony-wide anomaly pressure meter, see that file's header comment
 
     this.resourceNodes = scatterNodes(this.grid, this.rng, 16, 14, this.width / 2, this.height / 2);
     this.vehicles = [];
     this._nextVehicleTick = 200;
+
+    // Labor drones (drones.js -- RimWorld Biotech's mech-companion analog): live drones and their
+    // fabrication queue, same "own small array, ticked from here" shape as this.vehicles/this.dogs
+    // above. Empty until the player builds a Fabrication Bay -- no drones exist on tick 0.
+    this.drones = [];
+    this.droneFabricationQueue = [];
 
     computeGrading(this); // real scores from tick 0, not the placeholder defaults set above
   }
@@ -334,10 +372,49 @@ export class SimWorld {
       else if (kind === 'recycling') this.finance.recyclingScrap += amount;
       else if (kind === 'conquest') this.finance.conquestScrap += amount;
       else if (kind === 'processing') this.finance.processingScrap += amount;
+      else if (kind === 'farm') this.finance.farmScrap += amount;
       else if (kind === 'faction') this.finance.factionScrap += amount;
+      else if (kind === 'grant') this.finance.grantScrap += amount;
       else this.finance.otherScrap += amount;
       this.scrapEarnedThisRun += amount; // metaprogress.js's lifetime scrap-earned stat, see recordGameEnd()
     }
+  }
+
+  // Vest purchase (economy.js BUILD_COST.vest, citizens.js's hasVest flag, siege.js's
+  // CITIZEN_VEST_ARMOR_RATING/resolveCitizenArmorRoll) -- the per-citizen counterpart to
+  // security.js's armory-issued weapon tiers: no per-unit inventory here either, this is a
+  // straightforward "spend scrap, flip this citizen's flag on" purchase, one Vest per citizen,
+  // idempotent (buying a second Vest for an already-vested citizen is a no-op refusal, not a
+  // wasted spend). Returns { ok: true } or { ok: false, reason }.
+  buyVest(citizenId) {
+    let idx = -1;
+    for (let i = 0; i < this.citizens.count; i++) {
+      if (this.citizens.id[i] === citizenId) { idx = i; break; }
+    }
+    if (idx < 0 || !this.citizens.isAliveAt(idx)) return { ok: false, reason: 'invalid' };
+    if (this.citizens.isVestedAt(idx)) return { ok: false, reason: 'already' };
+    if (!canAfford(this, 'vest')) return { ok: false, reason: 'cost' };
+    spend(this, 'vest');
+    this.citizens.hasVest[idx] = 1;
+    const text = `${this.citizens.name[idx]} was equipped with a Vest`;
+    this.milestoneLog.push({ tick: this.currentTick, text });
+    if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    return { ok: true };
+  }
+
+  // Upgraded K9 tier (security.js's K9_UPGRADE_*/upgradeDog -- real PA RobotDog anchor). Looks up
+  // the dog owned by citizenId (a K9Handler's assigned dog, security.js's assignDogHandler)
+  // rather than taking a dog object directly, matching buyVest's citizenId-based call convention
+  // above and keeping main.js's inspector button call site simple. Returns { ok, reason }.
+  upgradeDog(citizenId) {
+    const dog = this.dogs.find(d => d.ownerId === citizenId);
+    if (!dog) return { ok: false, reason: 'invalid' };
+    // Bare reference to the module-level upgradeDog import (security.js) -- a class method body
+    // has no implicit binding to its own name (unlike a named function expression), so this
+    // resolves to the free function, not a recursive self-call. Verified in the bundled build too
+    // (build.py strips the import line but leaves security.js's `function upgradeDog(...)`
+    // declaration as a global, which this same bare reference reaches identically).
+    return upgradeDog(this, dog);
   }
 
   build(kind, x, y) {
@@ -571,6 +648,11 @@ export class SimWorld {
     // the threshold this tick immediately falls into jobs.js's normal Idle/SeekingFood/SeekingBed
     // handling below, rather than waiting a tick -- see security.js's tickStaffOffDuty doc comment.
     tickStaffOffDuty(this.citizens, this.roster, (i) => this.idOf(i), this.zones);
+    // Staff training-program dispatch (programs.js's ProgramKind.GuardResponseTraining, see
+    // security.js's tickStaffTraining doc comment): must run after tickStaffOffDuty (so it never
+    // fights over the off-duty flag with a genuine food/rest dispatch this same tick) and before
+    // tickJobs (so a freshly-set SeekingProgram state actually gets walked/processed this tick).
+    tickStaffTraining(this, (i) => this.idOf(i));
     tickJobs(this.citizens, this.zones, (i) => this.isStaffOnDutyAt(i), this.structures, this.resourceNodes,
       (i) => this.idOf(i), (amt) => this.addScrap(amt, 'harvest'), this);
     // Citizen cliques + faction demands (factions.js): reads this tick's freshly-updated jobState
@@ -597,12 +679,28 @@ export class SimWorld {
     // other build passes through already, just weather-scaled. Heatwave's real penalty is
     // per-citizen (outdoors-only, see isHeatwaveSlowdownActive's doc comment), so it's supplied as
     // the extra perCitizenMult callback rather than folded into the flat `speed` scalar like Rain.
+    // Lightning Storm's own movement penalty (weather.js's lightningStormMoveMult, "gritted" =
+    // near a Lightning Rod) is also positional, same reasoning -- both stack multiplicatively into
+    // one combined per-citizen callback below rather than needing two separate callback params.
     const heatwaveSlowdown = isHeatwaveSlowdownActive(this);
     tickWander(this.citizens, this.grid, this.rng, 0.04 * weatherWanderSpeedMult(this.weather),
-      (i) => this.isStaffAt(i) || isOnJob(this.citizens, i),
-      heatwaveSlowdown
-        ? (i) => (roomContaining(this.rooms, this.grid, this.citizens.x[i], this.citizens.y[i]) ? 1 : HEATWAVE_WANDER_SPEED_MULT)
-        : null);
+      // Drafted citizens (draft.js) never idle-wander -- they stand and hold or execute a direct
+      // order, see draft.js's tickDrafted (called below) for the only movement a drafted citizen
+      // gets.
+      (i) => this.isStaffAt(i) || isOnJob(this.citizens, i) || this.citizens.isDraftedAt(i),
+      (i) => {
+        const heat = heatwaveSlowdown
+          ? (roomContaining(this.rooms, this.grid, this.citizens.x[i], this.citizens.y[i]) ? 1 : HEATWAVE_WANDER_SPEED_MULT)
+          : 1;
+        const lightning = lightningStormMoveMult(this, this.citizens.x[i], this.citizens.y[i]);
+        return heat * lightning;
+      },
+      // Allowed Area restriction (citizens.js's isInAllowedArea) -- an idle citizen's random
+      // wander target has to be gated the same as every jobs.js-driven target, or a restricted
+      // citizen with nothing to do would still drift out of their painted area. hasAllowedArea
+      // short-circuits before touching the mask for the overwhelming majority of citizens who
+      // have no restriction at all.
+      (i, x, y) => !this.citizens.hasAllowedArea(i) || this.citizens.isInAllowedArea(i, this.grid.width, x, y));
     tickDogs(this.dogs, this.citizens, this.roster, this.attackers, (amt) => this.addScrap(amt, 'kill'), this.rng);
     // Taming/breeding (RimWorld animals, see FEATURE_RESEARCH.md and security.js): wild animals
     // wander and occasionally spawn like resource nodes below; jobs.js's Taming job moves a tamed
@@ -621,6 +719,12 @@ export class SimWorld {
     // Thunderstorm lightning-ignition + rain-dousing (weather.js): runs before tickFireIgnition/
     // tickFire below so a strike this tick is visible to this same tick's fire damage/spread pass.
     tickThunderstorm(this);
+    // Lightning Storm calamity (weather.js's tickLightningStorm, real Prison Architect
+    // calamity_settings.txt Lightning Storm -- distinct system from the RimWorld-ported
+    // thunderstorm-ignition mechanic just above, see that file's header comment): direct strike
+    // rolls against citizens/power-structures/ground. Runs right after tickThunderstorm since both
+    // read the same weather gate and this tick's just-updated weather state.
+    tickLightningStorm(this);
     // Cold-weather pipe freezing (water.js): runs right after tickWeather so it reads this tick's
     // freshly-updated weather/_weatherStreakTicks, same ordering reasoning as tickThunderstorm above.
     tickPipeFreezing(this);
@@ -633,15 +737,35 @@ export class SimWorld {
     tickRatInfestation(this);
     tickRats(this);
 
+    // Sickness (sickness.js -- real RimWorld Flu day-rates, rescaled): staggered per-citizen
+    // onset roll + progression, same "cheap periodic-roll system" grouping as rats just above.
+    tickSickness(this);
+
+    // Anomaly pressure (anomaly.js -- see that file's header comment): a colony-wide 0->1 meter,
+    // gated on colonyStrength/pollution (director.js's existing hazard-scaling pattern, reused as
+    // the gate rather than a second parallel one), with periodic tier-scaled consequence rolls.
+    // Runs right after rats for the same "cheap periodic-roll system" grouping, after
+    // computeRoomStats/tickWeather so a Low-tier mess roll this tick sees this tick's real room
+    // list, same ordering reasoning as tickRatInfestation above.
+    tickAnomalyPressure(this);
+    tickAnomalyEvents(this);
+
     maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
     maybeSpawnWildAnimal(this.wildAnimals, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
     this._maybeSpawnRefugeeWagon(); // population-growth-via-arrivals, see the method's doc comment above
     tickVehicles(this);
+    // Labor drones (drones.js): fabrication queue advances first so a drone that finishes
+    // gestating this tick is immediately available to tickDrones' own idle-claim pass the same
+    // tick, rather than sitting idle-and-uncounted for one extra tick.
+    tickDroneFabrication(this);
+    tickDrones(this);
     if (this.ethanolPenaltyTimer > 0) this.ethanolPenaltyTimer--; // see vehicles.js FUEL_TYPES.ethanol
     // Crisis-resolution reward countdown (see UNREST_REWARD_* above) -- counts down independently
     // of unrestTier so it keeps applying for its full duration even if a fresh crisis starts again
     // shortly after resolving well.
     if (this.unrestResolutionBuffTicks > 0) this.unrestResolutionBuffTicks--;
+    // worldmap.js arrival-mishap debuff countdown -- see this field's own doc comment above.
+    if (this.arrivalMishapTicks > 0) this.arrivalMishapTicks--;
 
     // Pollution: generators produce power at the cost of waste (SEA:R's core tradeoff, see
     // FEATURE_RESEARCH.md); it decays slowly on its own but climbs faster than that decay once
@@ -673,7 +797,11 @@ export class SimWorld {
         // pollution faster -- water pressure washing down the sorting line, same "provisioned
         // beats unprovisioned" logic as the Food/Recreation refill bonus in jobs.js, applied to
         // this consumer instead since it has no refill rate of its own to boost.
-        recyclingCapacity += isWateredAt(this.structures, s.x, s.y) ? 0.4 * RECYCLING_WATER_BONUS : 0.4;
+        {
+          let cap = isWateredAt(this.structures, s.x, s.y) ? 0.4 * RECYCLING_WATER_BONUS : 0.4;
+          if (isNodeUnlocked(this.research, 'recycling_throughput')) cap *= RECYCLING_THROUGHPUT_RESEARCH_MULT;
+          recyclingCapacity += cap;
+        }
       }
       else if (s.kind === 'generator_nuclear' && !isNuclearContained(this.structures, s)) activeUncontainedNuclear++;
     }
@@ -767,6 +895,11 @@ export class SimWorld {
       (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.(), combatMoveSpeed, this.rng);
     tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt, 'kill'), (s) => this.onTurretFire?.(s), () => this.onKill?.(), this.rng, combatAccuracy);
     tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.(), this.rng, combatAccuracy);
+    // Drafted citizens (draft.js -- RimWorld-style manual control): owns ALL movement/combat for
+    // any citizen currently flagged Drafted (citizens.js's CitizenFlags.Drafted). Placed right
+    // after tickStaffCombat so a drafted attack order resolves in the same "who fought this tick"
+    // phase as every autonomous combat system above it, using the same damage pipeline/rng.
+    tickDrafted(this);
     // Mood event trigger #1 (negative, see citizens.js's addMoodEvent/MOOD_EVENT_STACK_LIMITS):
     // a real death (not just a downing) inside WITNESS_DEATH_RADIUS gives every other living
     // citizen nearby a stacking, decaying morale hit -- RimWorld's real death-witnessed Thought,
@@ -811,6 +944,30 @@ export class SimWorld {
       }
       return true;
     });
+
+    // Critical-structure watchdog (genuinely missing before this pass): a destroyed generator,
+    // water pump, or garage previously left the colony silently degraded (power outage, no more
+    // watered tiles, no more haul cycle) with zero player notification -- every OTHER real threat
+    // in this game (overload, nuclear hazard, lightning, riots) already logs a milestone/
+    // onRandomEvent, this one didn't. Runs once per tick, after every system above that can set
+    // `.destroyed = true` on a structure this same tick (nuclear hazard, fire, overload-fire,
+    // fence/trap combat), so it never misses a loss. `_criticalLossLogged` lives on the structure
+    // object itself (persisted below in serialize(), restored via deserialize()'s
+    // Object.assign(new Structure(...), s) pattern) so a save/load round-trip doesn't re-fire the
+    // same alert for an already-known loss.
+    for (const s of this.structures) {
+      if (!s.destroyed || s._criticalLossLogged) continue;
+      const isGenerator = s.kind.startsWith('generator');
+      const isPump = s.kind === 'pump';
+      const isGarage = parseGarageKind(s.kind) != null;
+      if (!isGenerator && !isPump && !isGarage) continue;
+      s._criticalLossLogged = true;
+      const label = isGenerator ? 'A generator' : isPump ? 'The water pump' : 'A garage';
+      const text = `${label} was destroyed -- the colony has lost a load-bearing structure`;
+      this.milestoneLog.push({ tick: this.currentTick, text });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+      this.onRandomEvent?.(text);
+    }
 
     let wallSum = 0;
     for (let i = 0; i < this.grid.wallThingId.length; i++) if (this.grid.wallThingId[i] !== 0) wallSum += i + 1;
@@ -878,7 +1035,11 @@ export class SimWorld {
     let warningWindow = watchtower ? (hasPoweredBonus(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
     let warningSource = watchtower ? 'watchtower' : null;
     if (camera) {
-      const cameraWindow = monitorStaffed ? 70 : 30;
+      // CCTV Improvement research node (real PA anchor: CCTVImprovement, cost 1000/time 180 --
+      // see research.js's 'cctv_improvement' node): a real +35% early-warning window boost for
+      // both the unmanned camera and the staffed-monitor case, once researched.
+      const cctvMult = isNodeUnlocked(this.research, 'cctv_improvement') ? 1.35 : 1;
+      const cameraWindow = (monitorStaffed ? 70 : 30) * cctvMult;
       if (cameraWindow > warningWindow) { warningWindow = cameraWindow; warningSource = monitorStaffed ? 'monitor' : 'camera'; }
     }
 
@@ -914,6 +1075,13 @@ export class SimWorld {
       recordGameEnd(this);
     }
 
+    // Outpost Charter Contracts + investment maturities (grants.js): runs here, after
+    // peakAliveCitizens is updated just above, so the capacity-tier ladder's completeCheck reads
+    // THIS tick's freshly-updated peak rather than lagging a full tick behind a population change
+    // -- and before the finance snapshot just below, so a grant/investment payout this tick is
+    // reflected in that same snapshot rather than the next one.
+    tickGrants(this);
+
     // Finance history snapshot (budget report trend/sparkline, see the constructor's finance
     // comment): once per FINANCE_SNAPSHOT_INTERVAL ticks -- roughly one wave-cycle, matching the
     // 300-tick default wave spacing in siege.js's WaveSpawner -- record the net scrap change
@@ -921,7 +1089,8 @@ export class SimWorld {
     // entries so this can't grow unbounded over a long session.
     if (this.currentTick % FINANCE_SNAPSHOT_INTERVAL === 0) {
       const totalIncome = this.finance.killScrap + this.finance.harvestScrap + this.finance.haulScrap +
-        this.finance.recyclingScrap + this.finance.conquestScrap + this.finance.processingScrap + this.finance.otherScrap;
+        this.finance.recyclingScrap + this.finance.conquestScrap + this.finance.processingScrap +
+        this.finance.farmScrap + this.finance.grantScrap + this.finance.otherScrap;
       const totalExpense = this.finance.buildSpend;
       const net = (totalIncome - this._financeLastIncome) - (totalExpense - this._financeLastExpense);
       this.finance.history.push({ tick: this.currentTick, net, scrap: Math.round(this.scrap) });
@@ -954,11 +1123,20 @@ export class SimWorld {
       unrestTier3AboveTicks: this._unrestTier3AboveTicks,
       unrestCrisisMinWellbeing: Number.isFinite(this._unrestCrisisMinWellbeing) ? this._unrestCrisisMinWellbeing : null,
       unrestResolutionBuffTicks: this.unrestResolutionBuffTicks,
+      arrivalMishapTicks: this.arrivalMishapTicks,
       factions: serializeFactions(this.factions),
+      // Coverage Plans (coverageplans.js): just the set of purchased plan-kind strings -- the
+      // discount/call-in logic itself is all derived live from COVERAGE_PLAN_DEFS + real world
+      // state, nothing else to persist.
+      coveragePlans: Array.from(this.coveragePlans || []),
       heldCitizenEvent: this.heldCitizenEvent, heldCitizenCooldownUntil: this._heldCitizenCooldownUntil,
       peakAliveCitizens: this.peakAliveCitizens, attackersKilled: this.attackersKilled, scrapEarnedThisRun: this.scrapEarnedThisRun,
       research: serializeResearch(this.research),
+      grants: serializeGrants(this.grants),
       weather: this.weather, weatherTimer: this._weatherTimer,
+      // Trader-caravan voucher (weather.js's tryTraderEvent / economy.js's buildCost) -- persisted
+      // so a save/load round-trip mid-window doesn't silently lose an active discount.
+      traderVoucherUses: this._traderVoucherUses || 0, traderVoucherExpireTick: this._traderVoucherExpireTick ?? -1,
       waveNumber: this.waveSpawner.waveNumber, nextWaveTick: this.waveSpawner.nextWaveTick,
       citizens: {
         count: this.citizens.count,
@@ -966,20 +1144,30 @@ export class SimWorld {
         name: this.citizens.name.slice(0, this.citizens.count),
         x: Array.from(this.citizens.x.slice(0, this.citizens.count)),
         y: Array.from(this.citizens.y.slice(0, this.citizens.count)),
+        age: Array.from(this.citizens.age.slice(0, this.citizens.count)),
         hunger: Array.from(this.citizens.hunger.slice(0, this.citizens.count)),
         rest: Array.from(this.citizens.rest.slice(0, this.citizens.count)),
         social: Array.from(this.citizens.social.slice(0, this.citizens.count)),
         hydration: Array.from(this.citizens.hydration.slice(0, this.citizens.count)),
+        exercise: Array.from(this.citizens.exercise.slice(0, this.citizens.count)),
+        // Sickness (sickness.js) -- real, meaningful state (unlike _sickOffset, which is just
+        // stagger noise re-derivable on load), so it's worth persisting.
+        sickSeverity: Array.from(this.citizens.sickSeverity.slice(0, this.citizens.count)),
         mood: Array.from(this.citizens.mood.slice(0, this.citizens.count)),
         health: Array.from(this.citizens.health.slice(0, this.citizens.count)),
         alive: Array.from(this.citizens.alive.slice(0, this.citizens.count)),
         flags: Array.from(this.citizens.flags.slice(0, this.citizens.count)),
         skillCombat: Array.from(this.citizens.skillCombat.slice(0, this.citizens.count)),
         skillConstruction: Array.from(this.citizens.skillConstruction.slice(0, this.citizens.count)),
+        // Citizen Rank (ranks.js) -- plain tier index, same round-trip pattern as skillCombat above.
+        citizenRank: Array.from(this.citizens.citizenRank.slice(0, this.citizens.count)),
         trait: this.citizens.trait.slice(0, this.citizens.count).map(t => t?.name ?? null),
       },
       roster: Array.from(this.roster._roleById.entries()).map(([id, kind]) => ({
         id, kind, post: this.roster._postById.get(id) || null,
+        // Manual weapon-tier override (security.js) -- undefined for anyone the player hasn't
+        // touched, so deserialize below only needs to call setManualWeapon when present.
+        manualWeapon: this.roster._manualWeaponById.get(id) || null,
       })),
       // Corrupt/bribable staff (security.js's StaffRoster corruption state) -- persisted
       // separately from the roster array above so a save/load round-trip doesn't reset a staffer
@@ -1005,9 +1193,18 @@ export class SimWorld {
         // Cold-weather pipe freeze state (water.js) -- picked back up generically by deserialize's
         // Object.assign, same pattern as storedEnergy/switchedOn above.
         frozen: s.frozen || false,
+        // Critical-structure watchdog (see the tick() loop above) -- persisted so a reload of an
+        // already-destroyed generator/pump/garage doesn't re-fire the "just destroyed" alert.
+        _criticalLossLogged: s._criticalLossLogged || false,
       })),
       zones: Array.from(this.zones.kind),
-      dogs: this.dogs.map(d => ({ ownerId: d.ownerId, x: d.x, y: d.y })),
+      // upgraded/healthMult (security.js's K9_UPGRADE_* -- see upgradeDog): omitted entirely for
+      // an unupgraded dog rather than written as false/undefined, so an old save round-trips
+      // through a byte-diff tool identically to before this field existed.
+      dogs: this.dogs.map(d => ({
+        ownerId: d.ownerId, x: d.x, y: d.y,
+        ...(d.upgraded ? { upgraded: true, healthMult: d.healthMult } : {}),
+      })),
       wildAnimals: this.wildAnimals.map(a => ({ x: a.x, y: a.y })),
       resourceNodes: this.resourceNodes.map(n => ({ x: n.x, y: n.y, amount: n.amount, maxAmount: n.maxAmount, depleted: n.depleted })),
       // Rat infestation (rats.js): rats themselves are cheap flavor entities (at most
@@ -1016,6 +1213,10 @@ export class SimWorld {
       ratInfestation: this.ratInfestation || 0,
       ratsCaught: this.ratsCaught || 0,
       rats: (this.rats || []).map(r => ({ x: r.x, y: r.y })),
+      // Anomaly pressure (anomaly.js): a plain float + a tier label, no entity list to round-trip
+      // (unlike rats above) -- the burst-flavor-window fields are intentionally NOT persisted, same
+      // "resume as if just-passed" acceptance as the vehicle mid-haul note above.
+      anomalyPressure: this.anomalyPressure || 0,
       // targetNode isn't serialized (it's a live reference into resourceNodes) -- a vehicle
       // mid-haul on save resumes as if just-departed rather than mid-route. Acceptable: it's a
       // few seconds of game time, not a correctness bug like the duplicate-vehicle-on-load one
@@ -1024,6 +1225,12 @@ export class SimWorld {
         kind: v.kind, fuelType: v.fuelType, garageX: v.garageX, garageY: v.garageY, x: v.x, y: v.y,
         driverId: v.driverId, phase: v.driverId == null ? 'parked' : 'inbound', workTimer: 0,
       })),
+      // Labor drones (drones.js) -- jobRef isn't serialized (a live reference into
+      // structures/vehicles/resourceNodes/rooms, same "resume as if just-departed" acceptance as
+      // a vehicle's targetNode above); every drone loads back to idle and reclaims its own work
+      // the next tick via tickDrones' normal idle-claim pass.
+      drones: this.drones.map(d => ({ id: d.id, category: d.category, x: d.x, y: d.y })),
+      droneFabricationQueue: this.droneFabricationQueue.map(o => ({ ...o })),
     };
   }
 
@@ -1041,7 +1248,8 @@ export class SimWorld {
     if (json.finance) {
       w.finance = { ...w.finance, ...json.finance };
       const totalIncome = w.finance.killScrap + w.finance.harvestScrap + w.finance.haulScrap +
-        w.finance.recyclingScrap + w.finance.conquestScrap + w.finance.processingScrap + w.finance.otherScrap;
+        w.finance.recyclingScrap + w.finance.conquestScrap + w.finance.processingScrap +
+        w.finance.farmScrap + w.finance.grantScrap + w.finance.otherScrap;
       w._financeLastIncome = totalIncome;
       w._financeLastExpense = w.finance.buildSpend;
     }
@@ -1055,11 +1263,16 @@ export class SimWorld {
     w._unrestTier3AboveTicks = json.unrestTier3AboveTicks || 0;
     w._unrestCrisisMinWellbeing = json.unrestCrisisMinWellbeing != null ? json.unrestCrisisMinWellbeing : Infinity;
     w.unrestResolutionBuffTicks = json.unrestResolutionBuffTicks || 0;
+    w.arrivalMishapTicks = json.arrivalMishapTicks || 0;
     w._unrestAboveTicks = json.unrestAboveTicks || 0;
     // Pre-factions saves have no `factions` key -- deserializeFactions falls back to a fresh,
     // unformed state (same "old save loads with the new system just not-yet-active" convention as
     // research/other systems added later in this project), rather than throwing.
     w.factions = deserializeFactions(json.factions);
+    // Coverage Plans (coverageplans.js) -- pre-existing saves have no `coveragePlans` key, so this
+    // falls back to the constructor's already-set empty Set, same convention as every other
+    // system added later in this project.
+    if (json.coveragePlans) w.coveragePlans = new Set(json.coveragePlans);
     // Held-citizen crisis (siege.js) -- pre-existing saves have no `heldCitizenEvent` key, so this
     // falls back to the same inactive default the constructor already sets, same convention as
     // every other system added later in this project.
@@ -1073,9 +1286,14 @@ export class SimWorld {
     // state, so an old save loads with the survival core unlocked and 0 points rather than
     // throwing or silently locking everything.
     w.research = deserializeResearch(json.research);
+    // Pre-grants saves have no `grants` key -- deserializeGrants falls back to a fresh state
+    // (nothing unlocked/completed, no pending investments), same fallback pattern as research above.
+    w.grants = deserializeGrants(json.grants);
     w.timeOfDay = json.timeOfDay != null ? json.timeOfDay : 0.3;
     w.weather = json.weather || 'Clear';
     w._weatherTimer = json.weatherTimer != null ? json.weatherTimer : w._weatherTimer;
+    w._traderVoucherUses = json.traderVoucherUses || 0;
+    w._traderVoucherExpireTick = json.traderVoucherExpireTick ?? -1;
     w.waveSpawner.waveNumber = json.waveNumber || 0;
     w.waveSpawner.nextWaveTick = json.nextWaveTick || 300;
     const c = json.citizens;
@@ -1085,18 +1303,43 @@ export class SimWorld {
       w.citizens.name[i] = c.name[i];
       w.citizens.x[i] = c.x[i]; w.citizens.y[i] = c.y[i];
       w.citizens.targetX[i] = c.x[i]; w.citizens.targetY[i] = c.y[i];
+      // c.age is undefined for a save written before this feature existed -- fall back to a
+      // mid-Young-band default (10000) rather than 0, so an old save doesn't suddenly load an
+      // entire colony of newborns with no age variance at all.
+      w.citizens.age[i] = c.age ? c.age[i] : 10000;
       w.citizens.hunger[i] = c.hunger[i]; w.citizens.rest[i] = c.rest[i]; w.citizens.social[i] = c.social[i];
       // Pre-hydration saves have no `hydration` key -- default to full rather than 0 so an old
       // save doesn't load every citizen already parched.
       w.citizens.hydration[i] = c.hydration ? c.hydration[i] : 1;
+      // Pre-exercise saves have no `exercise` key -- same "default to full" convention as
+      // hydration above, so an old save doesn't load every citizen already needing the gym.
+      w.citizens.exercise[i] = c.exercise ? c.exercise[i] : 1;
+      // Pre-sickness saves have no `sickSeverity` key -- default to 0 (healthy), same convention
+      // as every other system added later in this project.
+      w.citizens.sickSeverity[i] = c.sickSeverity ? c.sickSeverity[i] : 0;
+      // _sickOffset isn't serialized (pure stagger noise, not real state, same convention as a
+      // reloaded vehicle's mid-route reset) -- deserialize's per-index loop bypasses spawn()'s
+      // own rng-based assignment, so re-derive a spread deterministically here rather than leaving
+      // every loaded citizen pinned at the array's zero-init default (which would re-sync every
+      // loaded citizen's onset-roll tick, defeating the point of staggering).
+      w.citizens._sickOffset[i] = i % 50;
       w.citizens.mood[i] = c.mood[i]; w.citizens.health[i] = c.health[i]; w.citizens.alive[i] = c.alive[i];
       w.citizens.flags[i] = c.flags ? c.flags[i] : 0;
       w.citizens.skillCombat[i] = c.skillCombat ? c.skillCombat[i] : 0;
       w.citizens.skillConstruction[i] = c.skillConstruction ? c.skillConstruction[i] : 0;
+      // Pre-rank saves have no `citizenRank` key -- default to tier 0 ('Settler'), same
+      // "old save loads with the new system just not-yet-active" convention as every other
+      // system added later in this project (see e.g. c.age/c.hydration fallbacks above).
+      w.citizens.citizenRank[i] = c.citizenRank ? c.citizenRank[i] : 0;
       w.citizens.trait[i] = c.trait && c.trait[i] ? TRAITS.find(t => t.name === c.trait[i]) : null;
     }
     w.roster = new (Object.getPrototypeOf(w.roster).constructor)();
-    for (const r of json.roster) w.roster.assign(r.id, r.kind, r.post);
+    for (const r of json.roster) {
+      w.roster.assign(r.id, r.kind, r.post);
+      // Pre-override saves have no `manualWeapon` key -- falls back to staying fully automatic,
+      // same convention as every other system added later in this project.
+      if (r.manualWeapon) w.roster.setManualWeapon(r.id, r.manualWeapon);
+    }
     // Corrupt/bribable staff (security.js) -- pre-existing saves have no `staffCorruption` key,
     // so every restored staffer just starts as un-evaluated (identical to a world where
     // tickStaffCorruption hasn't looked at them yet), rather than throwing.
@@ -1129,6 +1372,16 @@ export class SimWorld {
         driverId: null, phase: 'parked', workTimer: 0, targetNode: null,
       }));
     }
+    // Labor drones (drones.js) -- pre-existing saves have no `drones`/`droneFabricationQueue`
+    // keys, so this falls back to the fresh-colony empty defaults the constructor already set,
+    // same convention as every other system added later in this project.
+    if (json.drones) {
+      w.drones = json.drones.map(d => new Drone(d.id, d.category, d.x, d.y));
+      bumpDroneIdCounter(w.drones);
+    }
+    if (json.droneFabricationQueue) {
+      w.droneFabricationQueue = json.droneFabricationQueue.map(o => ({ ...o }));
+    }
     if (json.resourceNodes) {
       w.resourceNodes = json.resourceNodes.map(n => Object.assign(new ResourceNode(n.x, n.y, n.maxAmount), n));
     }
@@ -1141,6 +1394,10 @@ export class SimWorld {
     if (json.rats) {
       w.rats = json.rats.map((r, idx) => Object.assign(new Rat(r.x, r.y, idx % 30), { x: r.x, y: r.y }));
     }
+    // Anomaly pressure (anomaly.js) -- pre-existing saves have no `anomalyPressure` key, and
+    // initAnomaly() (already called inside the SimWorld constructor above) already left it at 0,
+    // same "old save loads with no problem yet" convention as rats above.
+    if (json.anomalyPressure != null) w.anomalyPressure = json.anomalyPressure;
     return w;
   }
 }

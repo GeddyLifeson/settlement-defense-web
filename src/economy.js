@@ -1,4 +1,6 @@
 // Scrap economy: build costs and combat rewards. Condensed from SD.Siege's scrap balancing.
+import { coveragePlanDiscountMult } from './coverageplans.js';
+
 export const BUILD_COST = {
   wall: 2,
   wire: 1, // power conduit -- deliberately near-free so long runs are a layout problem, not a cost one
@@ -10,6 +12,11 @@ export const BUILD_COST = {
   bed: 8,
   table: 6,
   door: 5,
+  // Storage/Medical room roles (rooms.js RoomRole.Storage/Medical): cheap furniture-only additions,
+  // no new mechanic. Shelf priced in the same cheap-furniture tier as table (PA-scale ~$6 anchor).
+  // Medical Bed is priced at 2.5x plain Bed's cost (PA real anchor per the task brief).
+  shelf: 6,
+  medical_bed: 20,
   generator: 30,
   generator_nuclear: 90, // expensive: high-reward wireless power radius, but risks the waste hazard, see siege.js
   // SEA:R multi-source power economy (FEATURE_RESEARCH.md): each variant trades cost/pollution/
@@ -61,18 +68,85 @@ export const BUILD_COST = {
   // counter-buildable -- priced below a real combat trap (15) since it does nothing against
   // attackers, just catches rats at rats.js's real 65% rate.
   rat_trap: 10,
+  // Stabilizer Beacon (anomaly.js): the "real in-game response" to anomaly pressure -- adds
+  // extra passive decay to the meter while built and undestroyed, stacking up to
+  // STABILIZER_MAX_STACKS. Priced in the same cheap single-purpose-counter-buildable tier as Rat
+  // Trap, for the same reason: it does nothing against attackers, purely a hazard-management tool.
+  stabilizer: 18,
+  // Shrine (RimWorld Ideology DLC's real altar buildable): a single-tier, beauty-only passive
+  // building -- no function beyond a flat Beauty contribution to whatever room it's placed inside
+  // (see rooms.js's BEAUTY_BY_KIND.shrine). Priced between door (5) and monitor_station (12) --
+  // similar cost tier to the other small single-purpose decor/sensor buildables (camera: 8,
+  // table: 6), reflecting that it's cheap to place but purely cosmetic, not a functional upgrade.
+  shrine: 10,
+  // Vest (citizens.js's hasVest / siege.js's CITIZEN_VEST_ARMOR_RATING/resolveCitizenArmorRoll):
+  // a per-CITIZEN purchase, not a structure -- world.buyVest spends this once per citizen equipped.
+  // Priced with door (5)/table (6) rather than a combat structure like trap (15)/turret (25): it's
+  // real, measured protection (see siege.js's comment on the average-damage reduction it buys a
+  // vested citizen) but civilian-grade personal gear, not a defense placement of its own.
+  vest: 10,
+  // Fitness Station (PA needs.txt Exercise -- see citizens.js's EXERCISE_DECAY / jobs.js's
+  // SeekingExercise-Exercising job / rooms.js's RoomRole.Gymnasium): ONE consolidated buildable
+  // standing in for PA's whole real gym-equipment catalog (Treadmill/TyreApparatus/PullUpBars/
+  // PushUpStones/GymMat, ~10 objects), same consolidation precedent as every other buildable here
+  // representing a PA/RimWorld category rather than each individual real object. Priced cheap,
+  // same tier as bed (8)/door (5) -- a needs-refill fixture, not a combat or utility structure.
+  fitness_station: 9,
+  // Lightning Rod (weather.js's Lightning Storm calamity, real Prison Architect calamity_settings.txt
+  // mitigation item): cheap on purpose -- a real PA lightning rod is a small, inexpensive counter-
+  // buildable, same "cheap, single-purpose counter" pricing logic as rat_trap/stabilizer above.
+  lightning_rod: 14,
+  // Fabrication Bay (drones.js -- RimWorld Biotech's mech-companion labor drone, see that
+  // module's header comment): unlocks drone capacity, matching the "a building unlocks capacity,
+  // not a per-unit purchase" pattern security.js's tickArmoryIssuance already established for
+  // Armory/weapon tiers. Priced in the garage/workshop mid tier (garage_garbage_gas: 35,
+  // workshop: 40, garage_recycling_gas: 45) -- a real strategic investment, not a cheap add-on.
+  fabrication_bay: 48,
+  // Farm Plot (research.js's Agronomy node, jobs.js's Farming job): a renewable citizen-tended
+  // producer, priced near Fitness Station/Rat Trap's cheap single-purpose tier (9-15) rather than
+  // a combat or utility structure -- the real payoff is the ongoing tended cycle, not the
+  // placement itself.
+  farm_plot: 16,
 };
 
 export const SCRAP_PER_KILL = 4;
 
+// Trader-caravan random event (weather.js's tryTraderEvent, mirrors RimWorld's real
+// TraderCaravanArrival/VisitorGroup IncidentDefs -- see weather.js's EVENT_WEIGHTS comment):
+// a discounted-cost voucher on the next few buildables, active for a real-but-short window so a
+// hands-off colony can't just bank it forever. Both the discount and the window are read here
+// (the actual point-of-sale) rather than duplicated in weather.js.
+export const TRADER_DISCOUNT_PCT = 0.4; // 40% off -- meaningful, not a rounding-error discount
+export const TRADER_VOUCHER_USES = 3; // next N buildable purchases, whichever runs out first
+export const TRADER_WINDOW_TICKS = 400; // ~40s at 10Hz -- "a few hundred ticks" per the task brief
+
+/** True while a trader voucher is still live (uses remaining AND window not yet expired). */
+export function traderVoucherActive(world) {
+  return (world._traderVoucherUses || 0) > 0 && world.currentTick <= (world._traderVoucherExpireTick ?? -1);
+}
+
+/** The actual scrap cost of `kind` right now, discount included if a voucher is active. Exported
+ *  so input.js's cost-preview UI can show the discounted price, not just canAfford/spend. */
+export function buildCost(world, kind) {
+  const base = BUILD_COST[kind] || 0;
+  let cost = base;
+  if (traderVoucherActive(world)) cost *= (1 - TRADER_DISCOUNT_PCT);
+  // Coverage Plans (coverageplans.js): a purchased plan permanently discounts its themed
+  // buildables -- stacks multiplicatively with a trader voucher, same as any other discount
+  // layered on top of the base price.
+  cost *= coveragePlanDiscountMult(world, kind);
+  return Math.max(0, Math.round(cost));
+}
+
 export function canAfford(world, kind) {
-  return world.scrap >= (BUILD_COST[kind] || 0);
+  return world.scrap >= buildCost(world, kind);
 }
 
 export function spend(world, kind) {
-  const cost = BUILD_COST[kind] || 0;
+  const cost = buildCost(world, kind);
   if (world.scrap < cost) return false;
   world.scrap -= cost;
   if (world.finance) world.finance.buildSpend += cost; // budget-report ledger, see world.js's finance comment
+  if (traderVoucherActive(world)) world._traderVoucherUses -= 1; // one use consumed per purchase, discounted or not
   return true;
 }

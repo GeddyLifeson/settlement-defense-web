@@ -4,7 +4,9 @@ import { SCRAP_PER_KILL, BUILD_COST } from './economy.js';
 import { CitizenFlags } from './citizens.js';
 import { isPoweredAt, hasPoweredBonus } from './power.js';
 import { PASSION_GAIN_MULT } from './backstories.js';
+import { ageBandFor } from './traits.js';
 import { WEAPON_TIERS } from './security.js';
+import { rankHealthMultFor } from './ranks.js';
 
 // ---------------------------------------------------------------- enemy archetypes
 // RimWorld/SEA:R-style raider roster: every attacker used to be identical except for a flat
@@ -135,24 +137,69 @@ export function resetArmorStats() {
   armorStats.deflect = 0; armorStats.half = 0; armorStats.full = 0;
 }
 
+// Core 3-outcome roll, factored out so both the attacker-side roll (resolveArmorRoll, below) and
+// the citizen-side roll (resolveCitizenArmorRoll, see the Vest section further down) share the
+// exact same mechanism -- effectiveArmor = armor - penetration, one roll 0-100, three thresholds.
+// Returns { outcome, fracMult } where fracMult is the fraction of `amount` that gets through
+// (0 / 0.5 / 1) BEFORE any archetype-specific vulnerability multiplier is applied -- callers that
+// have no such multiplier (citizens) can use fracMult directly.
+function rollArmorMitigation(armor, penetration, rng) {
+  const effectiveArmor = armor - penetration;
+  const roll = rng() * 100;
+  if (effectiveArmor > 0 && roll < effectiveArmor / 2) return { outcome: 'deflect', fracMult: 0 };
+  if (effectiveArmor > 0 && roll <= effectiveArmor) return { outcome: 'half', fracMult: 0.5 };
+  return { outcome: 'full', fracMult: 1 };
+}
+
 // The actual 3-outcome roll described at the top of this section. `amount` is the pre-roll base
 // damage; returns { dealt, outcome } where outcome is 'deflect' | 'half' | 'full' (reported as
 // DamageType.Blunt-flavored when 'half', per the comment above). Tallies armorStats as a side
 // effect so soak tests can confirm a real mix of outcomes rather than one branch always firing.
 export function resolveArmorRoll(kind, damageType, amount, penetration, rng = Math.random) {
   const armor = armorRatingOf(kind, damageType);
-  const effectiveArmor = armor - penetration;
-  const roll = rng() * 100;
-  let outcome, dealt;
-  if (effectiveArmor > 0 && roll < effectiveArmor / 2) {
-    outcome = 'deflect'; dealt = 0;
-  } else if (effectiveArmor > 0 && roll <= effectiveArmor) {
-    outcome = 'half'; dealt = amount * 0.5;
-  } else {
-    outcome = 'full'; dealt = amount * vulnerabilityMult(kind, damageType);
-  }
+  const { outcome, fracMult } = rollArmorMitigation(armor, penetration, rng);
+  const dealt = outcome === 'full' ? amount * vulnerabilityMult(kind, damageType) : amount * fracMult;
   armorStats[outcome]++;
   return { dealt, outcome };
+}
+
+// ---------------------------------------------------------------- citizen armor (Vest)
+// Citizens previously had ZERO defense stat of any kind -- an attacker's contact damage was a
+// flat subtraction with no armor roll at all, unlike every combat-side hit in this file. This is
+// the fix: a purchasable/craftable Vest (economy.js BUILD_COST.vest, equipped per-citizen via
+// world.buyVest -- see world.js/citizens.js's hasVest flag) grants a flat armor-rating bonus on
+// this SAME ARMOR_RATING 0-100 scale, run through the exact rollArmorMitigation core above rather
+// than a parallel mechanic. Real RimWorld anchor: Flak Vest's real ArmorRating_Sharp is ~1.00 on
+// RimWorld's own 0-2ish scale (its "100%" reference point) -- CITIZEN_VEST_ARMOR_RATING (25) is
+// picked proportionally on this project's scale, in the same neighborhood as a Grunt's own 20
+// Kinetic armor rating (ARMOR_RATING[Grunt][Kinetic] above), i.e. "roughly as protected as the
+// weakest raider archetype's own plate", a reasonable civilian-grade vest.
+// ATTACKER_CONTACT_PENETRATION is 0 (not one of the gun-tier PENETRATION consts below) -- a raider's
+// bare-handed/melee contact hit is not a piercing weapon, so it carries no penetration of its own;
+// an unvested citizen (armorRating 0) still rolls effectiveArmor = 0-0 = 0, which the roll's own
+// `effectiveArmor > 0` guard sends straight to 'full' every time -- i.e. byte-for-byte the same
+// flat-damage behavior citizens had before this feature existed. Only a vested citizen (armorRating
+// 25) ever sees a nonzero effectiveArmor and a real chance to deflect/halve a hit.
+export const CITIZEN_VEST_ARMOR_RATING = 25;
+const ATTACKER_CONTACT_PENETRATION = 0;
+
+// Same live-tally pattern as armorStats above, kept as its own counter (not merged into armorStats)
+// so a soak test can read "how did the citizen population's hits resolve" independently of the
+// attacker-facing combat tally.
+export const citizenArmorStats = { deflect: 0, half: 0, full: 0 };
+export function resetCitizenArmorStats() {
+  citizenArmorStats.deflect = 0; citizenArmorStats.half = 0; citizenArmorStats.full = 0;
+}
+
+// `amount` is the pre-roll base damage a citizen is about to take; `armorRating` is 0 for an
+// unvested citizen, CITIZEN_VEST_ARMOR_RATING for a vested one (see tickAttackerVsCitizens below,
+// which reads citizens.hasVest to decide which). Returns { dealt, outcome }, same shape as
+// resolveArmorRoll -- citizens have no per-archetype vulnerability table, so 'full' is always a
+// flat 1x rather than resolveArmorRoll's vulnerabilityMult lookup.
+export function resolveCitizenArmorRoll(armorRating, penetration, amount, rng = Math.random) {
+  const { outcome, fracMult } = rollArmorMitigation(armorRating, penetration, rng);
+  citizenArmorStats[outcome]++;
+  return { dealt: amount * fracMult, outcome };
 }
 
 export class AttackerStore {
@@ -164,6 +211,11 @@ export class AttackerStore {
     this.health = new Float32Array(capacity);
     this.alive = new Uint8Array(capacity);
     this.kind = new Uint8Array(capacity); // AttackerKind enum, same SoA style as the rest
+    // Non-lethal takedown (security.js's WeaponTier.StunBaton, see applyStun/tickAttackers/
+    // tickAttackerVsCitizens below): ticks remaining incapacitated. 0 = not stunned, the default
+    // for every existing spawn call site (tests/console pokes) -- byte-for-byte the old
+    // behavior for anyone who never gets stunned.
+    this.stunTicksRemaining = new Uint16Array(capacity);
   }
 
   // `health` is the wave-scaled base health; the archetype's own healthMult is applied here so
@@ -175,6 +227,7 @@ export class AttackerStore {
       for (let i = 0; i < this.count; i++) {
         if (!this.alive[i]) {
           this.x[i] = x; this.y[i] = y; this.health[i] = hp; this.alive[i] = 1; this.kind[i] = kind;
+          this.stunTicksRemaining[i] = 0; // a recycled dead slot must not inherit a stale stun
           return i;
         }
       }
@@ -182,6 +235,7 @@ export class AttackerStore {
     }
     const i = this.count++;
     this.x[i] = x; this.y[i] = y; this.health[i] = hp; this.alive[i] = 1; this.kind[i] = kind;
+    this.stunTicksRemaining[i] = 0;
     return i;
   }
 
@@ -189,9 +243,23 @@ export class AttackerStore {
     return this.alive[i] === 1;
   }
 
+  isStunnedAt(i) {
+    return this.stunTicksRemaining[i] > 0;
+  }
+
   archetypeAt(i) {
     return archetypeOf(this.kind[i]);
   }
+}
+
+// Single choke point for applying a non-lethal incapacitation (security.js's WeaponTier.StunBaton
+// is the only current caller, via siege.js's own tickStaffCombat below) -- takes the max of any
+// existing stun rather than stacking additively, so a second baton hit on an already-stunned
+// target refreshes the duration instead of letting stuns compound into an effectively-permanent
+// lock.
+export function applyStun(attackers, i, ticks) {
+  if (!attackers.isAliveAt(i)) return;
+  attackers.stunTicksRemaining[i] = Math.max(attackers.stunTicksRemaining[i], ticks);
 }
 
 // Weather-scaled hit roll (RimWorld WeatherDefs/Weathers.xml accuracy modifiers, see weather.js's
@@ -520,8 +588,16 @@ const FENCE_CONTACT_RANGE = 0.7;
 const FENCE_DAMAGE_PER_TICK = 0.015;
 const TRAP_TRIGGER_RANGE = 0.5;
 const TRAP_DAMAGE = 3; // instant-kill-ish burst
-const GUARD_RANGE = 3.5; const GUARD_DAMAGE = 0.05; const GUARD_COOLDOWN = 4;
-const SNIPER_RANGE = 9; const SNIPER_DAMAGE = 0.12; const SNIPER_COOLDOWN = 10;
+// Exported: draft.js reuses these directly as the baseline "unarmed civilian" attack-order stats
+// for any drafted citizen who isn't already a Guard/Sniper (see that file's tickDraftedCombat) --
+// same conventional-sidearm ballpark as an unarmored guard, rather than inventing a second set of
+// combat numbers for manually-controlled citizens.
+export const GUARD_RANGE = 3.5;
+export const GUARD_DAMAGE = 0.05;
+export const GUARD_COOLDOWN = 4;
+export const SNIPER_RANGE = 9;
+export const SNIPER_DAMAGE = 0.12;
+export const SNIPER_COOLDOWN = 10; // exported for draft.js, see GUARD_* comment above
 
 // Tesla coil (SEA:R): weaker per-hit than a plain turret but chains to every attacker in range
 // each activation -- a crowd-control pick over a single-target DPS pick, not a strict upgrade.
@@ -536,8 +612,8 @@ const TESLA_RANGE = 4.5; const TESLA_DAMAGE = 0.12; const TESLA_COOLDOWN_TICKS =
 const TURRET_PENETRATION = 20;
 const TESLA_PENETRATION = 30;
 const TRAP_PENETRATION = 35;
-const GUARD_PENETRATION = 15;
-const SNIPER_PENETRATION = 40;
+export const GUARD_PENETRATION = 15; // exported for draft.js, see the GUARD_RANGE/DAMAGE/COOLDOWN comment above
+export const SNIPER_PENETRATION = 40; // exported for draft.js, see GUARD_* comment above
 
 // Floodlight (SEA:R's "soft wall" -- an area-denial light that slows rather than blocks, so it
 // doesn't need its own health/destroy state like a fence does).
@@ -579,7 +655,7 @@ export function tickNuclearHazard(structures, citizens) {
         citizens.alive[c] = 0;
         continue;
       }
-      const healthMult = citizens.trait[c]?.healthMult ?? 1;
+      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c);
       citizens.health[c] -= NUCLEAR_HAZARD_CITIZEN_DAMAGE / healthMult;
       if (citizens.health[c] <= 0) {
         citizens.health[c] = 0.05;
@@ -617,6 +693,11 @@ function nearestLivingCitizen(citizens, x, y) {
 export function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, onScrap, onKill, weatherSpeedMult = 1, rng = Math.random) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
+    // Non-lethal incapacitation (security.js's WeaponTier.StunBaton, see applyStun above): frozen
+    // in place for the duration -- no movement, no fence-chewing, no trap-triggering this tick.
+    // Ticks down here rather than a separate pass so a stunned attacker's clock only advances on
+    // ticks it would otherwise have acted, matching the "briefly incapacitated" framing.
+    if (attackers.stunTicksRemaining[i] > 0) { attackers.stunTicksRemaining[i]--; continue; }
 
     const arch = attackers.archetypeAt(i);
 
@@ -705,7 +786,9 @@ export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng 
   }
 }
 
-function nearestAliveAttacker(attackers, x, y, maxRange) {
+// Exported so draft.js can reuse it for right-click "attack this target" detection (is there a
+// live attacker under the cursor?) instead of re-implementing the same nearest-in-range scan.
+export function nearestAliveAttacker(attackers, x, y, maxRange) {
   let bestI = -1, bestDist = maxRange;
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
@@ -739,6 +822,9 @@ function nearestAliveAttacker(attackers, x, y, maxRange) {
 export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math.random, accuracyMult = 1, onContact = null) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
+    // Non-lethal incapacitation (see applyStun/tickAttackers above): a stunned attacker can't
+    // land a contact hit on anyone this tick either -- the whole point of the takedown.
+    if (attackers.stunTicksRemaining[i] > 0) continue;
     // Per-archetype reach: a Boss's contactRange is wide enough that it hits every citizen in a
     // small area each tick (this loop damages everyone in range), which is its cleave attack.
     const arch = attackers.archetypeAt(i);
@@ -757,8 +843,16 @@ export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math
         continue;
       }
 
-      const healthMult = citizens.trait[c]?.healthMult ?? 1;
-      citizens.health[c] -= (ATTACKER_CITIZEN_DAMAGE * arch.damageMult) / healthMult;
+      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c);
+      const baseDamage = (ATTACKER_CITIZEN_DAMAGE * arch.damageMult) / healthMult;
+      // Vest armor (see the "citizen armor (Vest)" section above) -- citizens.hasVest is a plain
+      // Uint8Array duck-typed off the passed-in store, same access pattern as citizens.trait just
+      // above, so this stays backward compatible with any older/test CitizenStore that predates
+      // the field (hasVest undefined -> `?.[c]` reads undefined -> falsy -> armorRating 0, exactly
+      // the old always-full-damage behavior).
+      const armorRating = citizens.hasVest?.[c] ? CITIZEN_VEST_ARMOR_RATING : 0;
+      const { dealt } = resolveCitizenArmorRoll(armorRating, ATTACKER_CONTACT_PENETRATION, baseDamage, rng);
+      citizens.health[c] -= dealt;
       if (citizens.health[c] <= 0) {
         citizens.health[c] = 0.05;
         citizens.flags[c] |= CitizenFlags.Downed;
@@ -778,6 +872,9 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKi
   for (let i = 0; i < citizens.count; i++) {
     if (!citizens.isAliveAt(i)) continue;
     if (citizens.isDownedAt(i)) continue; // downed guards/snipers can't fight back
+    // Drafted (draft.js): a drafted guard/sniper fights whatever the player specifically ordered
+    // (draft.js's own tickDraftedCombat), not the nearest-target auto-engage below.
+    if (citizens.isDraftedAt(i)) continue;
     const kind = roster.kindOf(idOf(i));
     if (kind !== 'Guard' && kind !== 'Sniper') continue;
 
@@ -793,13 +890,29 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKi
     // Guards carry conventional sidearms (Kinetic); snipers carry the long-range armor-piercing
     // rifle (Energy), so a sniper line is the personnel answer to Brutes/Bosses.
     const dtype = kind === 'Sniper' ? DamageType.Energy : DamageType.Kinetic;
-    const penetration = kind === 'Sniper' ? SNIPER_PENETRATION : GUARD_PENETRATION;
+    // Weapon-tier penetration bonus (security.js WEAPON_TIERS.penetrationBonus) stacks on top of
+    // the role's baseline -- Sidearm's +0 keeps this byte-for-byte identical to the pre-tier
+    // constant for anyone nobody's built an Armory for yet.
+    const penetration = (kind === 'Sniper' ? SNIPER_PENETRATION : GUARD_PENETRATION) + (tier.penetrationBonus || 0);
 
     const targetI = nearestAliveAttacker(attackers, citizens.x[i], citizens.y[i], range);
     if (targetI >= 0) {
       citizens._staffCooldown[i] = cooldown;
+      // Non-lethal (Stun Baton, security.js WEAPON_TIERS.StunBaton): skip damageAttacker
+      // entirely -- a real percentage chance (tier.stunChance) to incapacitate rather than a
+      // damage roll, distinct from every other tier's lethal outcome. Same weather-scaled hit
+      // roll gates whether the swing connects at all (a miss is a miss regardless of what the
+      // weapon does on a hit); the stunChance roll only happens once it does. No scrap/kill/skill
+      // reward -- there's no kill to reward, matching "distinct from the lethal tiers" rather
+      // than a strictly-better freebie.
+      if (tier.nonLethal) {
+        if (rollsHit(rng, accuracyMult) && attackers.isAliveAt(targetI) && rng() < tier.stunChance) {
+          applyStun(attackers, targetI, tier.stunDurationTicks);
+        }
+        continue;
+      }
       if (rollsHit(rng, accuracyMult) && damageAttacker(attackers, targetI, damage, dtype, penetration, rng)) {
-        citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]];
+        citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]] * ageBandFor(citizens.age[i]).skillGainMult;
         onScrap?.(SCRAP_PER_KILL);
         onKill?.();
       }
@@ -933,7 +1046,7 @@ export function tickHeldCitizenCrisis(world) {
   if (!responded) {
     // No timely response -- this beat escalates with a real injury (not just a scare), matching
     // "some beats end safely, some don't" rather than a single binary check deciding everything.
-    const healthMult = store.trait[idx]?.healthMult ?? 1;
+    const healthMult = (store.trait[idx]?.healthMult ?? 1) * ageBandFor(store.age[idx]).healthMult * rankHealthMultFor(store, idx);
     store.health[idx] = Math.max(0.05, store.health[idx] - HELD_CITIZEN_ESCALATION_INJURY / healthMult);
     if (store.health[idx] <= 0.05) store.flags[idx] |= CitizenFlags.Downed;
     const name = store.name[idx];

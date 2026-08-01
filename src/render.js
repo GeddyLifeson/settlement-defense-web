@@ -6,39 +6,65 @@
 // clearly against the ground, and zone/room tints rather than photographic texture.
 import { StaffRoleKind, TerrainKind } from './core.js';
 import { ZONE_COLOR, ZoneKind } from './zones.js';
-import { JobState } from './jobs.js';
+import { JobState, WorkCategory, FARM_CYCLE_TICKS } from './jobs.js';
 import { isTileEnergized, isSegmentOverloadedAt, BATTERY_STORED_MAX } from './power.js';
 import { isTileWatered } from './water.js';
 import { isNuclearContained, NUCLEAR_HAZARD_RADIUS } from './siege.js';
 import { roomContaining, ROOM_ROLE_LABEL, RoomRole } from './rooms.js';
 import { drawSprite } from './assets.js';
+import { OrderKind } from './draft.js';
 
-// Shifts a #rrggbb color toward black (amt<0) or white (amt>0) by `amt` (-1..1) -- used to
-// derive gradient-stop colors (a shadowed underside, a lit highlight) from a single base hex so
-// callers only ever need to track one color per palette slot, not three.
+// Parses either '#rrggbb' or 'rgb(a)(...)' into an [r,g,b] triple -- shade()/desaturate() need to
+// compose (desaturate's rgb(...) output can be fed back into shade() for a highlight, e.g.
+// _drawHumanoid's onBreak citizens), and a hex-only parser would silently break on that input.
+function parseColor(str) {
+  if (str[0] === '#') {
+    const n = parseInt(str.slice(1), 16);
+    return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+  }
+  const m = str.match(/rgba?\(([^)]+)\)/);
+  if (m) {
+    const parts = m[1].split(',').map((s) => parseFloat(s));
+    return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+  }
+  return [0, 0, 0];
+}
+
+// Shifts a color toward black (amt<0) or white (amt>0) by `amt` (-1..1) -- used to derive a
+// single solid highlight (or, elsewhere, a state-dependent tint) from a base color so callers
+// only ever need to track one color per palette slot, not three.
 function shade(hex, amt) {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  const [r, g, b] = parseColor(hex);
   const mix = (c) => Math.max(0, Math.min(255, Math.round(c + (amt > 0 ? (255 - c) : c) * amt)));
   return `#${[mix(r), mix(g), mix(b)].map(v => v.toString(16).padStart(2, '0')).join('')}`;
 }
 
 const CELL = 24; // px per grid cell at zoom 1
-const OUTLINE = 'rgba(20,16,12,0.75)';
+// Bumped from the old rgba(20,16,12,0.75) toward near-opaque true near-black (style brief item 3)
+// -- crisper silhouette separation at small sprite size, kept neutral rather than warm-tinted.
+const OUTLINE = 'rgba(10,10,12,0.95)';
 
+// Style-brief item 1: baseline material colors desaturated ~15-25% off their original punchy
+// values (computed by hand from the pre-brief hex constants). Full saturation is reserved for
+// hazard/attention states (downed gray, onBreak desaturate(), the Boss's pulsing threat ring/
+// crown), not baseline per-role appearance.
 const ROLE_COLOR = {
-  [StaffRoleKind.Guard]: '#f2c026',
-  [StaffRoleKind.Sniper]: '#bf59d9',
-  [StaffRoleKind.K9Handler]: '#f2c026',
-  [StaffRoleKind.Monitor]: '#59a6d9',
+  [StaffRoleKind.Guard]: '#e1b93e',
+  [StaffRoleKind.Sniper]: '#ba68cf',
+  [StaffRoleKind.K9Handler]: '#e1b93e',
+  [StaffRoleKind.Monitor]: '#67a4cd',
   // Structured Group Program staff (programs.js) -- distinct from the security-role palette above
   // so a Foreman/Psychologist/Facilitator reads visually apart from Guard/Sniper/Monitor at a
   // glance, same "role tints the citizen dot" convention.
-  [StaffRoleKind.Foreman]: '#c87830',
-  [StaffRoleKind.Psychologist]: '#7ac0c0',
-  [StaffRoleKind.Facilitator]: '#c878c8',
+  [StaffRoleKind.Foreman]: '#b9793f',
+  [StaffRoleKind.Psychologist]: '#83bbbb',
+  [StaffRoleKind.Facilitator]: '#c383c3',
   [StaffRoleKind.None]: '#d3cdbf',
 };
+
+// Baseline citizen/attacker skin tone (warm), desaturated ~20% from the original #e8c9a0 per the
+// style brief's warm-vs-cool material split -- skin/hair stay warm, uniform/gear tints stay cool.
+const CITIZEN_SKIN = '#e1c8a8';
 
 const ZONE_BORDER = {
   [ZoneKind.Bedroom]: '#5a6fb0',
@@ -56,11 +82,22 @@ const FUEL_COLOR = {
   electric: '#3dd0d0',
 };
 
+// Labor drone "status eye" color per fixed WorkCategory (drones.js, see _drawDrones below) -- a
+// drone never changes category after fabrication, so this is a stable at-a-glance job read, same
+// spirit as FUEL_COLOR's stripe above. RGB triples (not CSS strings) so _drawDrones can inject a
+// live alpha for the idle-vs-working pulse without string-parsing a color back apart.
+const DRONE_EYE_COLOR = {
+  [WorkCategory.Construction]: [230, 176, 60],  // amber, matches the workshop/finishedBuild accent family
+  [WorkCategory.Processing]: [242, 201, 76],    // matches _drawStructureShape's workshop work-light
+  [WorkCategory.Hauling]: [61, 111, 168],       // matches FUEL_COLOR.gas, the "hauling" blue this file already uses
+  [WorkCategory.Harvesting]: [140, 128, 104],   // matches _drawResourceNodes' ore-deposit fill family
+  [WorkCategory.Cleaning]: [130, 200, 190],     // cool teal, distinct from every other category's warm/blue tones
+};
+
 // Blend a hex color toward gray -- used to give OnBreak citizens a visibly washed-out look
 // distinct from the flat gray used for Downed citizens (see _drawCitizens).
 function desaturate(hex, amount) {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  const [r, g, b] = parseColor(hex);
   const gray = (r + g + b) / 3;
   const mix = (c) => Math.round(c + (gray - c) * amount);
   return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
@@ -219,6 +256,7 @@ export class Renderer {
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this._drawGround(world);
     this._drawZones(world);
+    this._drawAllowedArea(world, input);
     this._drawResourceNodes(world);
     this._drawNuclearHazards(world);
     this._drawStructures(world);
@@ -229,6 +267,7 @@ export class Renderer {
     this._drawRats(world);
     this._drawAttackers(world);
     this._drawVehicles(world);
+    this._drawDrones(world);
     this._drawSmogHaze(world);
     if (input) {
       this._drawCursor(world, input);
@@ -387,6 +426,40 @@ export class Renderer {
       }
     }
     ctx.setLineDash([]); // don't leak the dash pattern into unrelated strokes drawn after this
+  }
+
+  // Allowed Area restriction overlay (RimWorld Restrict-tab style, citizens.js's allowedAreaMask)
+  // -- shown for whichever single citizen is currently selected/inspected, not just while
+  // actively painting, so the player can see an already-painted restriction at a glance. A
+  // distinct amber tint (not any existing ZONE_COLOR hue) so it never reads as a fourth zone
+  // kind. Deliberately NOT gated on input.tool === 'restrict-area' -- selecting a restricted
+  // citizen should show their cage immediately, same as clicking one shows their needs bars.
+  _drawAllowedArea(world, input) {
+    if (!input) return;
+    const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+    if (sel < 0 || sel >= world.citizens.count || !world.citizens.hasAllowedArea(sel)) return;
+    const ctx = this.ctx;
+    const size = CELL * this.zoom;
+    const gw = world.grid.width;
+    const mask = world.citizens.allowedAreaMask[sel];
+    for (let y = 0; y < world.height; y++) {
+      for (let x = 0; x < world.width; x++) {
+        if (mask[y * gw + x] !== 1) continue;
+        const [px, py] = this.worldToScreen(x, y);
+        ctx.fillStyle = 'rgba(224,168,96,0.22)';
+        ctx.fillRect(px, py, size + 1, size + 1);
+        ctx.strokeStyle = 'rgba(224,168,96,0.75)';
+        ctx.lineWidth = Math.max(1, size * 0.05);
+        ctx.setLineDash(this.highContrast ? [size * 0.15, size * 0.1] : []);
+        ctx.beginPath();
+        if (y === 0 || mask[(y - 1) * gw + x] !== 1) { ctx.moveTo(px, py); ctx.lineTo(px + size, py); }
+        if (y === world.height - 1 || mask[(y + 1) * gw + x] !== 1) { ctx.moveTo(px, py + size); ctx.lineTo(px + size, py + size); }
+        if (x === 0 || mask[y * gw + x - 1] !== 1) { ctx.moveTo(px, py); ctx.lineTo(px, py + size); }
+        if (x === world.width - 1 || mask[y * gw + x + 1] !== 1) { ctx.moveTo(px + size, py); ctx.lineTo(px + size, py + size); }
+        ctx.stroke();
+      }
+    }
+    ctx.setLineDash([]);
   }
 
   _drawCursor(world, input) {
@@ -554,9 +627,13 @@ export class Renderer {
     // invisible in practice since the palette space is small (a few role colors x downed/
     // onBreak states) and every combo gets cached forever after its first appearance.
     const hair = Renderer.HAIR_TONES[Math.floor(seed * 977) % Renderer.HAIR_TONES.length];
+    // Style brief item 2: flat base fill + one solid highlight shape (BODY_HI/HEAD_HI) instead of
+    // a full-surface gradient -- see assets.js's humanoid_torso template, which now clips a small
+    // highlight ellipse to the top ~20-30% of the torso/head silhouette rather than blending
+    // top-to-bottom.
     const drew = drawSprite(ctx, 'humanoid_torso', {
-      BODY: bodyColor, BODY_SHADOW: shade(bodyColor, -0.35),
-      HEAD: headColor, HEAD_HI: shade(headColor, 0.35),
+      BODY: bodyColor, BODY_HI: shade(bodyColor, 0.3),
+      HEAD: headColor, HEAD_HI: shade(headColor, 0.3),
       HAIR: hair, OUTLINE,
     }, sx, sy - s * 0.03, s * 0.85);
     if (!drew) {
@@ -588,12 +665,31 @@ export class Renderer {
       const id = world.citizens.id[i];
       const downed = world.citizens.isDownedAt(i);
       const onBreak = !downed && world.citizens.isOnBreakAt(i);
+      // Sickness (sickness.js): piggybacks on this exact desaturate-tint pattern rather than a
+      // new visual language -- onBreak already claims the tint when both apply (a citizen can be
+      // sick AND on break at once), but the glyph below still shows independently either way.
+      const sick = !downed && world.citizens.isSickAt(i);
+      const drafted = world.citizens.isDraftedAt(i);
       const role = world.roster.isStaff(id) ? world.roster.kindOf(id) : StaffRoleKind.None;
       const baseColor = ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None];
-      const color = downed ? '#6b6b6b' : onBreak ? desaturate(baseColor, 0.6) : baseColor;
-      const headColor = downed ? '#8a8a8a' : onBreak ? desaturate('#e8c9a0', 0.6) : '#e8c9a0';
+      const color = downed ? '#6b6b6b' : onBreak ? desaturate(baseColor, 0.6) : sick ? desaturate(baseColor, 0.4) : baseColor;
+      // Skin tone (#e1c8a8) is the desaturated-~20% baseline per the style brief; downed/onBreak
+      // still branch off it exactly as before, just from the new muted base.
+      const headColor = downed ? '#8a8a8a' : onBreak ? desaturate(CITIZEN_SKIN, 0.6) : sick ? desaturate(CITIZEN_SKIN, 0.4) : CITIZEN_SKIN;
       const [sx, sy] = this.worldToScreen(world.citizens.x[i], world.citizens.y[i]);
       this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, headColor, world.citizens.health[i], false, world.currentTick, id);
+      if (sick) {
+        // Small sickly-green "+" tell centered above the head -- distinct position (dead center)
+        // and color (green, not onBreak's blue-gray "z" or forcejob's orange "!") from every other
+        // above-head glyph so a sick citizen reads clearly even while also on break/drafted/etc.
+        const s = CELL * this.zoom * 0.7;
+        this.ctx.save();
+        this.ctx.font = `bold ${Math.max(8, s * 0.34)}px sans-serif`;
+        this.ctx.fillStyle = 'rgba(120,190,110,0.9)';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('+', sx, sy - s * 0.68);
+        this.ctx.restore();
+      }
       if (onBreak) {
         // Small "zzz" tell above the head so low-mood citizens read clearly at a glance,
         // distinct from the flat-gray Downed silhouette.
@@ -605,6 +701,81 @@ export class Renderer {
         this.ctx.fillText('z', sx + s * 0.32, sy - s * 0.62);
         this.ctx.restore();
       }
+      // Force Job pending (forcejob.js -- RimWorld-style "Prioritize" one-shot order): a small
+      // orange exclamation mark above the head, same "small glyph reads at a glance" convention
+      // as onBreak's zzz right above -- distinct color/shape/position (opposite side from onBreak's
+      // z) so the two can never be confused, even though in practice they can coexist (an
+      // onBreak citizen can still have a pending forced job waiting for them). Cleared the moment
+      // jobs.js's tickJobs actually claims (or fails to claim) the forced target, so this never
+      // lingers once the citizen is genuinely en route.
+      if (world.citizens.hasForcedJobAt(i)) {
+        const s = CELL * this.zoom * 0.7;
+        this.ctx.save();
+        this.ctx.font = `bold ${Math.max(9, s * 0.4)}px sans-serif`;
+        this.ctx.fillStyle = '#ffb020';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('!', sx - s * 0.32, sy - s * 0.62);
+        this.ctx.restore();
+      }
+      // First-aid tending (jobs.js's JobState.Tending / citizens.js's TEND_RECOVERY_RATE): a small
+      // green "+" above the head, same "small glyph reads at a glance" convention as onBreak's zzz
+      // and Force Job's orange "!" above -- centered and slightly higher than those two (which sit
+      // left/right at the same height) so all three can coexist without overlapping. Shown on the
+      // TENDER (jobState === Tending, whether or not the render happens to catch a variance-roll
+      // tick) and on the PATIENT (world.citizens.beingTended[i], set fresh by this same tick's
+      // tickJobs Tending handler) -- one glyph style, two roles, so "an active tend is happening
+      // right here" reads clearly from either citizen's position.
+      if (world.citizens.jobState[i] === JobState.Tending || (downed && world.citizens.beingTended[i] === 1)) {
+        const s = CELL * this.zoom * 0.7;
+        this.ctx.save();
+        this.ctx.font = `bold ${Math.max(9, s * 0.4)}px sans-serif`;
+        this.ctx.fillStyle = '#5ec97a';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('+', sx, sy - s * 0.85);
+        this.ctx.restore();
+      }
+      // Drafted (draft.js -- RimWorld-style manual control): a small ring under the citizen's
+      // feet, same "state tint at a glance" convention as onBreak's zzz glyph and Downed's flat
+      // gray above, rather than a whole new visual language. High-contrast mode gets a dashed
+      // ring instead of solid, same accessibility pattern _drawZones uses for zone borders.
+      if (drafted) {
+        const s = CELL * this.zoom * 0.7;
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.strokeStyle = '#4fd1ff';
+        ctx.lineWidth = Math.max(1.5, s * 0.09);
+        if (this.highContrast) ctx.setLineDash([s * 0.12, s * 0.1]);
+        ctx.beginPath();
+        ctx.ellipse(sx, sy + s * 0.42, s * 0.42, s * 0.16, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+
+        // Active-order feedback (draft.js's orderKind -- 1 = Move, 2 = Attack): a thin line from
+        // the citizen to their current order target, so a move/attack order in progress is
+        // visibly distinct from a drafted-but-idle "standing at attention" citizen.
+        const orderKind = world.citizens.orderKind[i];
+        if (orderKind === OrderKind.Move) {
+          const [tx, ty] = this.worldToScreen(world.citizens.orderTargetX[i], world.citizens.orderTargetY[i]);
+          ctx.save();
+          ctx.strokeStyle = 'rgba(79,209,255,0.6)';
+          ctx.lineWidth = Math.max(1, s * 0.06);
+          ctx.setLineDash([s * 0.15, s * 0.12]);
+          ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
+          ctx.restore();
+        } else if (orderKind === OrderKind.Attack) {
+          const targetI = world.citizens.orderAttackIndex[i];
+          if (targetI >= 0 && world.attackers.isAliveAt(targetI)) {
+            const [tx, ty] = this.worldToScreen(world.attackers.x[targetI], world.attackers.y[targetI]);
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,90,60,0.7)';
+            ctx.lineWidth = Math.max(1, s * 0.06);
+            ctx.setLineDash([s * 0.08, s * 0.08]);
+            ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
+            ctx.restore();
+          }
+        }
+      }
     }
   }
 
@@ -613,7 +784,7 @@ export class Renderer {
   // the same silhouette in a duller, uncollared coat so "this one isn't yours yet" reads clearly
   // at a glance without needing a whole separate sprite.
   _drawDogs(world) {
-    this._drawAnimal(world.dogs, '#7a5230', '#f2c026');
+    this._drawAnimal(world.dogs, '#745235', '#f2c026'); // coat desaturated ~15%; collar kept punchy on purpose, a small tamed-vs-wild accent
   }
 
   _drawWildAnimals(world) {
@@ -677,11 +848,14 @@ export class Renderer {
   //   Brute      -- noticeably larger, heavy slate-plated
   //   Skirmisher -- smaller and lighter/oranger, reads as "fast and flimsy"
   //   Boss       -- much larger, violet, plus a pulsing threat ring and a spiked crown
+  // Body/head colors desaturated ~20% from the original punchy values per the style brief; the
+  // Boss's separate threat-ring/crown overlay (drawn below) is the deliberate full-saturation
+  // "attention" accent, so its own baseline body/head color is muted like every other archetype.
   static ATTACKER_STYLES = [
-    { scale: 0.6,  body: '#8a1f1f', head: '#c76b4a' }, // Grunt
-    { scale: 0.85, body: '#4a4438', head: '#8f7a5c' }, // Brute
-    { scale: 0.48, body: '#b0521f', head: '#e0a06a' }, // Skirmisher
-    { scale: 1.25, body: '#4a1f5e', head: '#c469e0' }, // Boss
+    { scale: 0.6,  body: '#7c2626', head: '#b96f55' }, // Grunt
+    { scale: 0.85, body: '#48443a', head: '#8a7961' }, // Brute
+    { scale: 0.48, body: '#a0552c', head: '#d4a175' }, // Skirmisher
+    { scale: 1.25, body: '#482658', head: '#c077d6' }, // Boss
   ];
 
   _drawAttackers(world) {
@@ -738,6 +912,8 @@ export class Renderer {
   _drawStructures(world) {
     const ctx = this.ctx;
     this._structuresForPower = world.structures; // read back by the 'wire' shape for its lit/dark tint
+    this._currentWeather = world.weather; // read back by the 'lightning_rod' shape for its storm-active radius ring
+    this._droneQueueLength = world.droneFabricationQueue?.length || 0; // read back by the 'fabrication_bay' shape for its work-light pulse
     for (const s of world.structures) {
       if (s.destroyed && s.kind === 'trap') continue; // traps vanish once triggered
       const [sx, sy] = this.worldToScreen(s.x, s.y);
@@ -802,8 +978,11 @@ export class Renderer {
     }
 
     if (s.kind === 'wall') {
-      const fill = '#413c34';
-      const drew = drawSprite(ctx, 'wall', { FILL: fill, FILL_HI: shade(fill, 0.25), OUTLINE }, sx, sy, size);
+      // Style-brief pass: slightly desaturated toward neutral gray (was a warmer brownish slab);
+      // shading is now flat fill + a single upper-left highlight wedge baked into the template
+      // (see assets.js's 'wall'), not a gradient.
+      const fill = '#403e3a';
+      const drew = drawSprite(ctx, 'wall', { FILL: fill, FILL_HI: shade(fill, 0.3), OUTLINE }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = fill;
         ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
@@ -815,7 +994,9 @@ export class Renderer {
       // Left as an improved Canvas primitive, not an SVG sprite: fence renders as a continuous
       // line segment across the tile (not a centered icon), which doesn't fit drawSprite's
       // centered-silhouette model. Rounded caps + small post knobs are the "improvement" here.
-      const fenceColor = s.destroyed ? 'rgba(80,60,40,0.4)' : '#a8825a';
+      // Style-brief pass: desaturated ~20% from the old warm tan (rendering approach left alone
+      // per instructions -- this is a color-only retune).
+      const fenceColor = s.destroyed ? 'rgba(80,60,40,0.4)' : '#9c8062';
       ctx.strokeStyle = fenceColor;
       ctx.lineWidth = Math.max(2, size * 0.12);
       ctx.lineCap = 'round';
@@ -841,21 +1022,28 @@ export class Renderer {
       return;
     }
     if (s.kind === 'bed') {
-      const frame = '#5a6fb0';
-      const drew = drawSprite(ctx, 'bed',
-        { FRAME: frame, FRAME_HI: shade(frame, 0.2), PILLOW: '#8898cc', OUTLINE }, sx, sy, size);
+      // Style pass: was a saturated blue frame ('#5a6fb0') with no wood read at all -- moved to
+      // the wood-furniture family's desaturated warm ochre/tan per the style brief. Headboard is
+      // a darker flat band (was the same color as the gradient's own dark stop); FRAME_HI is now
+      // a small solid highlight wedge, not a full-surface gradient stop.
+      const frame = '#8a7355';
+      const drew = drawSprite(ctx, 'bed', {
+        FRAME: frame, HEADBOARD: shade(frame, -0.22), FRAME_HI: shade(frame, 0.32),
+        PILLOW: '#c2b490', OUTLINE,
+      }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = frame;
         ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
         ctx.strokeRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
-        ctx.fillStyle = '#8898cc';
+        ctx.fillStyle = '#c2b490';
         ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.18);
       }
       return;
     }
     if (s.kind === 'table') {
-      const fill = '#a87d4a';
-      const drew = drawSprite(ctx, 'table', { FILL: fill, FILL_HI: shade(fill, 0.2), OUTLINE }, sx, sy, size);
+      // Style pass: desaturated ~20% from the old saturated ochre toward a muted warm tan.
+      const fill = '#93794f';
+      const drew = drawSprite(ctx, 'table', { FILL: fill, FILL_HI: shade(fill, 0.3), OUTLINE }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = fill;
         ctx.fillRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
@@ -863,10 +1051,107 @@ export class Renderer {
       }
       return;
     }
+    if (s.kind === 'shelf') {
+      // Storage room role (rooms.js RoomRole.Storage) -- left as a Canvas primitive, no new SVG
+      // template, matching the "no new mechanic" v1 scope. Same wood-furniture family as
+      // bed/table (desaturated warm tan) but drawn as stacked horizontal shelf boards rather than
+      // a single flat surface, so it reads distinctly from a table at a glance.
+      const fill = '#8a7355';
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.38, sy - size * 0.4, size * 0.76, size * 0.8);
+      ctx.strokeRect(sx - size * 0.38, sy - size * 0.4, size * 0.76, size * 0.8);
+      ctx.strokeStyle = shade(fill, -0.3);
+      ctx.lineWidth = Math.max(1, size * 0.045);
+      for (const frac of [-0.13, 0.13]) {
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.38, sy + size * frac);
+        ctx.lineTo(sx + size * 0.38, sy + size * frac);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = OUTLINE;
+      return;
+    }
+    if (s.kind === 'medical_bed') {
+      // Infirmary room role (rooms.js RoomRole.Medical) -- same frame/headboard/pillow layout as
+      // the plain bed (bed's own visual family) but recolored clinical white/red-cross instead of
+      // warm wood tones, so a Medical Bed reads as distinct at a glance from a regular Bed.
+      const frame = '#d8d8d0';
+      ctx.fillStyle = frame;
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
+      ctx.fillStyle = shade(frame, -0.25);
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.18);
+      // Small red-cross marker -- the one clear "medical" signal on an otherwise plain bed shape.
+      ctx.fillStyle = '#c23c3c';
+      ctx.fillRect(sx - size * 0.06, sy - size * 0.02, size * 0.12, size * 0.22);
+      ctx.fillRect(sx - size * 0.17, sy + size * 0.03, size * 0.34, size * 0.12);
+      return;
+    }
+    if (s.kind === 'fitness_station') {
+      // Gymnasium room role (rooms.js RoomRole.Gymnasium) -- left as a Canvas primitive, no new
+      // SVG template, same "no new mechanic beyond the buildable itself" v1 scope as shelf/
+      // medical_bed above. Drawn as a simple dumbbell (bar + two end weights) so it reads
+      // distinctly from every other furniture silhouette at a glance.
+      const fill = s.destroyed ? 'rgba(80,80,80,0.4)' : '#7a8a94';
+      ctx.strokeStyle = fill;
+      ctx.lineWidth = Math.max(2, size * 0.1);
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.28, sy);
+      ctx.lineTo(sx + size * 0.28, sy);
+      ctx.stroke();
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.36, sy - size * 0.22, size * 0.14, size * 0.44);
+      ctx.fillRect(sx + size * 0.22, sy - size * 0.22, size * 0.14, size * 0.44);
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = Math.max(1, size * 0.05);
+      ctx.strokeRect(sx - size * 0.36, sy - size * 0.22, size * 0.14, size * 0.44);
+      ctx.strokeRect(sx + size * 0.22, sy - size * 0.22, size * 0.14, size * 0.44);
+      return;
+    }
+    if (s.kind === 'farm_plot') {
+      // Farm Plot (research.js's Agronomy node, jobs.js's Farming job): left as a Canvas
+      // primitive, no new SVG template, same "no new mechanic beyond the buildable itself" v1
+      // scope as fitness_station/shelf/medical_bed above. Tilled-soil square (a few furrow lines)
+      // with a sprout that grows visibly taller as the current cycle's `_workTimer` approaches
+      // FARM_CYCLE_TICKS, dimmed and un-staffed-looking when no citizen is tending it (s.workerId)
+      // -- same "read the staffing state at a glance" idea as workshop/monitor_station.
+      const staffed = s.workerId != null;
+      const soil = s.destroyed ? 'rgba(80,70,50,0.4)' : staffed ? '#6b4f34' : '#4a3826';
+      ctx.fillStyle = soil;
+      ctx.fillRect(sx - size * 0.42, sy - size * 0.34, size * 0.84, size * 0.68);
+      ctx.strokeRect(sx - size * 0.42, sy - size * 0.34, size * 0.84, size * 0.68);
+      ctx.strokeStyle = shade(soil, -0.3);
+      ctx.lineWidth = Math.max(1, size * 0.03);
+      for (let fx = -0.28; fx <= 0.3; fx += 0.28) {
+        ctx.beginPath();
+        ctx.moveTo(sx + fx * size, sy - size * 0.34);
+        ctx.lineTo(sx + fx * size, sy + size * 0.34);
+        ctx.stroke();
+      }
+      if (!s.destroyed) {
+        const growth = Math.min(1, (s._workTimer || 0) / FARM_CYCLE_TICKS);
+        const sproutH = size * (0.1 + 0.3 * growth);
+        ctx.strokeStyle = staffed ? '#6fae4a' : '#3f5c32';
+        ctx.lineWidth = Math.max(2, size * 0.06);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy + size * 0.28);
+        ctx.lineTo(sx, sy + size * 0.28 - sproutH);
+        ctx.stroke();
+        if (staffed) {
+          ctx.fillStyle = '#7fc356';
+          ctx.beginPath();
+          ctx.arc(sx, sy + size * 0.28 - sproutH, size * 0.07, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.strokeStyle = OUTLINE;
+      return;
+    }
     if (s.kind === 'door') {
-      const panel = '#7a5a30';
+      // Style pass: desaturated ~20% toward a muted warm-brown wood tone, consistent with bed/table.
+      const panel = '#6f5c40';
       const drew = drawSprite(ctx, 'door', {
-        FRAME: shade(panel, -0.3), PANEL: panel, PANEL_HI: shade(panel, 0.2), HANDLE: '#d9c58a', OUTLINE,
+        FRAME: shade(panel, -0.3), PANEL: panel, PANEL_HI: shade(panel, 0.32), HANDLE: '#cbb87e', OUTLINE,
       }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = panel;
@@ -881,11 +1166,22 @@ export class Renderer {
       // a plain-primitive fallback (same pattern as fence/wire/pipe): a squat industrial box with
       // a stack, dimmed and un-lit when unstaffed (s.workerId) so the player can see at a glance
       // that it needs a worker, same "read the staffing state at a glance" idea as monitor_station.
+      // RESTYLE: material-based palette (metal/industrial processing gear trends cool gray-blue,
+      // desaturated ~20% off the old warm-amber tones) + a small upper-left highlight rect
+      // replacing the old flat-only fill, matching the highlight-facet convention used by the
+      // SVG-templated economy/vehicle sprites below.
       const staffed = s.workerId != null;
-      const fill = s.destroyed ? 'rgba(90,80,40,0.4)' : staffed ? '#8c6a2e' : '#5a4a28';
+      const fill = s.destroyed ? 'rgba(80,82,78,0.4)' : staffed ? '#6c7268' : '#4a4c46';
       ctx.fillStyle = fill;
       ctx.fillRect(sx - size * 0.42, sy - size * 0.38, size * 0.84, size * 0.76);
       ctx.strokeRect(sx - size * 0.42, sy - size * 0.38, size * 0.84, size * 0.76);
+      ctx.fillStyle = shade(fill, 0.22);
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.42, sy - size * 0.38);
+      ctx.lineTo(sx - size * 0.06, sy - size * 0.38);
+      ctx.lineTo(sx - size * 0.42, sy - size * 0.06);
+      ctx.closePath();
+      ctx.fill(); // upper-left highlight facet
       ctx.fillStyle = shade(fill, -0.2);
       ctx.fillRect(sx + size * 0.1, sy - size * 0.62, size * 0.14, size * 0.28); // stack
       if (staffed && !s.destroyed) {
@@ -898,7 +1194,11 @@ export class Renderer {
       return;
     }
     if (s.kind === 'garage_recycling' || s.kind === 'garage_garbage') {
-      const fill = s.kind === 'garage_recycling' ? '#3a5a3f' : '#5a5030';
+      // RESTYLE: material-based palette split -- recycling handles metal/industrial sorting so
+      // its garage trends desaturated cool gray-blue-green; garbage handles general/organic waste
+      // so its garage trends desaturated warm ochre/tan. Both ~20% less saturated than the old
+      // pure green/olive tones, matching the game-wide desaturation pass.
+      const fill = s.kind === 'garage_recycling' ? '#3d564f' : '#5c5240';
       const drew = drawSprite(ctx, 'garage',
         { FILL: fill, FILL_HI: shade(fill, 0.25), DOOR: '#1a1a1a', OUTLINE }, sx, sy, size);
       if (!drew) {
@@ -911,12 +1211,17 @@ export class Renderer {
       return;
     }
     if (s.kind === 'watchtower') {
+      // Style-brief pass: watchtower is one of the named institutional/metal structures -- the
+      // platform (its metal component) is pushed cooler/grayer than before; the wood support post
+      // keeps its warmer tone (only desaturated slightly) since it isn't the "metal" part.
+      const post = '#564a3e';
+      const platform = '#7e8994';
       const drew = drawSprite(ctx, 'watchtower',
-        { POST: '#5a4a3a', PLATFORM: '#8c949e', OUTLINE }, sx, sy - size * 0.15, size * 1.15);
+        { POST: post, PLATFORM: platform, PLATFORM_HI: shade(platform, 0.3), OUTLINE }, sx, sy - size * 0.15, size * 1.15);
       if (!drew) {
-        ctx.fillStyle = '#5a4a3a';
+        ctx.fillStyle = post;
         ctx.fillRect(sx - size * 0.15, sy - size * 0.1, size * 0.3, size * 0.55); // support post
-        ctx.fillStyle = '#8c949e';
+        ctx.fillStyle = platform;
         ctx.fillRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35); // watch platform
         ctx.strokeRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35);
       }
@@ -925,16 +1230,22 @@ export class Renderer {
     if (s.kind === 'camera') {
       // Cheap CCTV camera: a mounting post + a small angled lens housing with a "lit lens" dot,
       // deliberately smaller/plainer than the watchtower platform (cheaper, shorter-range).
-      const lens = s.destroyed ? '#5a1a1a' : '#59a6d9';
-      const drew = drawSprite(ctx, 'camera',
-        { POST: '#4a4a4a', HOUSING: '#2b2b2b', LENS: lens, OUTLINE }, sx, sy - size * 0.1, size * 1.1);
+      // Style pass: housing/post moved from neutral grey to a desaturated cool gray-blue
+      // (security-tech family); destroyed-lens tint preserved exactly (still a visually distinct
+      // dead-red vs live-blue), both desaturated ~20% to match.
+      const lens = s.destroyed ? '#6b3a3a' : '#5f8fac';
+      const housing = '#31363d';
+      const drew = drawSprite(ctx, 'camera', {
+        POST: '#4a5058', HOUSING: housing, HOUSING_HI: shade(housing, 0.35),
+        LENS: lens, LENS_HI: shade(lens, 0.4), OUTLINE,
+      }, sx, sy - size * 0.1, size * 1.1);
       if (!drew) {
-        ctx.fillStyle = '#4a4a4a';
+        ctx.fillStyle = '#4a5058';
         ctx.fillRect(sx - size * 0.06, sy - size * 0.05, size * 0.12, size * 0.4); // mounting post
         ctx.save();
         ctx.translate(sx, sy - size * 0.32);
         ctx.rotate(-0.4);
-        ctx.fillStyle = '#2b2b2b';
+        ctx.fillStyle = housing;
         ctx.fillRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
         ctx.strokeRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
         ctx.fillStyle = lens;
@@ -948,15 +1259,23 @@ export class Renderer {
     if (s.kind === 'monitor_station') {
       // A desk with a bank of CCTV screens -- staffed/unstaffed reads via screen brightness so
       // the "manned monitor bonus" is visible on the map, not just in the milestone log.
-      const desk = '#5a4630';
-      const screen = s.destroyed ? '#3a3a3a' : (s._staffed ? '#7ad9a0' : '#3a5a6a');
-      const drew = drawSprite(ctx, 'monitor_station',
-        { DESK: desk, DESK_HI: shade(desk, 0.2), BANK: '#2b2b2b', SCREEN: screen, OUTLINE }, sx, sy, size);
+      // Style pass: desk desaturated toward a muted neutral-warm gray (was a saturated brown),
+      // monitor bank moved to the same cool gray-blue family as the camera housing above (both
+      // are "security tech"). The staffed/unstaffed/destroyed 3-way screen-color logic is
+      // preserved exactly -- only the three tones themselves were desaturated ~15-20%, keeping
+      // clear hue/lightness separation between all three states.
+      const desk = '#54493a';
+      const bank = '#31363d';
+      const screen = s.destroyed ? '#333333' : (s._staffed ? '#6bb98f' : '#3f5766');
+      const drew = drawSprite(ctx, 'monitor_station', {
+        DESK: desk, DESK_HI: shade(desk, 0.32), BANK: bank,
+        SCREEN: screen, SCREEN_HI: shade(screen, 0.4), OUTLINE,
+      }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = desk;
         ctx.fillRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4); // desk
         ctx.strokeRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4);
-        ctx.fillStyle = '#2b2b2b';
+        ctx.fillStyle = bank;
         ctx.fillRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4); // monitor bank
         ctx.strokeRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4);
         ctx.fillStyle = screen;
@@ -1004,7 +1323,11 @@ export class Renderer {
     if (s.kind === 'battery') {
       // A squat rounded-rect cell with a raised terminal nub (real battery-icon silhouette) and a
       // fill bar showing storedEnergy/BATTERY_STORED_MAX -- reads at a glance whether it's empty,
-      // mid-charge, or full, the same way a fuel gauge would.
+      // mid-charge, or full, the same way a fuel gauge would. Style-brief pass: flat casing + a
+      // single upper-left highlight patch (matching the generator family's shading convention)
+      // instead of a flat block with no shading cue at all; the charge-fill itself keeps a real
+      // vertical gradient since it's the one deliberate "energy" glow accent on this structure,
+      // same reasoning as the nuclear core / generator core glows.
       const live = !s.destroyed && !s.underConstruction;
       const frac = Math.max(0, Math.min(1, (s.storedEnergy || 0) / BATTERY_STORED_MAX));
       const casing = live ? '#3a3f47' : 'rgba(58,63,71,0.6)';
@@ -1012,14 +1335,24 @@ export class Renderer {
       const w = size * 0.6, h = size * 0.8;
       ctx.fillRect(sx - w / 2, sy - h / 2, w, h);
       ctx.strokeRect(sx - w / 2, sy - h / 2, w, h);
+      // upper-left highlight patch -- flat solid shape, not a gradient, per the style brief
+      if (live) {
+        ctx.fillStyle = shade(casing, 0.22);
+        ctx.fillRect(sx - w / 2 + size * 0.04, sy - h / 2 + size * 0.04, w * 0.4, size * 0.1);
+      }
       // terminal nub on top
       ctx.fillStyle = casing;
       ctx.fillRect(sx - size * 0.1, sy - h / 2 - size * 0.08, size * 0.2, size * 0.08);
-      // charge fill bar, bottom-up
+      // charge fill bar, bottom-up -- muted (desaturated ~20%) but still traffic-light coded;
+      // a real vertical gradient here since this is the deliberate glow/energy accent, kept from
+      // the earlier flat-fill pass rather than removed by the "flatten shading" brief.
       if (live && frac > 0) {
         const fillH = (h - size * 0.08) * frac;
-        const fillColor = frac > 0.6 ? '#7ad45a' : frac > 0.25 ? '#e0c336' : '#d95a3a';
-        ctx.fillStyle = fillColor;
+        const fillColor = frac > 0.6 ? '#6ba852' : frac > 0.25 ? '#c2a83f' : '#b8543a';
+        const grad = ctx.createLinearGradient(0, sy + h / 2 - fillH, 0, sy + h / 2);
+        grad.addColorStop(0, shade(fillColor, 0.25));
+        grad.addColorStop(1, fillColor);
+        ctx.fillStyle = grad;
         ctx.fillRect(sx - w / 2 + size * 0.05, sy + h / 2 - size * 0.04 - fillH, w - size * 0.1, fillH);
       }
       return;
@@ -1027,12 +1360,18 @@ export class Renderer {
     if (s.kind === 'power_switch') {
       // Small pedestal with a lever -- up and lit green when switchedOn (the default), down and
       // dull red when the player has manually cut this exact tile out of the segment (power.js's
-      // isConductor). Reads immediately even at a glance, no need to open the inspector.
+      // isConductor). Reads immediately even at a glance, no need to open the inspector. Style-brief
+      // pass: pedestal gets a flat base + a small upper-left highlight edge instead of reading as a
+      // single flat block; indicator-light colors desaturated ~20% to match the battery gauge.
       const live = !s.destroyed && !s.underConstruction;
       const on = s.switchedOn !== false;
       ctx.fillStyle = live ? '#4a4a52' : 'rgba(74,74,82,0.6)';
       ctx.fillRect(sx - size * 0.22, sy - size * 0.1, size * 0.44, size * 0.32); // pedestal base
       ctx.strokeRect(sx - size * 0.22, sy - size * 0.1, size * 0.44, size * 0.32);
+      if (live) {
+        ctx.fillStyle = shade('#4a4a52', 0.22);
+        ctx.fillRect(sx - size * 0.2, sy - size * 0.08, size * 0.18, size * 0.07);
+      }
       ctx.strokeStyle = OUTLINE;
       ctx.lineWidth = Math.max(2, size * 0.12);
       ctx.lineCap = 'round';
@@ -1041,10 +1380,37 @@ export class Renderer {
       if (on) ctx.lineTo(sx + size * 0.12, sy - size * 0.42);
       else ctx.lineTo(sx - size * 0.12, sy - size * 0.02);
       ctx.stroke();
-      ctx.fillStyle = live ? (on ? '#7ad45a' : '#d95a3a') : '#6a6a6a';
+      ctx.fillStyle = live ? (on ? '#6ba852' : '#b8543a') : '#6a6a6a';
       ctx.beginPath();
       ctx.arc(sx + (on ? size * 0.12 : -size * 0.12), sy + (on ? -size * 0.42 : -size * 0.02), size * 0.09, 0, Math.PI * 2);
       ctx.fill();
+      return;
+    }
+    if (s.kind === 'shrine') {
+      // Shrine (RimWorld Ideology DLC's real altar buildable, see assets.js's 'shrine' template /
+      // rooms.js's BEAUTY_BY_KIND.shrine) -- a beauty-only passive building, no functional state
+      // to reflect in color (unlike pump's running/dead or power_switch's on/off), so this is the
+      // simplest case in this function: one fixed warm-stone palette, matching the wood-furniture
+      // family's tone (bed/table/door above) since it reads as a deliberate furnishing, not
+      // industrial equipment.
+      const stone = '#8f8570';
+      const drew = drawSprite(ctx, 'shrine', {
+        STONE: stone, STONE_HI: shade(stone, 0.32),
+        GLOW: '#c9a24a', GLOW_HI: '#f2dfa0', OUTLINE,
+      }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = stone;
+        ctx.fillRect(sx - size * 0.4, sy - size * 0.1, size * 0.8, size * 0.5);
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.25, sy - size * 0.1);
+        ctx.lineTo(sx + size * 0.25, sy - size * 0.1);
+        ctx.lineTo(sx, sy - size * 0.45);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.strokeRect(sx - size * 0.4, sy - size * 0.1, size * 0.8, size * 0.5);
+        ctx.fillStyle = '#e2c168';
+        ctx.beginPath(); ctx.arc(sx, sy - size * 0.15, size * 0.1, 0, Math.PI * 2); ctx.fill();
+      }
       return;
     }
     if (s.kind === 'pump') {
@@ -1053,18 +1419,18 @@ export class Renderer {
       // so the two source buildings don't read as siblings. Falls back to the old primitive
       // drum+band+spout while a new color combo's sprite is still decoding.
       const running = !s.destroyed && !s.underConstruction;
-      const drum = running ? '#2e5266' : '#3a4750';
+      const drum = running ? '#33566a' : '#3a4750'; // desaturated ~15% from the earlier saturated teal
       const drew = drawSprite(ctx, 'pump', {
         DRUM: drum, DRUM_HI: shade(drum, 0.3),
-        WATER: running ? '#3ea0d9' : '#5a6a70',
+        WATER: running ? '#4f92b3' : '#5a6a70', // muted water-blue, still distinct from the drum body
         SPOUT: running ? '#8c949e' : '#787878', OUTLINE,
       }, sx, sy, size * 1.05, 0, running ? 1 : 0.75);
       if (!drew) {
-        ctx.fillStyle = running ? '#2e5266' : 'rgba(46,60,68,0.6)';
+        ctx.fillStyle = running ? '#33566a' : 'rgba(46,60,68,0.6)';
         ctx.beginPath();
         ctx.ellipse(sx, sy, size * 0.36, size * 0.4, 0, 0, Math.PI * 2);
         ctx.fill(); ctx.stroke();
-        ctx.fillStyle = running ? '#3ea0d9' : '#5a6a70'; // water-level band
+        ctx.fillStyle = running ? '#4f92b3' : '#5a6a70'; // water-level band
         ctx.beginPath();
         ctx.ellipse(sx, sy + size * 0.08, size * 0.28, size * 0.16, 0, 0, Math.PI * 2);
         ctx.fill();
@@ -1079,7 +1445,7 @@ export class Renderer {
       // read as heavier/lighter/differently-shaped than.
       const running = !s.destroyed && !s.underConstruction;
       const housing = running ? '#4a4a52' : '#3c3c40';
-      const core = running ? '#e0a336' : '#6a6250'; // core light goes dark when it isn't running
+      const core = running ? '#c79552' : '#6a6250'; // muted amber (~20% desaturated) -- core light goes dark when it isn't running
       const drew = drawSprite(ctx, 'generator', {
         HOUSING: housing, HOUSING_HI: shade(housing, 0.25), HOUSING_SHADOW: shade(housing, -0.3),
         CORE: core, CORE_HI: shade(core, running ? 0.4 : 0.1), OUTLINE,
@@ -1102,11 +1468,11 @@ export class Renderer {
       // as the hazard radius so the two visually associate.
       const running = !s.destroyed && !s.underConstruction;
       const housing = running ? '#2e3230' : '#282c2a';
-      const core = running ? '#c8e63c' : '#5a6650';
+      const core = running ? '#a9b94a' : '#5a6650'; // desaturated ~20% hazard-green (was a candy-bright yellow-green)
       const drew = drawSprite(ctx, 'generator_nuclear', {
         HOUSING: housing, HOUSING_HI: shade(housing, 0.2),
         WELL: running ? '#161816' : '#3a3e3c',
-        CORE: core, CORE_HI: running ? '#e8ffb0' : '#7a8570', OUTLINE,
+        CORE: core, CORE_HI: running ? '#d9edaa' : '#7a8570', OUTLINE,
       }, sx, sy, size, 0, running ? 1 : 0.75);
       if (!drew) {
         ctx.fillStyle = running ? '#2e3230' : 'rgba(40,44,42,0.6)';
@@ -1124,7 +1490,7 @@ export class Renderer {
           ctx.closePath();
           ctx.fill();
         }
-        ctx.fillStyle = running ? '#e8ffb0' : '#7a8570';
+        ctx.fillStyle = running ? '#d9edaa' : '#7a8570';
         ctx.beginPath(); ctx.arc(sx, sy, size * 0.08, 0, Math.PI * 2); ctx.fill();
       }
       return;
@@ -1137,7 +1503,7 @@ export class Renderer {
       const running = !s.destroyed && !s.underConstruction;
       const housing = running ? '#3a332c' : '#332e28';
       const coal = running ? '#1a1a1a' : '#3a3a3a';
-      const core = running ? '#c0492e' : '#5a4a44'; // dull red core, not the plain generator's amber
+      const core = running ? '#a85138' : '#5a4a44'; // desaturated ~15% dull brick-red, not the plain generator's amber
       const drew = drawSprite(ctx, 'generator_coal', {
         HOUSING: housing, HOUSING_HI: shade(housing, 0.2),
         COAL: coal, COAL_HI: shade(coal, 0.25), CORE: core, OUTLINE,
@@ -1169,9 +1535,12 @@ export class Renderer {
       // map, not just in a tooltip.
       const running = !s.destroyed && !s.underConstruction;
       const sited = s._windSited !== false;
-      const blade = running ? (sited ? '#bfe6f5' : '#c76b4a') : '#6a6a6a';
+      // Muted ~15-20%: sited reads white/gray (not saturated sky-blue), crowded reads dusty rust
+      // rather than a bright warning-orange.
+      const blade = running ? (sited ? '#c7d3d6' : '#b8735a') : '#6a6a6a';
+      const mast = running ? '#5a5a5a' : '#464646';
       const drew = drawSprite(ctx, 'generator_wind', {
-        MAST: running ? '#5a5a5a' : '#464646', BLADE: blade,
+        MAST: mast, MAST_HI: shade(mast, 0.3), BLADE: blade,
         HUB: running ? '#3a3a3a' : '#5a5a5a', OUTLINE,
       }, sx, sy, size, 0, running ? 1 : 0.75);
       if (!drew) {
@@ -1203,7 +1572,7 @@ export class Renderer {
       const running = !s.destroyed && !s.underConstruction;
       const openSky = s._openSky !== false;
       const panel = running ? '#2a3038' : '#2d3238';
-      const grid = running ? (openSky ? '#5aa0d9' : '#6a6e72') : '#5a5f64';
+      const grid = running ? (openSky ? '#5487ad' : '#6a6e72') : '#5a5f64'; // muted panel-blue (~15% desaturated)
       const drew = drawSprite(ctx, 'generator_solar', {
         PANEL: panel, PANEL_HI: shade(panel, 0.2), GRID: grid, OUTLINE,
       }, sx, sy, size, 0, running ? 1 : 0.7);
@@ -1238,7 +1607,10 @@ export class Renderer {
       // Hazard-striped drum cluster so it reads as "the thing that fixes the green zone" at a
       // glance, distinct from the recycling center's green arrow icon (that's a different
       // resource loop -- pollution, not nuclear waste).
-      const fill = s.destroyed ? 'rgba(70,64,30,0.5)' : '#4a4626';
+      // RESTYLE: the housing shell is metal/industrial so it's desaturated ~20% and cooled toward
+      // gray-blue (was a warm olive). The hazard stripe (cap/stripeDark, both still full
+      // saturation) is the deliberate exception the style brief calls out -- left untouched.
+      const fill = s.destroyed ? 'rgba(70,72,66,0.5)' : '#454940';
       const cap = s.destroyed ? 'rgba(160,150,40,0.4)' : '#d9c93a';
       const stripeDark = s.destroyed ? 'rgba(40,36,18,0.5)' : '#2b2812';
       const drew = drawSprite(ctx, 'waste_storage', {
@@ -1262,8 +1634,11 @@ export class Renderer {
     if (s.kind === 'recycling_center') {
       // Keeps the recognizable green chasing-arrows recycling motif, now baked into the sprite
       // (see assets.js's 'recycling_center' template) instead of drawn as a single Canvas diamond.
+      // RESTYLE: housing desaturated ~20% and cooled toward gray-blue-teal (metal/industrial
+      // material trend); the arrow glyph is desaturated a touch too but kept legible/vivid since
+      // it's the functional "recycling happens here" icon, not a hazard-stripe exception.
       const drew = drawSprite(ctx, 'recycling_center',
-        { FILL: '#2e5a4a', FILL_HI: shade('#2e5a4a', 0.25), ARROW: '#7ad9a0', OUTLINE }, sx, sy, size);
+        { FILL: '#37524a', FILL_HI: shade('#37524a', 0.25), ARROW: '#6cbf8f', OUTLINE }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = '#2e5a4a';
         ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
@@ -1282,10 +1657,13 @@ export class Renderer {
         ctx.beginPath(); ctx.arc(sx, sy, size * 1.4, 0, Math.PI * 2); ctx.fill();
       }
       const lamp = s.destroyed ? '#5a5540' : '#f2eec0';
+      // Style-brief pass: post/housing metal desaturated ~15% from the old khaki; LAMP is the
+      // light source itself (not institutional metal), left untouched.
+      const housing = '#847a63';
       const drew = drawSprite(ctx, 'floodlight',
-        { POST: '#8c8060', HOUSING: '#8c8060', LAMP: lamp, OUTLINE }, sx, sy + size * 0.1, size * 1.1);
+        { POST: housing, HOUSING: housing, HOUSING_HI: shade(housing, 0.3), LAMP: lamp, OUTLINE }, sx, sy + size * 0.1, size * 1.1);
       if (!drew) {
-        ctx.fillStyle = '#8c8060';
+        ctx.fillStyle = housing;
         ctx.fillRect(sx - size * 0.08, sy - size * 0.1, size * 0.16, size * 0.5);
         ctx.fillStyle = lamp;
         ctx.beginPath(); ctx.arc(sx, sy - size * 0.22, size * 0.22, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
@@ -1293,10 +1671,14 @@ export class Renderer {
       return;
     }
     if (s.kind === 'tesla') {
-      const base = s.destroyed ? 'rgba(60,60,60,0.6)' : '#4a5a8c';
+      // Style-brief pass: base housing desaturated toward a cooler, less-saturated blue-gray;
+      // ARC/spark stroke is the charge-glow hazard exception and stays at full saturation
+      // (untouched) as the deliberate contrast against the calmer housing color.
+      const teslaBase = '#4e5a78';
+      const base = s.destroyed ? 'rgba(60,60,60,0.6)' : teslaBase;
       const arc = s.destroyed ? 'rgba(120,140,220,0.3)' : '#a0c0ff';
       const drew = drawSprite(ctx, 'tesla',
-        { FILL: base, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade('#4a5a8c', 0.3), ARC: arc, OUTLINE },
+        { FILL: base, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade(teslaBase, 0.3), ARC: arc, OUTLINE },
         sx, sy, size);
       if (!drew) {
         ctx.fillStyle = base;
@@ -1308,12 +1690,18 @@ export class Renderer {
       return;
     }
     if (s.kind === 'armory') {
-      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : '#5a4a38';
-      const glyph = s.destroyed ? 'rgba(150,150,150,0.4)' : '#d8cba0';
+      // Style-brief pass: armory is one of the named institutional/metal structures -- base
+      // shifted from a warm brown to a cool slate gray-blue. The crossed-rifles glyph and a new
+      // small ammo-crate accent are the deliberate full-saturation hazard-color exception (ammo
+      // red), same idea as tesla's charge glow -- visible against the now-calmer base.
+      const armoryBase = '#565c66';
+      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : armoryBase;
+      const glyph = s.destroyed ? 'rgba(150,150,150,0.4)' : '#d7dde2';
+      const ammo = s.destroyed ? 'rgba(120,50,40,0.4)' : '#c23b2e';
       // Crossed-rifles glyph -- reads as "weapons issued here" at a glance, same idea as the
       // recycling center's arrow icon just above -- now baked into the sprite itself.
       const drew = drawSprite(ctx, 'armory',
-        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade('#5a4a38', 0.25), GLYPH: glyph, OUTLINE },
+        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade(armoryBase, 0.3), GLYPH: glyph, AMMO: ammo, OUTLINE },
         sx, sy, size);
       if (!drew) {
         ctx.fillStyle = fill;
@@ -1325,29 +1713,121 @@ export class Renderer {
         ctx.moveTo(sx - size * 0.2, sy - size * 0.18); ctx.lineTo(sx + size * 0.2, sy + size * 0.18);
         ctx.moveTo(sx - size * 0.2, sy + size * 0.18); ctx.lineTo(sx + size * 0.2, sy - size * 0.18);
         ctx.stroke();
+        ctx.fillStyle = ammo;
+        ctx.fillRect(sx - size * 0.18, sy + size * 0.28, size * 0.22, size * 0.12);
       }
+      return;
+    }
+    if (s.kind === 'stabilizer') {
+      // Stabilizer Beacon (anomaly.js) -- kept as a plain Canvas primitive, same "cheap counter-
+      // buildable, no new SVG asset" precedent as rat_trap just below: a squat post with a small
+      // diamond "lamp" on top, filled a calm teal so it reads as distinct from every other
+      // structure's warmer/neutral palette (this is the one buildable whose whole job is visually
+      // signaling "hazard countermeasure, not a weapon").
+      const fill = s.destroyed ? 'rgba(60,80,80,0.4)' : '#3f8f8a';
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.08, sy - size * 0.05, size * 0.16, size * 0.32);
+      ctx.strokeRect(sx - size * 0.08, sy - size * 0.05, size * 0.16, size * 0.32);
+      const lampY = sy - size * 0.22;
+      ctx.fillStyle = s.destroyed ? fill : shade(fill, 0.4);
+      ctx.beginPath();
+      ctx.moveTo(sx, lampY - size * 0.16);
+      ctx.lineTo(sx + size * 0.16, lampY);
+      ctx.lineTo(sx, lampY + size * 0.16);
+      ctx.lineTo(sx - size * 0.16, lampY);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
       return;
     }
     if (s.kind === 'rat_trap') {
       // Kept as a plain Canvas primitive (rats.js is deliberately the "cheap" system this pass --
       // no new SVG asset needed for a small counter-buildable): a squat wooden box with a dark
       // trigger-plate slot, distinct enough from the round explosive 'trap' shape above at a glance.
-      const fill = s.destroyed ? 'rgba(80,60,40,0.4)' : '#8a6a42';
+      // Style-brief pass: fill desaturated slightly, plus a flat + single upper-left highlight
+      // (matching the rest of the category's shading technique) instead of a flat single tone.
+      const fill = s.destroyed ? 'rgba(80,60,40,0.4)' : '#856c4e';
       ctx.fillStyle = fill;
       ctx.fillRect(sx - size * 0.32, sy - size * 0.22, size * 0.64, size * 0.44);
       ctx.strokeRect(sx - size * 0.32, sy - size * 0.22, size * 0.64, size * 0.44);
       if (!s.destroyed) {
+        ctx.fillStyle = shade(fill, 0.35);
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.32, sy - size * 0.22);
+        ctx.lineTo(sx - size * 0.06, sy - size * 0.22);
+        ctx.lineTo(sx - size * 0.32, sy + size * 0.02);
+        ctx.closePath();
+        ctx.fill();
         ctx.fillStyle = 'rgba(30,25,20,0.8)';
         ctx.fillRect(sx - size * 0.2, sy - size * 0.06, size * 0.4, size * 0.12);
       }
       return;
     }
+    if (s.kind === 'lightning_rod') {
+      // Plain Canvas primitive, same "cheap single-purpose counter-buildable, no new SVG asset"
+      // precedent as rat_trap above: a slim metal pole with a small ball tip, plus a faint
+      // protection-radius ring while a Lightning Storm is actually active (weather.js's
+      // isLightningStormActive/LIGHTNING_ROD_RADIUS) so the player can see the coverage they're
+      // paying for exactly when it matters, same "show the radius during the hazard" idea as
+      // floodlight's always-on glow just reused conditionally.
+      const poleColor = s.destroyed ? 'rgba(90,90,90,0.5)' : '#8a8f96';
+      const tipColor = s.destroyed ? 'rgba(90,90,90,0.5)' : '#e8e6c8';
+      if (!s.destroyed
+          && (this._currentWeather === 'ThunderstormDry' || this._currentWeather === 'ThunderstormRainy')) {
+        ctx.strokeStyle = 'rgba(232,230,200,0.25)';
+        ctx.lineWidth = Math.max(1, size * 0.05);
+        ctx.beginPath(); ctx.arc(sx, sy, size * 2.4, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.strokeStyle = poleColor;
+      ctx.lineWidth = Math.max(1.5, size * 0.12);
+      ctx.beginPath();
+      ctx.moveTo(sx, sy + size * 0.4);
+      ctx.lineTo(sx, sy - size * 0.45);
+      ctx.stroke();
+      ctx.fillStyle = tipColor;
+      ctx.beginPath(); ctx.arc(sx, sy - size * 0.48, size * 0.14, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      return;
+    }
+    if (s.kind === 'fabrication_bay') {
+      // Plain Canvas primitive (same "cheap, no new SVG asset needed" precedent as rat_trap/
+      // lightning_rod above): a squat industrial box with a bay-door opening (echoes the garage
+      // case's door-opening idea, since this is also "a small structure that produces a mobile
+      // unit"), plus a pulsing work-light while anything is actually gestating (world.js's
+      // droneFabricationQueue) -- same "lit = actively running" language as the workshop's own
+      // staffed work-light above.
+      const fill = s.destroyed ? 'rgba(70,68,64,0.6)' : '#565048';
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.44, sy - size * 0.4, size * 0.88, size * 0.8);
+      ctx.strokeRect(sx - size * 0.44, sy - size * 0.4, size * 0.88, size * 0.8);
+      if (!s.destroyed) {
+        ctx.fillStyle = shade(fill, 0.26);
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.44, sy - size * 0.4);
+        ctx.lineTo(sx - size * 0.1, sy - size * 0.4);
+        ctx.lineTo(sx - size * 0.44, sy - size * 0.08);
+        ctx.closePath(); ctx.fill(); // upper-left highlight facet
+        ctx.fillStyle = 'rgba(20,20,20,0.85)';
+        ctx.fillRect(sx - size * 0.22, sy - size * 0.04, size * 0.44, size * 0.34); // bay-door opening
+        const fabricating = (this._droneQueueLength || 0) > 0;
+        if (fabricating) {
+          const pulse = 0.55 + 0.35 * Math.sin(Date.now() / 200);
+          ctx.fillStyle = `rgba(120,200,190,${pulse})`;
+          ctx.beginPath(); ctx.arc(sx + size * 0.24, sy - size * 0.24, size * 0.08, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      return;
+    }
     // turret (default)
     {
-      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
+      // Style-brief pass: turret is one of the named institutional/metal structures -- desaturated
+      // and cooled slightly from the old '#8c949e' (already fairly neutral gray-blue) toward a
+      // calmer slate tone; shading is now flat + single upper-left highlight (baked into the
+      // template) instead of a radial gradient.
+      const turretBase = '#7e8894';
+      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : turretBase;
       const barrel = '#2b2b2b';
       const drew = drawSprite(ctx, 'turret',
-        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade('#8c949e', 0.3), BARREL: s.destroyed ? fill : barrel, OUTLINE },
+        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade(turretBase, 0.3), BARREL: s.destroyed ? fill : barrel, OUTLINE },
         sx, sy, size);
       if (!drew) {
         ctx.fillStyle = fill;
@@ -1367,8 +1847,13 @@ export class Renderer {
       if (n.depleted) continue;
       const [sx, sy] = this.worldToScreen(n.x, n.y);
       const s = CELL * this.zoom * (0.35 + 0.35 * (n.amount / n.maxAmount));
-      const fill = '#8a8060';
-      const vein = '#b5aa80';
+      // RESTYLE: raw ore is a natural/mineral material (not yet processed metal), so it trends
+      // warm ochre/tan like the rest of the game's organic-material objects rather than the cool
+      // gray-blue used for the manufactured economy buildings above -- slightly desaturated off
+      // the old tone. The VEIN facet already served as this template's one highlight shape, so it
+      // just gets recolored to match, not restructured.
+      const fill = '#8c8068';
+      const vein = '#c2b48c';
       const drew = drawSprite(ctx, 'ore_deposit',
         { FILL: fill, FILL_HI: shade(fill, 0.25), VEIN: vein, OUTLINE }, sx, sy, s);
       if (!drew) {
@@ -1401,7 +1886,10 @@ export class Renderer {
       ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.4, s * 0.55, s * 0.14, 0, 0, Math.PI * 2); ctx.fill();
       ctx.lineWidth = Math.max(1, s * 0.06);
       ctx.strokeStyle = OUTLINE;
-      const bodyFill = v.kind === 'recycling' ? '#3d7a4a' : '#7a6a3d';
+      // RESTYLE: same material-based split as the garages -- recycling truck trends desaturated
+      // cool gray-blue-green (metal/industrial haul), garbage truck trends desaturated warm
+      // ochre/tan (general/organic waste haul), each ~20% less saturated than the old tones.
+      const bodyFill = v.kind === 'recycling' ? '#3f5c52' : '#6b5c40';
       // SEA:R fuel-type tradeoff (vehicles.js FUEL_TYPES): a colored fuel-tank stripe makes the
       // dirty/clean tradeoff visible at a glance without needing to inspect the truck --
       // fossil=sooty brown, gas=blue (the "best all-around" default), ethanol=green (clean but
@@ -1434,6 +1922,60 @@ export class Renderer {
         ctx.textAlign = 'center';
         ctx.fillText('?', sx, sy - s * 0.5);
       }
+    }
+  }
+
+  // Labor drones (drones.js -- RimWorld Biotech's mech-companion analog): small, distinct from
+  // both a citizen (humanoid SVG sprite) and a truck (this file's own _drawVehicles above) --
+  // a squat mechanical box on short stubby legs with a single "status eye" light, deliberately
+  // primitive Canvas 2D (same "left as an improved primitive" precedent as fence/wire/pipe) since
+  // this is a small, cheap unit that doesn't need a full SVG template. The eye color encodes the
+  // drone's one fixed WorkCategory (see WORK_CATEGORY_LABELS/DRONE_EYE_COLOR below) so its job is
+  // readable at a glance without opening the inspector, and pulses while actively Working (not
+  // just travelling) -- same "lit = actively running" language as _drawStructureShape's workshop
+  // work-light and the garage/truck "working" glow.
+  _drawDrones(world) {
+    const ctx = this.ctx;
+    for (const drone of world.drones || []) {
+      if (drone.state === 'driving') continue; // riding inside a vehicle, drawn as part of it (same convention as a Driving citizen)
+      const [sx, sy] = this.worldToScreen(drone.x, drone.y);
+      const s = CELL * this.zoom * 0.55;
+      const eyeRgb = DRONE_EYE_COLOR[drone.category] ?? [156, 156, 156];
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.38, s * 0.42, s * 0.12, 0, 0, Math.PI * 2); ctx.fill();
+      // Stubby legs -- just enough to read "small mechanical unit standing on the ground", not an
+      // animated walk-cycle (drones are tireless, not humanoid; no gait to animate).
+      ctx.strokeStyle = '#2c2c2c';
+      ctx.lineWidth = Math.max(1, s * 0.09);
+      ctx.beginPath();
+      ctx.moveTo(sx - s * 0.22, sy + s * 0.14); ctx.lineTo(sx - s * 0.22, sy + s * 0.32);
+      ctx.moveTo(sx + s * 0.22, sy + s * 0.14); ctx.lineTo(sx + s * 0.22, sy + s * 0.32);
+      ctx.stroke();
+      // Body -- a plain salvage-tech box, not a sleek sci-fi chassis, matching this project's
+      // "reskin as a simple mechanical/automated helper unit" framing rather than robot/AI framing.
+      const bodyFill = '#5a564e';
+      ctx.fillStyle = bodyFill;
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = Math.max(1, s * 0.06);
+      ctx.fillRect(sx - s * 0.34, sy - s * 0.3, s * 0.68, s * 0.5);
+      ctx.strokeRect(sx - s * 0.34, sy - s * 0.3, s * 0.68, s * 0.5);
+      ctx.fillStyle = shade(bodyFill, 0.28);
+      ctx.beginPath();
+      ctx.moveTo(sx - s * 0.34, sy - s * 0.3); ctx.lineTo(sx - s * 0.04, sy - s * 0.3);
+      ctx.lineTo(sx - s * 0.34, sy - s * 0.06); ctx.closePath(); ctx.fill(); // upper-left highlight facet
+      // Antenna -- reads as "fabricated equipment", not organic.
+      ctx.strokeStyle = '#2c2c2c';
+      ctx.beginPath(); ctx.moveTo(sx, sy - s * 0.3); ctx.lineTo(sx, sy - s * 0.48); ctx.stroke();
+      ctx.fillStyle = '#2c2c2c';
+      ctx.beginPath(); ctx.arc(sx, sy - s * 0.5, s * 0.05, 0, Math.PI * 2); ctx.fill();
+      // Status eye -- solid while idle/travelling, pulsing while actively Working, colored by the
+      // drone's one fixed WorkCategory.
+      const working = drone.state === 'working';
+      const alpha = working ? 0.55 + 0.35 * Math.sin(Date.now() / 200) : 0.9;
+      ctx.fillStyle = `rgba(${eyeRgb[0]},${eyeRgb[1]},${eyeRgb[2]},${alpha})`;
+      ctx.beginPath(); ctx.arc(sx, sy - s * 0.08, s * 0.12, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
     }
   }
 

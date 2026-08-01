@@ -138,7 +138,7 @@ function noiseBurst({ duration = 0.15, filterFreq = 1200, filterType = 'lowpass'
 // turrets/tesla chains/guards all resolving at once) -- without a cap that's a wall of noise, not
 // a sound effect. A simple "don't replay within N ms" gate per cue is enough since ticks run at
 // 10Hz (100ms apart) already.
-const lastPlayed = { fire: 0, kill: 0, downed: 0 };
+const lastPlayed = { fire: 0, kill: 0, downed: 0, onBreak: 0, programComplete: 0, ratTier: 0 };
 function throttled(key, minGapMs, fn) {
   const now = performance.now();
   if (now - lastPlayed[key] < minGapMs) return;
@@ -181,4 +181,117 @@ export function playCitizenDowned() {
   throttled('downed', 120, () => {
     tone({ freq: 420, freqEnd: 160, duration: 0.32, type: 'sine', peakGain: 0.18 });
   });
+}
+
+// ---------------------------------------------------------------- PA-catalog cues (7 new systems)
+// All 7 below are wired from main.js's single `onRandomEvent` hook (world.js/factions.js/rats.js/
+// security.js/weather.js already funnel their milestone text through that one callback -- see
+// playRandomEventCue's text-discrimination dispatcher at the bottom of this file) except mood-break,
+// which gets its own dedicated `world.onCitizenOnBreak` hook since citizens.js's per-tick mood pass
+// never had an event-log text line to discriminate on in the first place.
+
+// Unrest tier 1 (world.js: 'Unrest is spreading through the settlement') -- a mild rising minor
+// second, the smallest dissonance step of the three tiers.
+export function playUnrestTier1() {
+  tone({ freq: 220, duration: 0.16, type: 'triangle', peakGain: 0.16 });
+  tone({ freq: 233, duration: 0.22, type: 'triangle', peakGain: 0.18, start: 0.1 });
+}
+
+// Unrest tier 2 ('Unrest is escalating...') -- a harsher rising tritone, sawtooth for more edge.
+export function playUnrestTier2() {
+  tone({ freq: 196, duration: 0.14, type: 'sawtooth', peakGain: 0.18 });
+  tone({ freq: 277, duration: 0.24, type: 'sawtooth', peakGain: 0.2, start: 0.1 });
+}
+
+// Unrest tier 3 ('Unrest has reached a breaking point...') -- three harsh rising square-wave
+// stabs, the most severe of the three tiers.
+export function playUnrestTier3() {
+  tone({ freq: 175, duration: 0.1, type: 'square', peakGain: 0.18 });
+  tone({ freq: 220, duration: 0.1, type: 'square', peakGain: 0.2, start: 0.09 });
+  tone({ freq: 311, duration: 0.28, type: 'square', peakGain: 0.22, start: 0.18 });
+}
+
+// Unrest fully resolved ('The settlement has calmed') -- warm consonant descending-then-settling
+// chime, deliberately the emotional opposite of the three escalation stingers above.
+export function playUnrestResolve() {
+  tone({ freq: 523, duration: 0.16, type: 'sine', peakGain: 0.16 });
+  tone({ freq: 392, duration: 0.3, type: 'sine', peakGain: 0.18, start: 0.12 });
+}
+
+// Citizen mood break onset (CitizenFlags.OnBreak, citizens.js) -- a short low "strain" tone, not a
+// full alarm since this is a routine, frequent-ish per-citizen event, not a colony-wide crisis.
+// Throttled since a bad tick of stacking mood events can tip several citizens at once.
+export function playMoodBreak() {
+  throttled('onBreak', 150, () => {
+    tone({ freq: 130, freqEnd: 100, duration: 0.2, type: 'triangle', peakGain: 0.14 });
+  });
+}
+
+// Program completion (programs.js's Skills Workshop/Wellness Counseling/Community Circle) --
+// bright ascending three-note chime, the "graduation" feel. Throttled since multiple citizens can
+// finish a session on the same tick.
+export function playProgramComplete() {
+  throttled('programComplete', 150, () => {
+    tone({ freq: 523, duration: 0.09, type: 'sine', peakGain: 0.16 });
+    tone({ freq: 659, duration: 0.09, type: 'sine', peakGain: 0.18, start: 0.08 });
+    tone({ freq: 880, duration: 0.18, type: 'sine', peakGain: 0.2, start: 0.16 });
+  });
+}
+
+// Clique demand satisfied (factions.js) -- a bright quick "cha-ching", two fast high square blips.
+export function playFactionSatisfied() {
+  tone({ freq: 784, duration: 0.06, type: 'square', peakGain: 0.16 });
+  tone({ freq: 1047, duration: 0.12, type: 'square', peakGain: 0.18, start: 0.06 });
+}
+
+// Clique demand unmet (factions.js) -- a low unresolved "trouble" tone, sawtooth descending.
+export function playFactionUnmet() {
+  tone({ freq: 220, freqEnd: 140, duration: 0.26, type: 'sawtooth', peakGain: 0.18 });
+}
+
+// Corrupt staff discovered (security.js) -- a distinct sharp alert/reveal stinger: a quick
+// upward flick then a held note, deliberately not shaped like any combat/build cue above so it
+// reads as "look at this" rather than "something got hit".
+export function playCorruptDiscovered() {
+  tone({ freq: 500, freqEnd: 900, duration: 0.08, type: 'square', peakGain: 0.16 });
+  tone({ freq: 700, duration: 0.22, type: 'square', peakGain: 0.2, start: 0.08 });
+}
+
+// Rat infestation tier change (rats.js, both up and down transitions) -- skittering/scratchy
+// noise burst, reusing noiseBurst() with a highpass filter for a thin, scratchy texture distinct
+// from the turret/kill noise bursts' lowpass "thud" character. Throttled since escalating and
+// de-escalating tiers can't both fire the same tick but keeps this consistent with the other
+// per-system events above.
+export function playRatTierChange() {
+  throttled('ratTier', 150, () => {
+    noiseBurst({ duration: 0.18, filterFreq: 3500, filterType: 'highpass', peakGain: 0.14 });
+  });
+}
+
+// Severe weather onset (weather.js's Heatwave/Cold, onset only -- not every transition) -- a
+// subtle wind/rain-like noise swell: longer duration, gentle lowpass, lower peak gain than the
+// combat noise bursts so it reads as ambient rather than an alert.
+export function playSevereWeatherOnset() {
+  noiseBurst({ duration: 0.6, filterFreq: 500, filterType: 'lowpass', peakGain: 0.1 });
+}
+
+// ---------------------------------------------------------------- onRandomEvent text dispatcher
+// main.js's world.onRandomEvent hook receives free-text milestone strings from several unrelated
+// systems (world.js/factions.js/rats.js/security.js/weather.js/jobs.js) -- this matches on the
+// exact/substring text each system is known to emit (verified against each source file) rather
+// than adding a dedicated onXxx callback per system, since that text already reaches one place.
+// Falls through silently (no cue) for every other random-event text this project already had
+// before this pass (weather changes to non-severe states, wanderer/blight/trader events, etc).
+export function playRandomEventCue(text) {
+  if (typeof text !== 'string') return;
+  if (text === 'Unrest is spreading through the settlement') playUnrestTier1();
+  else if (text.startsWith('Unrest is escalating')) playUnrestTier2();
+  else if (text.startsWith('Unrest has reached a breaking point')) playUnrestTier3();
+  else if (text === 'The settlement has calmed') playUnrestResolve();
+  else if (text.includes(' completes ')) playProgramComplete();
+  else if (text.includes('demand satisfied')) playFactionSatisfied();
+  else if (text.includes('demand went unmet')) playFactionUnmet();
+  else if (text.includes('was caught quietly diverting supplies')) playCorruptDiscovered();
+  else if (text.startsWith('Rat infestation has reached') || text === 'The rat infestation has died down') playRatTierChange();
+  else if (text === 'Weather turns to Heatwave' || text === 'Weather turns to Cold') playSevereWeatherOnset();
 }

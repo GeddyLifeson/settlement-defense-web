@@ -34,6 +34,38 @@ const CONTROL_BASE = 0.006;
 // This is the "settlements giving each other resources" half of the ask.
 const TRICKLE_PER_OWNED_REGION = 0.02;
 
+// --- Odyssey-anchored expansion tuning (real gravship numbers, scaled to this game's economy) ---
+//
+// RimWorld Odyssey gravships require a real chemfuel reserve banked before they'll launch at all
+// (no fuel, no launch, full stop) -- EXPANSION_FUEL_COST mirrors that as a flat scrap toll charged
+// against the settlement you're LEAVING, deducted in setActive() before the move is allowed to
+// happen at all. 15 sits deliberately mid-table against this file's existing constants: cheaper
+// than a garage (economy.js: 35-45) since expansion is a strategic-layer action not a building,
+// but a real bite out of the ~50 scrap a fresh settlement starts with (world.js) so it's a
+// genuine choice, not a rounding error.
+export const EXPANSION_FUEL_COST = 15;
+
+// Every real gravship launch risks a LandingOutcomeDef mishap (crashed pods, fuel leak, hull
+// damage) -- not guaranteed, but frequent enough that a career of launches WILL eventually eat one.
+// 17.5% (mid-point of the requested 15-20%) reproduces that "rare per-trip, inevitable over a
+// campaign" feel without punishing a single expansion hard: about 1 in 4-6 launches. Toned down
+// from RimWorld's real crash-landing stakes (ship damage, pawns downed/killed) to fit this game's
+// much lower-stakes single-scrap-resource economy -- a minor scrap loss or a short work-speed
+// debuff, never a citizen casualty.
+export const MISHAP_CHANCE = 0.175;
+export const MISHAP_SCRAP_LOSS = 8;       // flat scrap lost from the freshly-arrived settlement
+export const MISHAP_DEBUFF_TICKS = 500;   // ~50s at 10Hz -- "shaken crew," not a lasting injury
+
+// Multi-hop travel range, gated behind a persistent scrap-paid upgrade -- mirrors Odyssey's real
+// per-ship thruster/fuel-tank upgrade slots, which are a small, hard-capped number, not an
+// unbounded tech tree. travelRange starts at 1 (today's adjacency-only behavior, unchanged for a
+// player who never upgrades) and can be raised up to MAX_TRAVEL_RANGE (1 base + 4 upgrades,
+// mirroring the "capped small" ask). Cost escalates per upgrade, same shape as a real thruster
+// refit getting pricier each additional slot.
+export const MAX_TRAVEL_RANGE = 5;
+export const RANGE_UPGRADE_BASE_COST = 25;
+export const RANGE_UPGRADE_COST_STEP = 20;
+
 export class Region {
   constructor(id, name, col, row) {
     this.id = id;
@@ -72,6 +104,12 @@ export class WorldMap {
     this.activeId = 5;
     this.regions[this.activeId].visited = true;
     this.expansionCount = 0;
+    // Odyssey-anchored additions (see the constants block above for the real-numbers rationale):
+    this.travelRange = 1;      // hop range for isExpandable -- 1 == original adjacency-only behavior
+    this.pendingMishap = null; // set by setActive() when a launch mishap rolls; consumed by the
+                                // caller once the fresh SimWorld exists (worldmap.js never
+                                // imports world.js, so it can't apply the effect itself -- see
+                                // setActive()'s own comment).
   }
 
   get active() { return this.regions[this.activeId] ?? null; }
@@ -79,12 +117,37 @@ export class WorldMap {
 
   ownedCount() { return this.regions.reduce((n, r) => n + (r.owned ? 1 : 0), 0); }
 
-  /** Regions you may expand into: not the active one, not already owned, adjacent to a region
-   *  you hold (owned) or are currently standing in. */
+  /** Shortest hop count from {activeId} ∪ {every owned region} to `id`, over the 4-directional
+   *  adjacency graph, capped at travelRange+1 hops of search (cheap: 16 regions total). Returns
+   *  Infinity if unreachable within that bound. At travelRange === 1 this reproduces the original
+   *  "neighbor of active OR neighbor of an owned region" rule exactly. */
+  _hopDistance(id) {
+    const start = [this.activeId, ...this.regions.filter(r => r.owned).map(r => r.id)];
+    const dist = new Map();
+    let frontier = [];
+    for (const s of start) { if (!dist.has(s)) { dist.set(s, 0); frontier.push(s); } }
+    for (let hop = 0; hop < this.travelRange && frontier.length; hop++) {
+      const next = [];
+      for (const nid of frontier) {
+        for (const adj of this.regions[nid].neighbors) {
+          if (dist.has(adj)) continue;
+          dist.set(adj, hop + 1);
+          next.push(adj);
+        }
+      }
+      frontier = next;
+    }
+    return dist.has(id) ? dist.get(id) : Infinity;
+  }
+
+  /** Regions you may expand into: not the active one, not already owned, reachable within
+   *  travelRange hops of a region you hold (owned) or are currently standing in. travelRange
+   *  starts at 1 (direct adjacency only, the original behavior) and can be raised via
+   *  upgradeTravelRange(). */
   isExpandable(id) {
     const r = this.byId(id);
     if (!r || r.owned || id === this.activeId) return false;
-    return r.neighbors.some(nid => nid === this.activeId || this.regions[nid].owned);
+    return this._hopDistance(id) <= this.travelRange;
   }
 
   expandableIds() { return this.regions.filter(r => this.isExpandable(r.id)).map(r => r.id); }
@@ -98,19 +161,51 @@ export class WorldMap {
 
   /** Move the operation. Caller is responsible for constructing the fresh SimWorld -- this
    *  module deliberately doesn't import world.js (would be a circular import, and world.js
-   *  imports this). */
-  setActive(id) {
+   *  imports this).
+   *
+   *  `world` is the settlement you're LEAVING (still alive at call time, discarded right after).
+   *  Mirrors a real gravship launch: EXPANSION_FUEL_COST must already be banked there, and it's
+   *  spent whether or not it carries forward into the new settlement (it doesn't -- every fresh
+   *  SimWorld starts at a fixed 50 scrap, see world.js) -- the toll is a real gate on the decision,
+   *  same as RimWorld requiring chemfuel already loaded before a gravship will lift off at all.
+   *  Refuses (returns false, no state changed) if either the destination isn't reachable or the
+   *  fuel isn't there.
+   *
+   *  On a successful launch, rolls the LandingOutcomeDef-style arrival mishap and stashes the
+   *  result on `this.pendingMishap` for the caller to apply once the new SimWorld for `id` exists
+   *  (worldmap.js can't apply it directly -- no world.js import, see above). */
+  setActive(id, world) {
     if (!this.isExpandable(id)) return false;
+    if (!world || world.scrap < EXPANSION_FUEL_COST) return false;
+    world.scrap -= EXPANSION_FUEL_COST;
     this.activeId = id;
     this.regions[id].visited = true;
     this.expansionCount++;
+    this.pendingMishap = rollArrivalMishap();
+    return true;
+  }
+
+  /** Scrap cost of the NEXT travel-range upgrade (escalates per level, same shape as a real
+   *  thruster refit getting pricier each additional slot). */
+  rangeUpgradeCost() {
+    return RANGE_UPGRADE_BASE_COST + (this.travelRange - 1) * RANGE_UPGRADE_COST_STEP;
+  }
+
+  /** Spend scrap from `world` to raise travelRange by 1, capped at MAX_TRAVEL_RANGE. Refuses
+   *  (returns false, no state changed) if already at the cap or scrap is short. */
+  upgradeTravelRange(world) {
+    if (this.travelRange >= MAX_TRAVEL_RANGE) return false;
+    const cost = this.rangeUpgradeCost();
+    if (!world || world.scrap < cost) return false;
+    world.scrap -= cost;
+    this.travelRange++;
     return true;
   }
 
   serialize() {
     return {
       cols: this.cols, rows: this.rows, activeId: this.activeId,
-      expansionCount: this.expansionCount,
+      expansionCount: this.expansionCount, travelRange: this.travelRange,
       regions: this.regions.map(r => ({
         id: r.id, control: r.control, owned: r.owned, visited: r.visited, snapshot: r.snapshot,
       })),
@@ -121,6 +216,7 @@ export class WorldMap {
     if (!json || !Array.isArray(json.regions)) return;
     this.activeId = json.activeId ?? this.activeId;
     this.expansionCount = json.expansionCount ?? 0;
+    this.travelRange = json.travelRange ?? 1;
     for (const rec of json.regions) {
       const r = this.byId(rec.id);
       if (!r) continue;
@@ -130,6 +226,17 @@ export class WorldMap {
       r.snapshot = rec.snapshot ?? null;
     }
   }
+}
+
+/** LandingOutcomeDef-style roll: MISHAP_CHANCE of anything firing at all, then a 50/50 split
+ *  between the two toned-down outcomes described in the constants block above. Uses Math.random()
+ *  rather than a SimWorld's deterministic rng -- this fires at a menu-driven decision point (the
+ *  old world is about to be discarded, the new one doesn't exist yet), the same non-deterministic
+ *  spot main.js's expandTo() already picks the new settlement's random seed from. */
+function rollArrivalMishap() {
+  if (Math.random() >= MISHAP_CHANCE) return null;
+  if (Math.random() < 0.5) return { kind: 'scrapLoss', amount: MISHAP_SCRAP_LOSS };
+  return { kind: 'debuff', ticks: MISHAP_DEBUFF_TICKS };
 }
 
 function summarize(world) {

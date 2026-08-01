@@ -50,6 +50,13 @@ const StaffRoleKind = Object.freeze({
   Foreman: 'Foreman',           // Skills Workshop
   Psychologist: 'Psychologist', // Wellness Counseling
   Facilitator: 'Facilitator',   // Community Circle
+  Organizer: 'Organizer',       // Community Gathering (RimWorld Ideology Party/Festival analog,
+                                 // see programs.js's ProgramKind.CommunityGathering)
+  // Staff training-program track (Prison Architect reform_programs_dlc.txt's real STAFF-facing
+  // training programs, distinct from the citizen-facing programs above -- see programs.js's
+  // ProgramKind.GuardResponseTraining / security.js's tickStaffTraining). The trainer role, not
+  // the trainee -- Guard/Sniper/Monitor (already-defined roles above) are who ATTENDS the course.
+  Instructor: 'Instructor',
 });
 
 const TerrainKind = Object.freeze({
@@ -130,24 +137,27 @@ const TEMPLATES = {
   // frames was tried and reads worse at this sprite size than the existing procedural bob, so
   // the hybrid split is deliberate: SVG for the silhouette that benefits from real curves and
   // shading, procedural for the part that needs per-frame motion).
+  // Style brief applied: flat base fill + ONE solid highlight shape per part (clipped to that
+  // part's own silhouette, no gradients) instead of the old top-to-bottom bodyShade/headShade
+  // gradients -- BODY_HI/HEAD_HI are solid colors, not gradient stops, computed by render.js's
+  // shade(). Head radius bumped 19->21 (and re-centered) for a slightly chunkier head-to-torso
+  // ratio, RimWorld/PA-pawn style; hair paths nudged outward to match.
   humanoid_torso: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <defs>
-    <linearGradient id="bodyShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{BODY}}" stop-opacity="1"/>
-      <stop offset="100%" stop-color="{{BODY_SHADOW}}" stop-opacity="1"/>
-    </linearGradient>
-    <radialGradient id="headShade" cx="35%" cy="30%" r="75%">
-      <stop offset="0%" stop-color="{{HEAD_HI}}"/>
-      <stop offset="100%" stop-color="{{HEAD}}"/>
-    </radialGradient>
+    <clipPath id="torsoClip">
+      <path d="M 28 92 Q 24 60 32 40 Q 36 28 50 26 Q 64 28 68 40 Q 76 60 72 92 Q 50 100 28 92 Z"/>
+    </clipPath>
+    <clipPath id="headClip"><circle cx="50" cy="23" r="21"/></clipPath>
   </defs>
   <path d="M 28 92 Q 24 60 32 40 Q 36 28 50 26 Q 64 28 68 40 Q 76 60 72 92 Q 50 100 28 92 Z"
-        fill="url(#bodyShade)" stroke="{{OUTLINE}}" stroke-width="3.2" stroke-linejoin="round"/>
-  <circle cx="50" cy="24" r="19" fill="url(#headShade)" stroke="{{OUTLINE}}" stroke-width="3.2"/>
-  <path d="M 32 16 Q 50 2 68 16 Q 68 10 50 8 Q 32 10 32 16 Z" fill="{{HAIR}}"/>
-  <path d="M 32 16 Q 34 26 32 32 Q 27 24 28 18 Q 29 15 32 16 Z" fill="{{HAIR}}"/>
-  <path d="M 68 16 Q 66 26 68 32 Q 73 24 72 18 Q 71 15 68 16 Z" fill="{{HAIR}}"/>
+        fill="{{BODY}}" stroke="{{OUTLINE}}" stroke-width="3.2" stroke-linejoin="round"/>
+  <ellipse cx="41" cy="37" rx="20" ry="13" fill="{{BODY_HI}}" clip-path="url(#torsoClip)"/>
+  <circle cx="50" cy="23" r="21" fill="{{HEAD}}" stroke="{{OUTLINE}}" stroke-width="3.2"/>
+  <ellipse cx="42" cy="14" rx="10" ry="6.5" fill="{{HEAD_HI}}" clip-path="url(#headClip)"/>
+  <path d="M 30 14 Q 50 1 70 14 Q 70 7 50 5 Q 30 7 30 14 Z" fill="{{HAIR}}"/>
+  <path d="M 30 14 Q 32 25 30 31 Q 25 22 26 16 Q 27 13 30 14 Z" fill="{{HAIR}}"/>
+  <path d="M 70 14 Q 68 25 70 31 Q 75 22 74 16 Q 73 13 70 14 Z" fill="{{HAIR}}"/>
 </svg>`.trim(),
 
   // Boss crown, drawn as a separate overlay sprite on top of the boss's humanoid_torso -- kept
@@ -162,16 +172,18 @@ const TEMPLATES = {
   // Quadruped silhouette (dogs + wild animals share this) -- a rounded body, a raised head, two
   // ears. Collar (tamed dogs only) is a separate thin ring overlay drawn by the caller so the
   // same body art serves both tamed and wild without a second template.
+  // Style brief applied here too: flat COAT fill + one small solid COAT_HI highlight ellipse per
+  // part (clipped to that part's own silhouette), no gradient.
   animal_body: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <defs>
-    <linearGradient id="coatShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{COAT_HI}}"/>
-      <stop offset="100%" stop-color="{{COAT}}"/>
-    </linearGradient>
+    <clipPath id="animalBodyClip"><ellipse cx="42" cy="58" rx="34" ry="22"/></clipPath>
+    <clipPath id="animalHeadClip"><circle cx="76" cy="42" r="17"/></clipPath>
   </defs>
-  <ellipse cx="42" cy="58" rx="34" ry="22" fill="url(#coatShade)" stroke="{{OUTLINE}}" stroke-width="3"/>
-  <circle cx="76" cy="42" r="17" fill="url(#coatShade)" stroke="{{OUTLINE}}" stroke-width="3"/>
+  <ellipse cx="42" cy="58" rx="34" ry="22" fill="{{COAT}}" stroke="{{OUTLINE}}" stroke-width="3"/>
+  <ellipse cx="34" cy="42" rx="18" ry="10" fill="{{COAT_HI}}" clip-path="url(#animalBodyClip)"/>
+  <circle cx="76" cy="42" r="17" fill="{{COAT}}" stroke="{{OUTLINE}}" stroke-width="3"/>
+  <ellipse cx="70" cy="32" rx="8" ry="6" fill="{{COAT_HI}}" clip-path="url(#animalHeadClip)"/>
   <path d="M 68 30 L 64 16 L 76 26 Z" fill="{{COAT}}" stroke="{{OUTLINE}}" stroke-width="2.4" stroke-linejoin="round"/>
   <path d="M 82 28 L 86 14 L 90 27 Z" fill="{{COAT}}" stroke="{{OUTLINE}}" stroke-width="2.4" stroke-linejoin="round"/>
   <circle cx="82" cy="40" r="2.6" fill="{{OUTLINE}}"/>
@@ -180,62 +192,53 @@ const TEMPLATES = {
   // Wall: deliberately plain -- it's the cheapest, most-placed structure, so a blocky slab with
   // a couple of mortar-line seams reads as "solid barrier" at a glance without adding per-tile
   // visual noise once dozens are placed edge-to-edge.
+  // RimWorld/PA style-brief pass: full-surface gradient replaced with a flat base fill + one
+  // small solid highlight wedge in the upper-left (the light-source convention used across every
+  // defense-category sprite in this file, matching the humanoid pass's upper-left-biased radial
+  // highlights above).
   wall: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="wallShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </linearGradient>
-  </defs>
-  <rect x="8" y="8" width="84" height="84" fill="url(#wallShade)" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <rect x="8" y="8" width="84" height="84" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <path d="M 8 8 L 44 8 L 8 44 Z" fill="{{FILL_HI}}"/>
   <path d="M 8 36 H 92 M 8 64 H 92 M 32 8 V 36 M 68 36 V 64 M 32 64 V 92" stroke="{{OUTLINE}}" stroke-width="3" stroke-opacity="0.5"/>
 </svg>`.trim(),
 
   // Trap: a spring-loaded jaw motif, small and low so it still reads as "hidden hazard" rather
-  // than a prominent structure.
+  // than a prominent structure. Hazard color (the red fill/teeth) is the deliberate full-
+  // saturation exception to the category's desaturated palette -- untouched by this pass, only
+  // the base's shading technique changed (flat + highlight, no gradient).
   trap: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <radialGradient id="trapShade" cx="40%" cy="35%" r="70%">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </radialGradient>
-  </defs>
-  <circle cx="50" cy="50" r="32" fill="url(#trapShade)" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <circle cx="50" cy="50" r="32" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <path d="M 38 34 A 18 18 0 0 1 60 30 L 52 40 A 8 8 0 0 0 40 42 Z" fill="{{FILL_HI}}"/>
   <path d="M 50 22 L 58 44 L 50 50 L 42 44 Z M 78 50 L 56 58 L 50 50 L 56 42 Z
            M 50 78 L 42 56 L 50 50 L 58 56 Z M 22 50 L 44 42 L 50 50 L 44 58 Z"
         fill="{{TEETH}}" stroke="{{OUTLINE}}" stroke-width="2" stroke-linejoin="round"/>
 </svg>`.trim(),
 
   // Turret: a rotating gun housing on a round base -- a distinct round silhouette (vs. the wall's
-  // square block) topped by a short barrel so it reads as "this one shoots back."
+  // square block) topped by a short barrel so it reads as "this one shoots back." Institutional/
+  // metal per the style brief -- cool gray-blue FILL supplied by render.js, flat + single
+  // highlight wedge instead of the old radial gradient.
   turret: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <radialGradient id="turretShade" cx="38%" cy="34%" r="70%">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </radialGradient>
-  </defs>
-  <rect x="12" y="12" width="76" height="76" rx="10" fill="url(#turretShade)" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <rect x="12" y="12" width="76" height="76" rx="10" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <path d="M 16 16 L 44 16 L 16 44 Z" fill="{{FILL_HI}}"/>
   <circle cx="50" cy="50" r="26" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="3"/>
+  <path d="M 36 36 A 14 14 0 0 1 58 32 L 50 44 A 6 6 0 0 0 40 46 Z" fill="{{FILL_HI}}"/>
   <rect x="43" y="6" width="14" height="40" rx="4" fill="{{BARREL}}" stroke="{{OUTLINE}}" stroke-width="2.4"/>
   <circle cx="50" cy="50" r="10" fill="{{BARREL}}" stroke="{{OUTLINE}}" stroke-width="2.4"/>
 </svg>`.trim(),
 
   // Tesla coil: a squat base with an arcing-ring motif above it. The ring can't animate as a
   // static SVG, so the "electricity" read comes from the bright ring color + spark ticks instead
-  // of motion.
+  // of motion. The ARC/spark stroke is the charge-glow hazard exception (kept fully saturated,
+  // the one gradient-adjacent accent this pass explicitly preserves) -- only the base housing's
+  // shading technique changed to flat + highlight.
   tesla: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="teslaBase" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </linearGradient>
-  </defs>
-  <ellipse cx="50" cy="66" rx="30" ry="22" fill="url(#teslaBase)" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <ellipse cx="50" cy="66" rx="30" ry="22" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <path d="M 26 58 A 24 18 0 0 1 46 46 L 40 62 A 10 8 0 0 0 30 68 Z" fill="{{FILL_HI}}"/>
   <rect x="46" y="24" width="8" height="30" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="2.4"/>
   <circle cx="50" cy="26" r="18" fill="none" stroke="{{ARC}}" stroke-width="4"/>
   <path d="M 50 12 L 46 26 L 54 26 L 50 40" fill="none" stroke="{{ARC}}" stroke-width="3" stroke-linejoin="round"/>
@@ -243,110 +246,118 @@ const TEMPLATES = {
 
   // Floodlight: a slim post topped by a lamp housing -- the glow itself stays a separate Canvas
   // radial (drawn by the caller before/after this sprite) since a baked-in glow wouldn't dim
-  // correctly when destroyed.
+  // correctly when destroyed. Housing gets the same flat + upper-left-highlight treatment as the
+  // rest of the category; LAMP stays untouched (it's the light source itself, not a hazard cue).
   floodlight: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <rect x="44" y="40" width="12" height="52" fill="{{POST}}" stroke="{{OUTLINE}}" stroke-width="3"/>
   <path d="M 30 40 L 70 40 L 60 22 L 40 22 Z" fill="{{HOUSING}}" stroke="{{OUTLINE}}" stroke-width="3" stroke-linejoin="round"/>
+  <path d="M 40 22 L 52 22 L 40 34 Z" fill="{{HOUSING_HI}}"/>
   <circle cx="50" cy="30" r="11" fill="{{LAMP}}" stroke="{{OUTLINE}}" stroke-width="2.4"/>
 </svg>`.trim(),
 
   // Armory: fortified small building with the crossed-rifles motif baked directly into the
-  // silhouette instead of drawn as a separate overlay.
+  // silhouette instead of drawn as a separate overlay. Institutional/metal base (cool gray-blue,
+  // flat + highlight per the style brief) with a small ammo-crate accent kept at full saturation
+  // as the deliberate hazard-color exception, same idea as tesla's charge glow.
   armory: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="armoryShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </linearGradient>
-  </defs>
-  <rect x="9" y="12" width="82" height="76" rx="4" fill="url(#armoryShade)" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <rect x="9" y="12" width="82" height="76" rx="4" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <path d="M 9 12 L 45 12 L 9 46 Z" fill="{{FILL_HI}}"/>
   <path d="M 30 30 L 70 70 M 30 70 L 70 30" stroke="{{GLYPH}}" stroke-width="6" stroke-linecap="round"/>
+  <rect x="16" y="70" width="20" height="12" rx="1.5" fill="{{AMMO}}" stroke="{{OUTLINE}}" stroke-width="2"/>
 </svg>`.trim(),
 
   // Watchtower: a raised platform on a support post -- kept taller/narrower than the other
-  // structure icons so it silhouettes distinctly at a glance even at small map scale.
+  // structure icons so it silhouettes distinctly at a glance even at small map scale. Platform is
+  // the institutional/metal element (cool gray-blue per the style brief); post stays its warmer
+  // wood tone, both now flat + single upper-left highlight instead of the old solid-fill (no
+  // gradient existed here before, but the highlight wedge is new).
   watchtower: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <rect x="42" y="34" width="16" height="58" fill="{{POST}}" stroke="{{OUTLINE}}" stroke-width="3"/>
   <rect x="12" y="10" width="76" height="30" rx="3" fill="{{PLATFORM}}" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <path d="M 12 10 L 40 10 L 12 32 Z" fill="{{PLATFORM_HI}}"/>
   <path d="M 12 40 L 22 52 M 88 40 L 78 52" stroke="{{OUTLINE}}" stroke-width="3" stroke-linecap="round"/>
 </svg>`.trim(),
 
   // Bed: frame + pillow silhouette. Headboard reads as a slightly taller/darker band at the top
   // edge so the sprite has an implied "head end" even though beds are drawn top-down with no
   // sleeping-direction logic elsewhere in the sim.
+  // RimWorld/PA style pass: flat base fill + one small solid highlight wedge (upper-left light
+  // source, matching every other concurrently-restyled category) replacing the old full-surface
+  // linear gradient; palette desaturated toward warm ochre/tan (wood furniture family).
   bed: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="bedShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{FRAME_HI}}"/>
-      <stop offset="100%" stop-color="{{FRAME}}"/>
-    </linearGradient>
-  </defs>
-  <rect x="10" y="10" width="80" height="80" rx="6" fill="url(#bedShade)" stroke="{{OUTLINE}}" stroke-width="4"/>
-  <rect x="10" y="10" width="80" height="16" rx="4" fill="{{FRAME}}" stroke="{{OUTLINE}}" stroke-width="3"/>
+  <rect x="10" y="10" width="80" height="80" rx="6" fill="{{FRAME}}" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <rect x="10" y="10" width="80" height="16" rx="4" fill="{{HEADBOARD}}" stroke="{{OUTLINE}}" stroke-width="3"/>
   <rect x="18" y="32" width="64" height="24" rx="5" fill="{{PILLOW}}" stroke="{{OUTLINE}}" stroke-width="2.4"/>
+  <path d="M 14 60 L 30 60 L 14 76 Z" fill="{{FRAME_HI}}"/>
 </svg>`.trim(),
 
   // Table: plain rectangular tabletop with a subtle inset grain line so it doesn't read as a
-  // flat solid-color box.
+  // flat solid-color box. Flat fill + upper-left highlight wedge, same shading convention as bed.
   table: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="tableShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </linearGradient>
-  </defs>
-  <rect x="8" y="12" width="84" height="76" rx="5" fill="url(#tableShade)" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <rect x="8" y="12" width="84" height="76" rx="5" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="4"/>
   <rect x="18" y="22" width="64" height="56" rx="3" fill="none" stroke="{{OUTLINE}}" stroke-width="2" stroke-opacity="0.35"/>
+  <path d="M 12 16 L 30 16 L 12 34 Z" fill="{{FILL_HI}}"/>
 </svg>`.trim(),
 
   // Door: a frame + inset panel + small handle dot -- the "obviously just a colored box" fix.
-  // The frame is a darker outer band, the panel a lighter inset rectangle so it silhouettes as
-  // an actual door rather than a plain rect even at small map scale.
+  // The frame is a darker outer band, the panel a flat inset rectangle with a small upper-left
+  // highlight wedge (same convention as bed/table) rather than a full-panel gradient.
   door: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="doorShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{PANEL_HI}}"/>
-      <stop offset="100%" stop-color="{{PANEL}}"/>
-    </linearGradient>
-  </defs>
   <rect x="14" y="4" width="72" height="92" rx="3" fill="{{FRAME}}" stroke="{{OUTLINE}}" stroke-width="4"/>
-  <rect x="22" y="12" width="56" height="76" rx="2" fill="url(#doorShade)" stroke="{{OUTLINE}}" stroke-width="2.4"/>
+  <rect x="22" y="12" width="56" height="76" rx="2" fill="{{PANEL}}" stroke="{{OUTLINE}}" stroke-width="2.4"/>
+  <path d="M 26 16 L 44 16 L 26 34 Z" fill="{{PANEL_HI}}"/>
   <circle cx="70" cy="50" r="4" fill="{{HANDLE}}" stroke="{{OUTLINE}}" stroke-width="1.6"/>
 </svg>`.trim(),
 
   // Camera: mounting post + angled lens housing, matching the existing primitive's composition
   // (post, rotated housing box, lit lens dot) so the conversion is a faithful redraw rather than
   // a redesign. Lens dot color still comes in via `vars` so destroyed-state tint keeps working.
+  // Housing is flat fill + a small solid highlight wedge (upper-left within the rotated group,
+  // so it still reads as "upper-left light" once the housing's own -23deg tilt is applied); the
+  // lens keeps a genuine small radial glow -- the deliberate screen/lens-glow exception to the
+  // flat-shading rule, not the default.
   camera: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="lensGlow" cx="35%" cy="35%" r="75%">
+      <stop offset="0%" stop-color="{{LENS_HI}}"/>
+      <stop offset="100%" stop-color="{{LENS}}"/>
+    </radialGradient>
+  </defs>
   <rect x="44" y="46" width="12" height="46" fill="{{POST}}" stroke="{{OUTLINE}}" stroke-width="3"/>
   <g transform="translate(50 34) rotate(-23)">
     <rect x="-30" y="-15" width="52" height="26" rx="3" fill="{{HOUSING}}" stroke="{{OUTLINE}}" stroke-width="3"/>
-    <circle cx="20" cy="-2" r="7" fill="{{LENS}}" stroke="{{OUTLINE}}" stroke-width="2"/>
+    <path d="M -28 -13 L -12 -13 L -28 3 Z" fill="{{HOUSING_HI}}"/>
+    <circle cx="20" cy="-2" r="7" fill="url(#lensGlow)" stroke="{{OUTLINE}}" stroke-width="2"/>
   </g>
 </svg>`.trim(),
 
   // Monitor station: desk + monitor bank, with the two screen tiles colored per-call via `vars`
   // so the staffed/unstaffed/destroyed 3-way state (see render.js's _drawStructureShape) keeps
-  // reading correctly -- the SVG itself carries no state, only the substituted screen color does.
+  // reading correctly -- the SVG itself carries no state, only the substituted screen colors do.
+  // Desk/bank are flat fill + small upper-left highlight wedges (style-brief shading rule); the
+  // screens keep a genuine small radial glow -- same deliberate exception as the camera lens
+  // above, and the one place a gradient is still load-bearing (it's how "staffed" reads as
+  // "lit up" versus "unstaffed"/"destroyed" reading as flat/dark).
   monitor_station: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <defs>
-    <linearGradient id="deskShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{DESK_HI}}"/>
-      <stop offset="100%" stop-color="{{DESK}}"/>
-    </linearGradient>
+    <radialGradient id="screenGlow" cx="35%" cy="35%" r="75%">
+      <stop offset="0%" stop-color="{{SCREEN_HI}}"/>
+      <stop offset="100%" stop-color="{{SCREEN}}"/>
+    </radialGradient>
   </defs>
-  <rect x="8" y="56" width="84" height="34" rx="3" fill="url(#deskShade)" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <rect x="8" y="56" width="84" height="34" rx="3" fill="{{DESK}}" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <path d="M 12 60 L 28 60 L 12 76 Z" fill="{{DESK_HI}}"/>
   <rect x="10" y="10" width="80" height="40" rx="3" fill="{{BANK}}" stroke="{{OUTLINE}}" stroke-width="4"/>
-  <rect x="16" y="16" width="32" height="28" rx="2" fill="{{SCREEN}}" stroke="{{OUTLINE}}" stroke-width="2"/>
-  <rect x="52" y="16" width="32" height="28" rx="2" fill="{{SCREEN}}" stroke="{{OUTLINE}}" stroke-width="2"/>
+  <rect x="16" y="16" width="32" height="28" rx="2" fill="url(#screenGlow)" stroke="{{OUTLINE}}" stroke-width="2"/>
+  <rect x="52" y="16" width="32" height="28" rx="2" fill="url(#screenGlow)" stroke="{{OUTLINE}}" stroke-width="2"/>
 </svg>`.trim(),
 
   // Plain generator: boxy industrial housing (a squared-off cabinet with vent panels) around a
@@ -355,17 +366,13 @@ const TEMPLATES = {
   generator: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <defs>
-    <linearGradient id="genHousing" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{HOUSING_HI}}"/>
-      <stop offset="100%" stop-color="{{HOUSING}}"/>
-    </linearGradient>
     <radialGradient id="genCore" cx="50%" cy="50%" r="65%">
       <stop offset="0%" stop-color="{{CORE_HI}}"/>
       <stop offset="100%" stop-color="{{CORE}}"/>
     </radialGradient>
   </defs>
-  <rect x="9" y="9" width="82" height="82" rx="7" fill="url(#genHousing)" stroke="{{OUTLINE}}" stroke-width="3.5"/>
-  <rect x="18" y="18" width="64" height="12" fill="{{HOUSING_SHADOW}}" opacity="0.55"/>
+  <rect x="9" y="9" width="82" height="82" rx="7" fill="{{HOUSING}}" stroke="{{OUTLINE}}" stroke-width="3.5"/>
+  <rect x="14" y="14" width="30" height="11" rx="2" fill="{{HOUSING_HI}}" opacity="0.85"/>
   <rect x="18" y="70" width="18" height="10" fill="{{HOUSING_SHADOW}}" opacity="0.4"/>
   <rect x="64" y="70" width="18" height="10" fill="{{HOUSING_SHADOW}}" opacity="0.4"/>
   <circle cx="50" cy="55" r="17" fill="url(#genCore)" stroke="{{OUTLINE}}" stroke-width="2.6"/>
@@ -377,17 +384,18 @@ const TEMPLATES = {
   generator_nuclear: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <defs>
-    <linearGradient id="nukeHousing" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{HOUSING_HI}}"/>
-      <stop offset="100%" stop-color="{{HOUSING}}"/>
-    </linearGradient>
+    <radialGradient id="nukeGlow" cx="50%" cy="50%" r="60%">
+      <stop offset="0%" stop-color="{{CORE_HI}}"/>
+      <stop offset="100%" stop-color="{{CORE}}"/>
+    </radialGradient>
   </defs>
-  <rect x="4" y="4" width="92" height="92" rx="5" fill="url(#nukeHousing)" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <rect x="4" y="4" width="92" height="92" rx="5" fill="{{HOUSING}}" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <rect x="10" y="10" width="34" height="12" rx="2" fill="{{HOUSING_HI}}" opacity="0.8"/>
   <circle cx="50" cy="50" r="30" fill="{{WELL}}"/>
   <path d="M 50 50 L 41.1 25.6 A 26 26 0 0 1 58.9 25.6 Z" fill="{{CORE}}"/>
   <path d="M 50 50 L 75.6 54.5 A 26 26 0 0 1 66.7 69.9 Z" fill="{{CORE}}"/>
   <path d="M 50 50 L 33.3 69.9 A 26 26 0 0 1 24.4 54.5 Z" fill="{{CORE}}"/>
-  <circle cx="50" cy="50" r="8" fill="{{CORE_HI}}"/>
+  <circle cx="50" cy="50" r="8" fill="url(#nukeGlow)"/>
 </svg>`.trim(),
 
   // Coal generator: squatter/dirtier housing than the plain generator, with a coal-pile
@@ -395,13 +403,8 @@ const TEMPLATES = {
   // the cheaper, more polluting choice at a glance.
   generator_coal: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="coalHousing" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{HOUSING_HI}}"/>
-      <stop offset="100%" stop-color="{{HOUSING}}"/>
-    </linearGradient>
-  </defs>
-  <rect x="10" y="20" width="80" height="66" rx="5" fill="url(#coalHousing)" stroke="{{OUTLINE}}" stroke-width="3.5"/>
+  <rect x="10" y="20" width="80" height="66" rx="5" fill="{{HOUSING}}" stroke="{{OUTLINE}}" stroke-width="3.5"/>
+  <rect x="14" y="24" width="28" height="10" rx="2" fill="{{HOUSING_HI}}" opacity="0.8"/>
   <rect x="60" y="6" width="10" height="17" fill="{{HOUSING}}" stroke="{{OUTLINE}}" stroke-width="2.4"/>
   <path d="M 16 86 L 41 58 L 64 86 Z" fill="{{COAL}}" stroke="{{OUTLINE}}" stroke-width="2" stroke-linejoin="round"/>
   <path d="M 28 86 L 46 66 L 60 86 Z" fill="{{COAL_HI}}"/>
@@ -414,6 +417,7 @@ const TEMPLATES = {
   generator_wind: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <rect x="46" y="50" width="8" height="44" fill="{{MAST}}" stroke="{{OUTLINE}}" stroke-width="2.6"/>
+  <rect x="46" y="50" width="3" height="44" fill="{{MAST_HI}}" opacity="0.7"/>
   <g stroke="{{OUTLINE}}" stroke-width="2.2">
     <ellipse cx="50" cy="26" rx="7" ry="24" fill="{{BLADE}}" transform="rotate(0 50 50)"/>
     <ellipse cx="50" cy="26" rx="7" ry="24" fill="{{BLADE}}" transform="rotate(120 50 50)"/>
@@ -427,13 +431,8 @@ const TEMPLATES = {
   // open-sky/enclosed siting tradeoff at the call site, same idea as the wind turbine above.
   generator_solar: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="solarPanel" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{PANEL_HI}}"/>
-      <stop offset="100%" stop-color="{{PANEL}}"/>
-    </linearGradient>
-  </defs>
-  <path d="M 5 80 L 30 15 L 95 15 L 70 80 Z" fill="url(#solarPanel)" stroke="{{OUTLINE}}" stroke-width="3"/>
+  <path d="M 5 80 L 30 15 L 95 15 L 70 80 Z" fill="{{PANEL}}" stroke="{{OUTLINE}}" stroke-width="3"/>
+  <path d="M 15 55 L 32 20 L 50 20 L 33 55 Z" fill="{{PANEL_HI}}" opacity="0.55"/>
   <path d="M 26.7 80 L 51.7 15" stroke="{{GRID}}" stroke-width="2"/>
   <path d="M 48.3 80 L 73.3 15" stroke="{{GRID}}" stroke-width="2"/>
 </svg>`.trim(),
@@ -443,45 +442,33 @@ const TEMPLATES = {
   // siblings.
   pump: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="pumpDrum" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{DRUM_HI}}"/>
-      <stop offset="100%" stop-color="{{DRUM}}"/>
-    </linearGradient>
-  </defs>
   <rect x="44" y="6" width="12" height="30" fill="{{SPOUT}}" stroke="{{OUTLINE}}" stroke-width="2.4"/>
-  <ellipse cx="50" cy="58" rx="36" ry="34" fill="url(#pumpDrum)" stroke="{{OUTLINE}}" stroke-width="3.2"/>
+  <ellipse cx="50" cy="58" rx="36" ry="34" fill="{{DRUM}}" stroke="{{OUTLINE}}" stroke-width="3.2"/>
+  <ellipse cx="35" cy="42" rx="13" ry="11" fill="{{DRUM_HI}}" opacity="0.55"/>
   <ellipse cx="50" cy="66" rx="28" ry="16" fill="{{WATER}}"/>
 </svg>`.trim(),
 
   // Recycling/garbage garage: shared silhouette for both haul-truck depots (see render.js's
-  // garage_recycling/garage_garbage), distinguished only by the FILL tint the caller passes (green
-  // vs amber) -- a small depot box with a dark garage-door opening.
+  // garage_recycling/garage_garbage), distinguished only by the FILL tint the caller passes.
+  // RESTYLE (RimWorld/Prison-Architect-conventions pass, economy+vehicle scope): flat base FILL
+  // plus one solid upper-left highlight facet (FILL_HI) replacing the old top-to-bottom gradient
+  // -- consistent light-source direction with the rest of the game's restyled categories.
   garage: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="garageShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </linearGradient>
-  </defs>
-  <rect x="7" y="9" width="86" height="82" rx="3" fill="url(#garageShade)" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <rect x="7" y="9" width="86" height="82" rx="3" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <path d="M 7 9 L 40 9 L 24 40 L 7 40 Z" fill="{{FILL_HI}}"/>
   <path d="M 7 26 H 93" stroke="{{OUTLINE}}" stroke-width="2.5" stroke-opacity="0.5"/>
   <rect x="22" y="44" width="56" height="42" fill="{{DOOR}}" stroke="{{OUTLINE}}" stroke-width="3"/>
 </svg>`.trim(),
 
   // Recycling center: keeps the original three-chevron recycling-arrow motif (the classic
   // "chasing arrows" glyph), just baked into the sprite instead of drawn as a single Canvas
-  // diamond -- one arrow path repeated at 0/120/240 degree rotations around center.
+  // diamond -- one arrow path repeated at 0/120/240 degree rotations around center. RESTYLE:
+  // flat FILL + upper-left highlight facet, gradient removed.
   recycling_center: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="recycleShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </linearGradient>
-  </defs>
-  <rect x="6" y="8" width="88" height="84" rx="3" fill="url(#recycleShade)" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <rect x="6" y="8" width="88" height="84" rx="3" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <path d="M 6 8 L 38 8 L 20 40 L 6 40 Z" fill="{{FILL_HI}}"/>
   <g fill="{{ARROW}}" stroke="{{OUTLINE}}" stroke-width="2" stroke-linejoin="round">
     <path d="M 50 24 L 62 42 L 54 42 L 54 58 L 46 58 L 46 42 L 38 42 Z"/>
     <path d="M 50 24 L 62 42 L 54 42 L 54 58 L 46 58 L 46 42 L 38 42 Z" transform="rotate(120 50 50)"/>
@@ -491,20 +478,19 @@ const TEMPLATES = {
 
   // Waste storage: hazard-striped drum cluster -- two diagonal-striped drums inside a housing
   // frame, distinct from the recycling center's green arrow icon (this is the nuclear-waste loop,
-  // not the pollution/recycling loop -- see siege.js's tickNuclearHazard).
+  // not the pollution/recycling loop -- see siege.js's tickNuclearHazard). RESTYLE: housing shell
+  // is flat FILL + upper-left highlight facet (gradient removed); the hazard-stripe pattern itself
+  // is the deliberate exception to the desaturated palette and is left at full saturation.
   waste_storage: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <defs>
-    <linearGradient id="drumHousingShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </linearGradient>
     <pattern id="hazardStripe" width="12" height="12" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
       <rect width="12" height="12" fill="{{STRIPE_DARK}}"/>
       <rect width="6" height="12" fill="{{STRIPE_LIGHT}}"/>
     </pattern>
   </defs>
-  <rect x="8" y="12" width="84" height="76" rx="4" fill="url(#drumHousingShade)" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <rect x="8" y="12" width="84" height="76" rx="4" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="5"/>
+  <path d="M 8 12 L 40 12 L 22 42 L 8 42 Z" fill="{{FILL_HI}}"/>
   <rect x="15" y="18" width="30" height="62" rx="7" fill="url(#hazardStripe)" stroke="{{OUTLINE}}" stroke-width="2.5"/>
   <rect x="55" y="18" width="30" height="62" rx="7" fill="url(#hazardStripe)" stroke="{{OUTLINE}}" stroke-width="2.5"/>
   <circle cx="30" cy="22" r="9" fill="{{CAP}}" stroke="{{OUTLINE}}" stroke-width="2.5"/>
@@ -513,18 +499,15 @@ const TEMPLATES = {
 
   // Delivery truck (haul vehicles, see render.js's _drawVehicles): a boxy cargo box with a raised
   // cab up front, distinct from the building silhouettes above. FILL tints the cargo box per
-  // v.kind (recycling green vs garbage amber); STRIPE is baked in (not a Canvas overlay) so it
-  // carries the FUEL_COLOR fuel-type tradeoff stripe exactly where it always was, painted onto
-  // the cargo box rather than composited after the fact.
+  // v.kind (recycling vs garbage, material-coded -- see render.js); STRIPE is baked in (not a
+  // Canvas overlay) so it carries the FUEL_COLOR fuel-type tradeoff stripe exactly where it always
+  // was. RESTYLE: cargo box is flat FILL + upper-left highlight facet (gradient removed); STRIPE
+  // is drawn on top of the highlight so the fuel-type band stays a flat, clearly-readable color
+  // band rather than blending into the body shading.
   truck: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="truckShade" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </linearGradient>
-  </defs>
-  <rect x="6" y="40" width="88" height="42" rx="4" fill="url(#truckShade)" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <rect x="6" y="40" width="88" height="42" rx="4" fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="4"/>
+  <path d="M 6 40 L 30 40 L 22 58 L 6 58 Z" fill="{{FILL_HI}}"/>
   <rect x="9" y="43" width="82" height="9" fill="{{STRIPE}}"/>
   <rect x="30" y="18" width="40" height="26" rx="5" fill="{{CAB}}" stroke="{{OUTLINE}}" stroke-width="4"/>
   <rect x="37" y="24" width="26" height="11" rx="2" fill="{{WINDOW}}"/>
@@ -533,21 +516,198 @@ const TEMPLATES = {
   // Ore deposit / resource node (see render.js's _drawResourceNodes): a jagged rock silhouette
   // with a lighter vein facet, replacing the old Canvas polygon 1:1 in outline shape so the
   // amount-based scaling behavior (caller passes a shrinking `size`) needs no changes here.
+  // RESTYLE: gradient removed -- flat FILL for the rock body, the existing VEIN facet already IS
+  // the one-highlight-shape the style brief asks for, so it's kept as-is (just recolored by the
+  // caller, see render.js).
   ore_deposit: `
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
-  <defs>
-    <linearGradient id="rockShade" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" stop-color="{{FILL_HI}}"/>
-      <stop offset="100%" stop-color="{{FILL}}"/>
-    </linearGradient>
-  </defs>
   <path d="M 4 78 L 22 42 L 36 16 L 62 24 L 88 46 L 96 82 L 66 94 L 30 92 Z"
-        fill="url(#rockShade)" stroke="{{OUTLINE}}" stroke-width="4" stroke-linejoin="round"/>
+        fill="{{FILL}}" stroke="{{OUTLINE}}" stroke-width="4" stroke-linejoin="round"/>
   <path d="M 34 60 L 48 34 L 60 44 L 50 66 Z" fill="{{VEIN}}" opacity="0.85"/>
+</svg>`.trim(),
+
+  // Shrine (RimWorld Ideology DLC's real altar buildable, economy.js's BUILD_COST.shrine /
+  // rooms.js's BEAUTY_BY_KIND.shrine): a stepped stone pedestal topped by a glowing carved emblem
+  // -- distinct silhouette from every furniture/utility category above (no boxy housing, no
+  // frame-and-panel) so it reads immediately as "decorative, not functional" at a glance. Flat
+  // STONE fill + one solid upper-left highlight facet, same shading convention as every other
+  // restyled category; the emblem keeps a genuine small radial glow (the same deliberate
+  // screen/lens-glow exception the camera lens and monitor_station screens already use) since a
+  // shrine's whole visual point is "this one thing draws the eye."
+  shrine: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <defs>
+    <radialGradient id="shrineGlow" cx="50%" cy="50%" r="70%">
+      <stop offset="0%" stop-color="{{GLOW_HI}}"/>
+      <stop offset="100%" stop-color="{{GLOW}}"/>
+    </radialGradient>
+  </defs>
+  <path d="M 10 92 L 90 92 L 90 80 L 14 80 Z" fill="{{STONE}}" stroke="{{OUTLINE}}" stroke-width="3"/>
+  <path d="M 18 80 L 82 80 L 82 66 L 22 66 Z" fill="{{STONE}}" stroke="{{OUTLINE}}" stroke-width="3"/>
+  <path d="M 10 92 L 34 92 L 30 80 L 14 80 Z" fill="{{STONE_HI}}"/>
+  <path d="M 26 66 L 74 66 L 62 26 L 38 26 Z" fill="{{STONE}}" stroke="{{OUTLINE}}" stroke-width="3.2" stroke-linejoin="round"/>
+  <path d="M 30 62 L 42 34 L 50 34 L 40 62 Z" fill="{{STONE_HI}}"/>
+  <circle cx="50" cy="30" r="13" fill="url(#shrineGlow)" stroke="{{OUTLINE}}" stroke-width="2.4"/>
 </svg>`.trim(),
 };
 
 const SPRITE_IDS = Object.keys(TEMPLATES);
+
+// -------------------------------------------------------------------------------------------
+// Topbar stat/status glyphs. Same viewBox/outline conventions as TEMPLATES above (0 0 100 100,
+// bold {{OUTLINE}}-style stroke, flat fills) but each is a fully baked, single-purpose icon --
+// no {{PLACEHOLDER}} recoloring, since every topbar stat has exactly one fixed identity color
+// (per the live-observation brief: distinct color per resource so the eye can scan for a
+// specific one without reading labels). Kept in their own map/cache rather than folded into
+// getSprite/TEMPLATES/drawSprite because those are built around Canvas-drawn game-world sprites
+// (centered, scaled, rotated, recolored); topbar icons are plain small <img> tags in static DOM,
+// so they only need a data: URI, not the draw-to-canvas machinery.
+const TOPBAR_ICONS = {
+  // Scrap: hex nut, the game's core currency -- flat pewter fill reads as "metal" at a glance.
+  scrap: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <polygon points="50,8 84,28 84,72 50,92 16,72 16,28" fill="#b9b2a4" stroke="#2a2620" stroke-width="7" stroke-linejoin="round"/>
+  <circle cx="50" cy="50" r="15" fill="#2a2620"/>
+</svg>`.trim(),
+
+  // Population: two overlapping heads/shoulders, cool blue so it reads distinctly from scrap's
+  // warm metal tone at a glance.
+  population: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M48 94 Q48 66 68 66 Q90 66 90 94 Z" fill="#4c8cb0" stroke="#1c2833" stroke-width="7" stroke-linejoin="round"/>
+  <circle cx="68" cy="40" r="16" fill="#4c8cb0" stroke="#1c2833" stroke-width="7"/>
+  <path d="M8 92 Q8 58 36 58 Q64 58 64 92 Z" fill="#6fb4d9" stroke="#1c2833" stroke-width="7" stroke-linejoin="round"/>
+  <circle cx="36" cy="34" r="20" fill="#6fb4d9" stroke="#1c2833" stroke-width="7"/>
+</svg>`.trim(),
+
+  // Attackers: skull, hostile red so it registers as "threat" instantly next to friendly blue.
+  attackers: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M50 8 Q82 8 82 42 Q82 60 70 70 L70 86 L58 86 L58 72 L42 72 L42 86 L30 86 L30 70 Q18 60 18 42 Q18 8 50 8 Z"
+        fill="#d9534f" stroke="#2a1414" stroke-width="7" stroke-linejoin="round"/>
+  <circle cx="38" cy="44" r="9" fill="#2a1414"/>
+  <circle cx="62" cy="44" r="9" fill="#2a1414"/>
+  <path d="M44 60 L50 70 L56 60 Z" fill="#2a1414"/>
+</svg>`.trim(),
+
+  // Wave: two stacked swell lines, cool blue -- distinct hue from both population-blue (lighter,
+  // single-tone here) and pollution-green.
+  wave: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M6 54 Q22 32 38 54 T70 54 T94 54" fill="none" stroke="#4a90c4" stroke-width="11" stroke-linecap="round"/>
+  <path d="M6 76 Q22 54 38 76 T70 76 T94 76" fill="none" stroke="#2c5c80" stroke-width="11" stroke-linecap="round"/>
+</svg>`.trim(),
+
+  // Pollution: a murky billowing haze cloud with a drip, sickly green so it reads as "bad" the
+  // way the topbar's danger-red text already does for the number next to it.
+  pollution: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <circle cx="28" cy="40" r="17" fill="#7c9c4a" stroke="#22301a" stroke-width="7"/>
+  <circle cx="70" cy="36" r="19" fill="#7c9c4a" stroke="#22301a" stroke-width="7"/>
+  <ellipse cx="50" cy="52" rx="36" ry="21" fill="#7c9c4a" stroke="#22301a" stroke-width="7"/>
+  <path d="M40 74 Q40 94 50 94 Q60 94 60 74" fill="#556b30" stroke="#22301a" stroke-width="6" stroke-linejoin="round"/>
+</svg>`.trim(),
+
+  // Unrest: warning triangle, hot orange -- deliberately close to (but distinguishable from)
+  // attacker-red so it still reads as "alarm" without being confused with combat threat count.
+  unrest: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M50 6 L94 88 L6 88 Z" fill="#e08a36" stroke="#2a1c0c" stroke-width="7" stroke-linejoin="round"/>
+  <rect x="44" y="34" width="12" height="30" rx="2" fill="#2a1c0c"/>
+  <rect x="44" y="72" width="12" height="12" rx="2" fill="#2a1c0c"/>
+</svg>`.trim(),
+
+  // Day: sun disc + rays, warm gold.
+  day: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <circle cx="50" cy="50" r="22" fill="#f0c33e" stroke="#5c4413" stroke-width="7"/>
+  <g stroke="#f0c33e" stroke-width="9" stroke-linecap="round">
+    <line x1="50" y1="4" x2="50" y2="18"/><line x1="50" y1="82" x2="50" y2="96"/>
+    <line x1="4" y1="50" x2="18" y2="50"/><line x1="82" y1="50" x2="96" y2="50"/>
+    <line x1="17" y1="17" x2="27" y2="27"/><line x1="73" y1="73" x2="83" y2="83"/>
+    <line x1="17" y1="83" x2="27" y2="73"/><line x1="73" y1="27" x2="83" y2="17"/>
+  </g>
+</svg>`.trim(),
+
+  // Night: crescent moon, cool indigo -- opposite temperature from day's gold so the topbar's
+  // day/night swap reads as a real color change, not just a shape swap.
+  night: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M64 8 A40 40 0 1 0 64 92 A31 31 0 0 1 64 8 Z" fill="#7f95c9" stroke="#232a44" stroke-width="7" stroke-linejoin="round"/>
+  <circle cx="42" cy="34" r="4.5" fill="#232a44"/>
+  <circle cx="54" cy="54" r="3" fill="#232a44"/>
+</svg>`.trim(),
+
+  // Weather -- Clear: small sun tucked behind a pale cloud (distinct from the bare day-sun icon
+  // above so the two don't read as duplicates when both happen to show at once).
+  weatherClear: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <circle cx="64" cy="32" r="18" fill="#f0c33e" stroke="#5c4413" stroke-width="6"/>
+  <ellipse cx="40" cy="62" rx="34" ry="20" fill="#dfe6ee" stroke="#4a5566" stroke-width="7"/>
+</svg>`.trim(),
+
+  // Weather -- Rain: grey cloud with blue drops.
+  weatherRain: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <ellipse cx="50" cy="38" rx="38" ry="21" fill="#9aa8b8" stroke="#333c47" stroke-width="7"/>
+  <g stroke="#4a90c4" stroke-width="9" stroke-linecap="round">
+    <line x1="30" y1="70" x2="23" y2="90"/><line x1="52" y1="70" x2="45" y2="90"/><line x1="74" y1="70" x2="67" y2="90"/>
+  </g>
+</svg>`.trim(),
+
+  // Weather -- Cold: snowflake, pale cyan.
+  weatherCold: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <g stroke="#bfe3f0" stroke-width="8" stroke-linecap="round">
+    <line x1="50" y1="6" x2="50" y2="94"/><line x1="6" y1="50" x2="94" y2="50"/>
+    <line x1="19" y1="19" x2="81" y2="81"/><line x1="81" y1="19" x2="19" y2="81"/>
+  </g>
+  <circle cx="50" cy="50" r="9" fill="#bfe3f0" stroke="#2a4a56" stroke-width="4"/>
+</svg>`.trim(),
+
+  // Weather -- Heatwave: flame, hot orange-red.
+  weatherHeatwave: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M50 6 Q72 32 60 52 Q80 50 72 76 Q65 96 48 96 Q26 96 22 74 Q19 56 34 45 Q31 60 40 61 Q33 38 50 6 Z"
+        fill="#e0622f" stroke="#5c2410" stroke-width="7" stroke-linejoin="round"/>
+</svg>`.trim(),
+
+  // Grading: shield with a checkmark, gold -- matches --accent so it reads as "quality report"
+  // consistent with the rest of the UI's accent color for positive/informational chrome.
+  grading: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M50 6 L88 20 L88 46 Q88 78 50 96 Q12 78 12 46 L12 20 Z" fill="#e0a336" stroke="#3a2c10" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M32 50 L46 64 L70 34" fill="none" stroke="#3a2c10" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>`.trim(),
+
+  // Research: flask, cyan -- distinct cool hue from every other stat's color so it never reads
+  // as a variant of population/wave's blues.
+  research: `
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <path d="M40 10 H60 V38 L82 78 Q86 88 74 90 H26 Q14 88 18 78 L40 38 Z" fill="#5ecbe0" stroke="#123a44" stroke-width="7" stroke-linejoin="round"/>
+  <rect x="36" y="4" width="28" height="10" rx="3" fill="#123a44"/>
+  <circle cx="49" cy="70" r="5" fill="#123a44"/>
+  <circle cx="61" cy="79" r="4" fill="#123a44"/>
+</svg>`.trim(),
+};
+
+const TOPBAR_ICON_IDS = Object.keys(TOPBAR_ICONS);
+
+const _topbarUriCache = new Map();
+
+// Returns a cached data: URI for a topbar glyph by name (one of TOPBAR_ICON_IDS). Unlike
+// getSprite/drawSprite above, this is meant for a plain <img src="..."> in static DOM, not a
+// Canvas draw call -- topbar icons never need recoloring or rotation, so there's no `vars`/cache
+// key complexity to carry over from the sprite system.
+function topbarIconUri(name) {
+  let uri = _topbarUriCache.get(name);
+  if (uri) return uri;
+  const svg = TOPBAR_ICONS[name];
+  if (!svg) throw new Error(`assets.js: unknown topbar icon "${name}"`);
+  uri = svgDataUri(svg);
+  _topbarUriCache.set(name, uri);
+  return uri;
+}
 
 
 // ---- traits.js ----
@@ -588,6 +748,48 @@ const TRAITS = [
 
 function randomTrait(rng) {
   return TRAITS[Math.floor(rng() * TRAITS.length)];
+}
+
+// ---------------------------------------------------------------- age bands (RimWorld Biotech
+// LifeStageDef, condensed). Real RimWorld LifeStageDefs are just a bundle of flat multipliers
+// keyed by age band (bodySize/health/speed/melee/hunger) -- the exact same shape as the trait
+// multipliers above, so this is a second lookup table of the same kind rather than a parallel
+// system. `age` (citizens.js) is ticks-since-spawn; maxAge is the upper (exclusive) tick bound
+// for a band, Infinity for the last one. Looked up once per citizen per tick and multiplied
+// straight into the SAME rate expressions jobs.js already builds from trait.workSpeedMult
+// (`* ageBandFor(store.age[i]).workSpeedMult`) and siege.js's trait.healthMult (toughness --
+// higher healthMult means LESS damage taken per hit, see siege.js's `DAMAGE / healthMult`).
+//
+// Real RimWorld pre-teen anchor (MoveSpeed x0.85) adapted directionally for an elder band: reduced
+// work-speed (0.85-0.9 range, matching the ask) and a reduced health ceiling/toughness (elders take
+// real hits harder, same shape as a Neurotic/Glutton downside trait). Compensating "wisdom"
+// tradeoff, a genuine deliberate design call rather than pure decline: a real skill-gain-RATE
+// bonus (not a starting-skill bonus -- an elder isn't smarter on day one, they just learn faster
+// from the practice they're already getting, mirroring backstories.js's own Passion mechanic
+// exactly, see PASSION_GAIN_MULT). Applied as `ageBandFor(store.age[i]).skillGainMult` alongside
+// the existing PASSION_GAIN_MULT term at every skill-gain site in jobs.js/siege.js -- multiplicative
+// with passion, not a replacement for it, same "stacks, doesn't override" convention as every other
+// multiplier table in this file.
+const AGE_BANDS = [
+  // Young: default band, every multiplier at baseline -- a citizen who never crosses either
+  // threshold behaves byte-for-byte as if this feature didn't exist.
+  { name: 'Young', maxAge: 20000, workSpeedMult: 1, healthMult: 1, skillGainMult: 1 },
+  // Veteran: real RimWorld pre-teen MoveSpeed anchor (x0.85) landed at the gentler end of the
+  // requested 0.85-0.9 workSpeedMult range; skillGainMult mirrors backstories.js's own Minor
+  // Passion tier (1.5x) so "experience" reads on the same scale as the existing wisdom-adjacent
+  // mechanic rather than inventing a new one.
+  { name: 'Veteran', maxAge: 45000, workSpeedMult: 0.9, healthMult: 0.95, skillGainMult: 1.5 },
+  // Elder: the top of the requested workSpeedMult range, a further-reduced health ceiling (more
+  // toughness lost than Veteran, same direction as real RimWorld's old-age HP/immunity decline),
+  // and a skillGainMult matching backstories.js's Burning Passion tier (2.5x) -- the "wisdom"
+  // payoff is at its largest exactly where the physical decline is also at its largest, a genuine
+  // tradeoff rather than a strict downgrade.
+  { name: 'Elder', maxAge: Infinity, workSpeedMult: 0.85, healthMult: 0.88, skillGainMult: 2.5 },
+];
+
+function ageBandFor(age) {
+  for (const band of AGE_BANDS) if (age < band.maxAge) return band;
+  return AGE_BANDS[AGE_BANDS.length - 1];
 }
 
 
@@ -740,6 +942,16 @@ const ZoneKind = Object.freeze({
   // kind (economy.js/siege.js/jobs.js's Processing job) -- different system, same English word,
   // kept deliberately distinct here so a player never confuses the two "workshop" features.
   Training: 4,
+  // Storage/Medical/Command (rooms.js RoomRole.Storage/Medical/Command): same "zone + minimum
+  // furniture" room-role pattern as Bedroom/Food/Recreation/Training above, no new mechanic.
+  Storage: 5,
+  Medical: 6,
+  Command: 7,
+  // Gymnasium (PA needs.txt Exercise -- see citizens.js's EXERCISE_DECAY / rooms.js's
+  // RoomRole.Gymnasium): same "zone + minimum furniture" room-role pattern as the roles above,
+  // furniture requirement is the new Fitness Station buildable (siege.js Structure kind
+  // 'fitness_station', the single consolidated stand-in for PA's whole gym-equipment catalog).
+  Gymnasium: 8,
 });
 
 const ZONE_COLOR = {
@@ -747,6 +959,10 @@ const ZONE_COLOR = {
   [ZoneKind.Food]: 'rgba(220,160,60,0.35)',
   [ZoneKind.Recreation]: 'rgba(90,200,120,0.35)',
   [ZoneKind.Training]: 'rgba(200,120,200,0.35)',
+  [ZoneKind.Storage]: 'rgba(150,130,90,0.35)',
+  [ZoneKind.Medical]: 'rgba(220,70,70,0.35)',
+  [ZoneKind.Command]: 'rgba(90,90,110,0.35)',
+  [ZoneKind.Gymnasium]: 'rgba(230,140,40,0.35)',
 };
 
 class ZoneGrid {
@@ -768,12 +984,18 @@ class ZoneGrid {
     return this.kind[this.index(x, y)];
   }
 
-  // Nearest cell of the given kind to (fromX, fromY), or null if none painted.
-  nearestOfKind(kind, fromX, fromY) {
+  // Nearest cell of the given kind to (fromX, fromY), or null if none painted. isAllowed is an
+  // optional (x, y) -> bool predicate -- jobs.js passes a citizen's Allowed Area check through
+  // here so a restricted citizen's autonomous job-seeking only ever considers zone cells inside
+  // their own painted area, matching the exact same "nearest that qualifies" behavior every
+  // other candidate here already gets. Omitted (every pre-existing call site) means no filtering
+  // at all, byte-for-byte the old behavior.
+  nearestOfKind(kind, fromX, fromY, isAllowed = null) {
     let bestDist = Infinity, bestX = -1, bestY = -1;
     for (let y = 0; y < this.height; y++) {
       for (let x = 0; x < this.width; x++) {
         if (this.kind[this.index(x, y)] !== kind) continue;
+        if (isAllowed && !isAllowed(x + 0.5, y + 0.5)) continue;
         const d = (x - fromX) ** 2 + (y - fromY) ** 2;
         if (d < bestDist) { bestDist = d; bestX = x; bestY = y; }
       }
@@ -785,6 +1007,7 @@ class ZoneGrid {
 
 // ---- economy.js ----
 // Scrap economy: build costs and combat rewards. Condensed from SD.Siege's scrap balancing.
+
 const BUILD_COST = {
   wall: 2,
   wire: 1, // power conduit -- deliberately near-free so long runs are a layout problem, not a cost one
@@ -796,6 +1019,11 @@ const BUILD_COST = {
   bed: 8,
   table: 6,
   door: 5,
+  // Storage/Medical room roles (rooms.js RoomRole.Storage/Medical): cheap furniture-only additions,
+  // no new mechanic. Shelf priced in the same cheap-furniture tier as table (PA-scale ~$6 anchor).
+  // Medical Bed is priced at 2.5x plain Bed's cost (PA real anchor per the task brief).
+  shelf: 6,
+  medical_bed: 20,
   generator: 30,
   generator_nuclear: 90, // expensive: high-reward wireless power radius, but risks the waste hazard, see siege.js
   // SEA:R multi-source power economy (FEATURE_RESEARCH.md): each variant trades cost/pollution/
@@ -847,19 +1075,86 @@ const BUILD_COST = {
   // counter-buildable -- priced below a real combat trap (15) since it does nothing against
   // attackers, just catches rats at rats.js's real 65% rate.
   rat_trap: 10,
+  // Stabilizer Beacon (anomaly.js): the "real in-game response" to anomaly pressure -- adds
+  // extra passive decay to the meter while built and undestroyed, stacking up to
+  // STABILIZER_MAX_STACKS. Priced in the same cheap single-purpose-counter-buildable tier as Rat
+  // Trap, for the same reason: it does nothing against attackers, purely a hazard-management tool.
+  stabilizer: 18,
+  // Shrine (RimWorld Ideology DLC's real altar buildable): a single-tier, beauty-only passive
+  // building -- no function beyond a flat Beauty contribution to whatever room it's placed inside
+  // (see rooms.js's BEAUTY_BY_KIND.shrine). Priced between door (5) and monitor_station (12) --
+  // similar cost tier to the other small single-purpose decor/sensor buildables (camera: 8,
+  // table: 6), reflecting that it's cheap to place but purely cosmetic, not a functional upgrade.
+  shrine: 10,
+  // Vest (citizens.js's hasVest / siege.js's CITIZEN_VEST_ARMOR_RATING/resolveCitizenArmorRoll):
+  // a per-CITIZEN purchase, not a structure -- world.buyVest spends this once per citizen equipped.
+  // Priced with door (5)/table (6) rather than a combat structure like trap (15)/turret (25): it's
+  // real, measured protection (see siege.js's comment on the average-damage reduction it buys a
+  // vested citizen) but civilian-grade personal gear, not a defense placement of its own.
+  vest: 10,
+  // Fitness Station (PA needs.txt Exercise -- see citizens.js's EXERCISE_DECAY / jobs.js's
+  // SeekingExercise-Exercising job / rooms.js's RoomRole.Gymnasium): ONE consolidated buildable
+  // standing in for PA's whole real gym-equipment catalog (Treadmill/TyreApparatus/PullUpBars/
+  // PushUpStones/GymMat, ~10 objects), same consolidation precedent as every other buildable here
+  // representing a PA/RimWorld category rather than each individual real object. Priced cheap,
+  // same tier as bed (8)/door (5) -- a needs-refill fixture, not a combat or utility structure.
+  fitness_station: 9,
+  // Lightning Rod (weather.js's Lightning Storm calamity, real Prison Architect calamity_settings.txt
+  // mitigation item): cheap on purpose -- a real PA lightning rod is a small, inexpensive counter-
+  // buildable, same "cheap, single-purpose counter" pricing logic as rat_trap/stabilizer above.
+  lightning_rod: 14,
+  // Fabrication Bay (drones.js -- RimWorld Biotech's mech-companion labor drone, see that
+  // module's header comment): unlocks drone capacity, matching the "a building unlocks capacity,
+  // not a per-unit purchase" pattern security.js's tickArmoryIssuance already established for
+  // Armory/weapon tiers. Priced in the garage/workshop mid tier (garage_garbage_gas: 35,
+  // workshop: 40, garage_recycling_gas: 45) -- a real strategic investment, not a cheap add-on.
+  fabrication_bay: 48,
+  // Farm Plot (research.js's Agronomy node, jobs.js's Farming job): a renewable citizen-tended
+  // producer, priced near Fitness Station/Rat Trap's cheap single-purpose tier (9-15) rather than
+  // a combat or utility structure -- the real payoff is the ongoing tended cycle, not the
+  // placement itself.
+  farm_plot: 16,
 };
 
 const SCRAP_PER_KILL = 4;
 
+// Trader-caravan random event (weather.js's tryTraderEvent, mirrors RimWorld's real
+// TraderCaravanArrival/VisitorGroup IncidentDefs -- see weather.js's EVENT_WEIGHTS comment):
+// a discounted-cost voucher on the next few buildables, active for a real-but-short window so a
+// hands-off colony can't just bank it forever. Both the discount and the window are read here
+// (the actual point-of-sale) rather than duplicated in weather.js.
+const TRADER_DISCOUNT_PCT = 0.4; // 40% off -- meaningful, not a rounding-error discount
+const TRADER_VOUCHER_USES = 3; // next N buildable purchases, whichever runs out first
+const TRADER_WINDOW_TICKS = 400; // ~40s at 10Hz -- "a few hundred ticks" per the task brief
+
+/** True while a trader voucher is still live (uses remaining AND window not yet expired). */
+function traderVoucherActive(world) {
+  return (world._traderVoucherUses || 0) > 0 && world.currentTick <= (world._traderVoucherExpireTick ?? -1);
+}
+
+/** The actual scrap cost of `kind` right now, discount included if a voucher is active. Exported
+ *  so input.js's cost-preview UI can show the discounted price, not just canAfford/spend. */
+function buildCost(world, kind) {
+  const base = BUILD_COST[kind] || 0;
+  let cost = base;
+  if (traderVoucherActive(world)) cost *= (1 - TRADER_DISCOUNT_PCT);
+  // Coverage Plans (coverageplans.js): a purchased plan permanently discounts its themed
+  // buildables -- stacks multiplicatively with a trader voucher, same as any other discount
+  // layered on top of the base price.
+  cost *= coveragePlanDiscountMult(world, kind);
+  return Math.max(0, Math.round(cost));
+}
+
 function canAfford(world, kind) {
-  return world.scrap >= (BUILD_COST[kind] || 0);
+  return world.scrap >= buildCost(world, kind);
 }
 
 function spend(world, kind) {
-  const cost = BUILD_COST[kind] || 0;
+  const cost = buildCost(world, kind);
   if (world.scrap < cost) return false;
   world.scrap -= cost;
   if (world.finance) world.finance.buildSpend += cost; // budget-report ledger, see world.js's finance comment
+  if (traderVoucherActive(world)) world._traderVoucherUses -= 1; // one use consumed per purchase, discounted or not
   return true;
 }
 
@@ -940,6 +1235,18 @@ const RESEARCH_NODES = [
     desc: 'A staffed processing station -- raw scrap in, higher-value Components out.',
     unlocks: ['workshop'], requires: [],
   },
+  {
+    // Real PA anchor (needs.txt/production.txt materials pass): farming buildables carry real
+    // Work-provider rates and feed the fertilizer/compost chain -- v1 here is deliberately just
+    // the single production loop (one buildable, one citizen-tended cycle), not the full
+    // multi-crop/fertilizer system that real data implies; see jobs.js's Farming job state.
+    // Distinct from Harvesting: a resource NODE is a finite deposit that depletes, a Farm Plot is
+    // a built, renewable producer a citizen returns to tend cycle after cycle.
+    id: 'agronomy', name: 'Agronomy', cost: 55,
+    desc: 'Tilled farm plots -- a citizen tending one produces a steady trickle of food/scrap, ' +
+      'renewable rather than a depleting resource node.',
+    unlocks: ['farm_plot'], requires: [],
+  },
 
   // ---- gated tier 2 ----
   {
@@ -962,6 +1269,18 @@ const RESEARCH_NODES = [
     unlocks: ['camera', 'monitor_station'], requires: ['early_warning'],
   },
   {
+    // Real PA anchor: CCTVImprovement, cost 1000/time 180. Scaled against this tree's
+    // established 30-700 range and priced relative to its prereq (surveillance, 80) the same way
+    // the real file prices it as a follow-up upgrade to the base CCTV research, not a fresh
+    // unlock -- unlocks nothing buildable, purely read by world.js's wave-warning-window calc
+    // (CCTV_IMPROVEMENT_RESEARCH_MULT there), a real +35% boost to both the unmanned-camera and
+    // staffed-monitor early-warning windows.
+    id: 'cctv_improvement', name: 'CCTV Improvement', cost: 50,
+    desc: 'Better lenses and signal routing for the CCTV network -- cameras and the monitor '
+      + 'station both see meaningfully further ahead of a wave.',
+    unlocks: [], requires: ['surveillance'],
+  },
+  {
     id: 'refined_fuels', name: 'Refined Fuels', cost: 90,
     desc: 'Gas and ethanol drivetrains -- faster hauls, or cleaner ones.',
     unlocks: [
@@ -974,6 +1293,18 @@ const RESEARCH_NODES = [
     id: 'waste_reclamation', name: 'Waste Reclamation', cost: 110,
     desc: 'A recycling center that eats pollution and pays it back as scrap.',
     unlocks: ['recycling_center'], requires: ['plumbing'],
+  },
+  {
+    // Real PA anchor: RecyclingIncentive, cost 2500/time 720 -- roughly 2.5x CCTVImprovement's
+    // real cost and 4x its real time, mirrored here as a proportionally pricier follow-up than
+    // cctv_improvement (50) above. Unlocks nothing buildable -- purely read by world.js's
+    // pollution-tick recycling-capacity calc (RECYCLING_THROUGHPUT_RESEARCH_MULT there), a real
+    // +40% multiplier on every Recycling Center's per-tick processing capacity, stacking with the
+    // existing water-grid bonus rather than replacing it.
+    id: 'recycling_throughput', name: 'Recycling Throughput', cost: 125,
+    desc: 'Sorting-line incentives and tuning for the Recycling Center -- meaningfully more '
+      + 'pollution processed into scrap per tick, on every center you\'ve already built.',
+    unlocks: [], requires: ['waste_reclamation'],
   },
   {
     id: 'alternative_power', name: 'Alternative Power', cost: 85,
@@ -1149,6 +1480,7 @@ function maybeSpawnNode(nodes, grid, rng, currentTick, avoidX, avoidY) {
 // garage (blueprint, same construction pipeline as everything else) and then a citizen has to
 // drive it. An undriven truck just sits parked at its garage.
 
+
 const VEHICLE_SPEED = 0.11;
 const GARBAGE_BONUS_MIN = 15, GARBAGE_BONUS_MAX = 40;
 const DRIVER_ENTER_RANGE = 0.5;
@@ -1175,6 +1507,13 @@ const FUEL_TYPES = Object.freeze({
 const DEFAULT_FUEL_TYPE = 'gas';
 const ETHANOL_PENALTY_TICKS = 150; // ~15s at the 10Hz tick rate -- Food zone refill roughly halved meanwhile
 const UNPOWERED_ELECTRIC_WORK_MULT = 2.5; // an electric truck with no generator feeding its garage crawls
+// Storage room hook (rooms.js RoomRole.Storage, PA full prefab/object catalog): a cheap, not-
+// forced bonus -- a garage sited so its own tile falls inside a validated Storage room (a Storage
+// zone + at least 1 shelf) shaves a little off every haul's work phase, representing organized
+// staging/shelving cutting load/unload time. Deliberately small (15%, not a strict-upgrade-sized
+// number) since this is a "nice to have if you happen to zone your garage that way" bonus, not
+// something the player is expected to chase.
+const STORAGE_ROOM_WORK_MULT = 0.85;
 
 // Garage build-toolbar kinds are 'garage_<recycling|garbage>_<fuel>' (plus the original bare
 // 'garage_recycling'/'garage_garbage' kept working as a 'gas' default for save-compat and for
@@ -1206,10 +1545,14 @@ function spawnParkedVehicle(world, kind, x, y, fuelType = DEFAULT_FUEL_TYPE) {
   world.vehicles.push(new Vehicle(kind, x, y, fuelType));
 }
 
-function findUndrivenVehicle(vehicles, x, y) {
+// isAllowed: optional (x, y) -> bool predicate (jobs.js's per-citizen Allowed Area check, see
+// citizens.js's isInAllowedArea) -- omitted for every pre-existing call site, byte-for-byte the
+// old behavior.
+function findUndrivenVehicle(vehicles, x, y, isAllowed = null) {
   let best = null, bestDist = Infinity;
   for (const v of vehicles) {
     if (v.driverId != null || v.phase !== 'parked') continue;
+    if (isAllowed && !isAllowed(v.x, v.y)) continue;
     const d = Math.hypot(v.x - x, v.y - y);
     if (d < bestDist) { bestDist = d; best = v; }
   }
@@ -1249,8 +1592,17 @@ function tickVehicles(world) {
         // Electric's "energy-hungry" bite: without a generator actually feeding the garage,
         // the haul takes far longer -- the same connected-power-graph check turrets use, not a
         // fake stat.
-        v.workTimer = (fuel.requiresPower && !isPowered(world.structures, v.garageX, v.garageY))
+        let workTimer = (fuel.requiresPower && !isPowered(world.structures, v.garageX, v.garageY))
           ? BASE_WORK_TIMER * UNPOWERED_ELECTRIC_WORK_MULT : BASE_WORK_TIMER;
+        // Storage room hook (see STORAGE_ROOM_WORK_MULT doc comment above) -- checked off the
+        // garage's own tile, not the truck's current position, since a garage is a fixed
+        // structure and this is meant to reward *siting* the garage well, not wherever the truck
+        // happens to be mid-haul.
+        if (world.rooms && world.grid) {
+          const garageRoom = roomContaining(world.rooms, world.grid, v.garageX, v.garageY);
+          if (garageRoom && garageRoom.role === RoomRole.Storage && garageRoom.roleValid) workTimer *= STORAGE_ROOM_WORK_MULT;
+        }
+        v.workTimer = workTimer;
       }
       else { v.x += (dx / dist) * VEHICLE_SPEED; v.y += (dy / dist) * VEHICLE_SPEED; }
       continue;
@@ -1391,6 +1743,10 @@ const BEAUTY_BY_KIND = {
   bed: 1.5,        // functional but still a deliberate furnishing choice
   door: 0.5,       // mild positive -- a room with a proper door reads as "finished"
   wire: -0.5,      // exposed wiring, mildly utilitarian
+  shelf: -0.3,     // plain storage furniture -- mildly utilitarian, not as neutral as a door
+  medical_bed: 1.0, // functional furnishing like a plain bed, but clinical rather than cozy
+  fitness_station: 0.5, // exercise equipment -- a small deliberate positive, milder than a table/bed
+  armory: -1.5,    // racked weapons -- utilitarian, not as bad as a turret bolted to the floor
   turret: -2,      // a gun bolted to the floor of your room is not cozy
   fence: -1,
   trap: -2,
@@ -1406,6 +1762,14 @@ const BEAUTY_BY_KIND = {
   generator_wind: -1,    // a turbine outdoors is far less obtrusive than boxy generator housing
   generator_solar: -1,   // same -- a panel array reads as mild infrastructure, not an eyesore
   waste_storage: -4,     // hazardous-waste containment, definitionally ugly
+  // Shrine (RimWorld Ideology DLC's real altar buildable, economy.js's BUILD_COST.shrine): a
+  // single-tier, beauty-ONLY passive building -- this contribution is its entire function, unlike
+  // every other entry above which is a side-effect of a structure that does something else too.
+  // RimWorld's real altar Beauty value is +10..+30; +15 is the mid-point pick per the task brief,
+  // deliberately far above table's 2.5/bed's 1.5 -- a dedicated shrine is supposed to swing a
+  // room's beauty score hard, the same way it does in the source game (a single altar can carry
+  // an otherwise-plain room to "impressive" on its own).
+  shrine: 15,
 };
 
 const CLEANLINESS_POLLUTION_DIVISOR = 20; // world.pollution this high alone fully tanks cleanliness
@@ -1449,12 +1813,39 @@ const MESS_CLEANLINESS_WEIGHT = 1;     // mess subtracts 1:1 from the 0..1 clean
 //    rather than inventing an equipment requirement PA's real schema has but this port doesn't
 //    need. Named "Training Room" rather than "Workshop" to avoid colliding with the unrelated
 //    'workshop' materials-processing Structure kind elsewhere in this codebase.
+//  - Storage Room (new, PA full prefab/object catalog): needs a Storage zone AND at least 1
+//    shelf. No new mechanic for v1 -- see vehicles.js's tickVehicles for the one cheap hook that
+//    was added (a small haul-work-time bonus for garages sited near a validated Storage room).
+//  - Medical/Infirmary Room (new): needs a Medical zone AND at least 1 Medical Bed. Plugs
+//    directly into citizens.js's existing single-float `health` stat -- a downed citizen
+//    recovers health faster while inside a validated Medical room (see citizens.js's
+//    tickNeedsAndMood Downed branch). There's no dedicated Tending/SeekingTend job state in
+//    jobs.js yet (checked fresh -- citizens.js's own doc comment on DOWNED_RECOVERY_RATE already
+//    says "no dedicated first-aid job yet, so recovery is passive"), so the bonus applies
+//    passively based on room location rather than requiring an active tend job; wiring a real
+//    Tending job into this room role is the natural follow-up once that job state exists.
+//  - Command Room (new): promotes the already-existing armory + monitor_station buildables into
+//    a formal role -- needs a Command zone AND at least 1 armory AND at least 1 monitor_station
+//    (both, not either/or -- a "command room" that's missing either the weapons half or the
+//    surveillance half isn't really a command room). Zero new buildables; this is purely a
+//    classifier entry giving the pairing a real computeRoomStats quality-score payoff.
+//  - Gymnasium (new, PA needs.txt Exercise): needs a Gymnasium zone AND at least 1 Fitness
+//    Station (siege.js Structure kind 'fitness_station', see economy.js's BUILD_COST -- ONE
+//    consolidated buildable standing in for PA's whole real gym-equipment catalog). Same
+//    "zone + minimum furniture" gate as Bedroom/Dining/Storage/Medical above -- an unroofed
+//    Fitness Station still refills Exercise via jobs.js's Exercising job (the buildable itself is
+//    what a citizen needs to use), it just doesn't get the enclosed-room ROOM_REFILL_BONUS until
+//    both the zone and the station are in place.
 const RoomRole = Object.freeze({
   None: 'none',
   Bedroom: 'bedroom',
   DiningRoom: 'dining',
   RecreationRoom: 'recreation',
   Training: 'training',
+  Storage: 'storage',
+  Medical: 'medical',
+  Command: 'command',
+  Gymnasium: 'gymnasium',
 });
 
 const ROOM_ROLE_LABEL = {
@@ -1463,21 +1854,34 @@ const ROOM_ROLE_LABEL = {
   [RoomRole.DiningRoom]: 'Dining Room',
   [RoomRole.RecreationRoom]: 'Recreation Room',
   [RoomRole.Training]: 'Training Room',
+  [RoomRole.Storage]: 'Storage Room',
+  [RoomRole.Medical]: 'Infirmary',
+  [RoomRole.Command]: 'Command Room',
+  [RoomRole.Gymnasium]: 'Gymnasium',
 };
 
 const BED_MIN = 1;
 const TABLE_MIN = 1;
+const SHELF_MIN = 1;
+const MEDICAL_BED_MIN = 1;
+const ARMORY_MIN = 1;
+const MONITOR_MIN = 1;
+const FITNESS_STATION_MIN = 1;
 
 // Which zone kind implies which candidate role, checked in this priority order when a room
 // happens to have more than one zone kind painted inside it (rare, but painting tools don't
 // stop a player from mixing zones in one enclosed space) -- Bedroom first since an unmade bed
 // is the highest-stakes miss (a citizen sleeping in the open loses the mood/refill bonus every
-// night), then Food, then Recreation.
+// night), then Food, then Recreation, then the newer roles.
 const ZONE_TO_ROLE = [
   [ZoneKind.Bedroom, RoomRole.Bedroom],
   [ZoneKind.Food, RoomRole.DiningRoom],
   [ZoneKind.Recreation, RoomRole.RecreationRoom],
   [ZoneKind.Training, RoomRole.Training],
+  [ZoneKind.Medical, RoomRole.Medical],
+  [ZoneKind.Command, RoomRole.Command],
+  [ZoneKind.Storage, RoomRole.Storage],
+  [ZoneKind.Gymnasium, RoomRole.Gymnasium],
 ];
 
 // Which need (jobs.js's JobState-adjacent "what is this citizen here to refill") a validated
@@ -1487,23 +1891,29 @@ const ROLE_FOR_NEED = Object.freeze({
   hunger: RoomRole.DiningRoom,
   rest: RoomRole.Bedroom,
   social: RoomRole.RecreationRoom,
+  exercise: RoomRole.Gymnasium,
 });
 
 // Counts which ZoneKind cells appear inside a room. Small map, but a room can be large -- this
 // is O(room.size), fine at the "only recompute when structures/zones change" cadence below.
 function zoneCellCounts(room, grid, zones) {
-  const counts = { [ZoneKind.Bedroom]: 0, [ZoneKind.Food]: 0, [ZoneKind.Recreation]: 0, [ZoneKind.Training]: 0 };
+  const counts = {
+    [ZoneKind.Bedroom]: 0, [ZoneKind.Food]: 0, [ZoneKind.Recreation]: 0, [ZoneKind.Training]: 0,
+    [ZoneKind.Storage]: 0, [ZoneKind.Medical]: 0, [ZoneKind.Command]: 0, [ZoneKind.Gymnasium]: 0,
+  };
   for (const idx of room.cells) {
     const kind = zones.kind[idx];
-    if (kind === ZoneKind.Bedroom || kind === ZoneKind.Food || kind === ZoneKind.Recreation || kind === ZoneKind.Training) counts[kind]++;
+    if (kind in counts) counts[kind]++;
   }
   return counts;
 }
 
 // Classifies a single room's role given its zone coverage + furniture counts (bedCount/
-// tableCount, tallied by computeRoomStats below while it's already walking structures for
-// beauty). Returns { role, roleValid, missingRequirements }.
-function classifyRoomRole(room, grid, zones, bedCount, tableCount) {
+// tableCount/shelfCount/medicalBedCount/armoryCount/monitorCount/fitnessStationCount, tallied by
+// computeRoomStats below while it's already walking structures for beauty). Returns { role,
+// roleValid, missingRequirements }.
+function classifyRoomRole(room, grid, zones, counts) {
+  const { bedCount, tableCount, shelfCount, medicalBedCount, armoryCount, monitorCount, fitnessStationCount } = counts;
   const zoneCounts = zoneCellCounts(room, grid, zones);
   for (const [zoneKind, role] of ZONE_TO_ROLE) {
     if (zoneCounts[zoneKind] === 0) continue;
@@ -1514,6 +1924,24 @@ function classifyRoomRole(room, grid, zones, bedCount, tableCount) {
     if (role === RoomRole.DiningRoom) {
       const valid = tableCount >= TABLE_MIN;
       return { role, roleValid: valid, missingRequirements: valid ? [] : ['a table'], tableCount };
+    }
+    if (role === RoomRole.Storage) {
+      const valid = shelfCount >= SHELF_MIN;
+      return { role, roleValid: valid, missingRequirements: valid ? [] : ['a shelf'], shelfCount };
+    }
+    if (role === RoomRole.Medical) {
+      const valid = medicalBedCount >= MEDICAL_BED_MIN;
+      return { role, roleValid: valid, missingRequirements: valid ? [] : ['a medical bed'], medicalBedCount };
+    }
+    if (role === RoomRole.Command) {
+      const missing = [];
+      if (armoryCount < ARMORY_MIN) missing.push('an armory');
+      if (monitorCount < MONITOR_MIN) missing.push('a monitor station');
+      return { role, roleValid: missing.length === 0, missingRequirements: missing, armoryCount, monitorCount };
+    }
+    if (role === RoomRole.Gymnasium) {
+      const valid = fitnessStationCount >= FITNESS_STATION_MIN;
+      return { role, roleValid: valid, missingRequirements: valid ? [] : ['a fitness station'], fitnessStationCount };
     }
     if (role === RoomRole.RecreationRoom || role === RoomRole.Training) {
       return { role, roleValid: true, missingRequirements: [] };
@@ -1534,6 +1962,11 @@ function computeRoomStats(rooms, grid, structures, world, zones) {
     let onFireInside = false;
     let bedCount = 0;
     let tableCount = 0;
+    let shelfCount = 0;
+    let medicalBedCount = 0;
+    let armoryCount = 0;
+    let monitorCount = 0;
+    let fitnessStationCount = 0;
 
     for (const s of structures) {
       if (s.destroyed || s.underConstruction) continue;
@@ -1547,6 +1980,11 @@ function computeRoomStats(rooms, grid, structures, world, zones) {
       if (s.onFire) onFireInside = true;
       if (s.kind === 'bed') bedCount++;
       if (s.kind === 'table') tableCount++;
+      if (s.kind === 'shelf') shelfCount++;
+      if (s.kind === 'medical_bed') medicalBedCount++;
+      if (s.kind === 'armory') armoryCount++;
+      if (s.kind === 'monitor_station') monitorCount++;
+      if (s.kind === 'fitness_station') fitnessStationCount++;
     }
 
     // Mess accumulation (see MESS_* doc comment above) -- ambient trickle always applies, plus a
@@ -1584,12 +2022,19 @@ function computeRoomStats(rooms, grid, structures, world, zones) {
     room.quality = clamp01(0.5 + beauty * 0.05 + (impressiveness - 0.5) * 0.2) * cleanliness;
 
     if (zones) {
-      const classified = classifyRoomRole(room, grid, zones, bedCount, tableCount);
+      const classified = classifyRoomRole(room, grid, zones, {
+        bedCount, tableCount, shelfCount, medicalBedCount, armoryCount, monitorCount, fitnessStationCount,
+      });
       room.role = classified.role;
       room.roleValid = classified.roleValid;
       room.missingRequirements = classified.missingRequirements;
       room.bedCount = bedCount;
       room.tableCount = tableCount;
+      room.shelfCount = shelfCount;
+      room.medicalBedCount = medicalBedCount;
+      room.armoryCount = armoryCount;
+      room.monitorCount = monitorCount;
+      room.fitnessStationCount = fitnessStationCount;
     } else {
       room.role = RoomRole.None;
       room.roleValid = false;
@@ -1663,6 +2108,114 @@ const CLEANLINESS_LABELS = [
 function impressivenessLabel(value) { return labelFor(value, IMPRESSIVENESS_LABELS); }
 function beautyLabel(value) { return labelFor(value, BEAUTY_LABELS); }
 function cleanlinessLabel(value) { return labelFor(value, CLEANLINESS_LABELS); }
+
+
+// ---- ranks.js ----
+// Citizen Rank / Prestige ladder -- RimWorld Royalty DLC, condensed and reskinned non-carceral
+// (no "title"/nobility framing, just a settlement seniority track). See task brief / research:
+// Royalty's real permit-favor economy has 7 seniority steps (0/100/200/300/400/500/600 favor) and
+// a real per-tier favorCost curve (1/6/6/8/10/14/20) that starts cheap, flattens, then escalates.
+// Both are scaled proportionally onto this project's own numeric ranges rather than copied
+// literally (this codebase's "favor" analog is accumulated skillConstruction+skillCombat, both
+// 0..~3+ floats, see citizens.js; its "money" is the scrap economy, see economy.js -- neither is
+// on Royalty's 0-600/0-20 scale).
+//
+// Rank source stat: skillConstruction[i] + skillCombat[i] (RimWorld Royalty's real favor accrues
+// from any work performed, not one specific skill -- combining both of this project's skill floats
+// is the direct analog rather than picking just one). SKILL_LEVELS in main.js already buckets a
+// single skill's Expert cutoff at 2.5 -- so a *combined* max of ~3.0 (this ladder's top tier) is a
+// realistic, not aspirational, ceiling for a citizen who's actually worked both tracks.
+//
+// Scale factor for the 0/100/200/300/400/500/600 seniority steps: divided by 200 (Royalty's real
+// range top / this project's realistic combined-skill ceiling) -> 0/0.5/1.0/1.5/2.0/2.5/3.0.
+
+const RANKS = [
+  // tier 0: the baseline every citizen starts at, free, no bonus -- matches Royalty's own
+  // "no title yet" starting state.
+  { tier: 0, name: 'Settler', skillThreshold: 0, scrapCost: 0, workSpeedMult: 1.0, healthMult: 1.0, minImpressiveness: 0 },
+  { tier: 1, name: 'Journeyman', skillThreshold: 0.5, scrapCost: 6, workSpeedMult: 1.03, healthMult: 1.0, minImpressiveness: 0 },
+  { tier: 2, name: 'Veteran', skillThreshold: 1.0, scrapCost: 6, workSpeedMult: 1.06, healthMult: 1.02, minImpressiveness: 0 },
+  // Real Royalty room-impressiveness gates for its own title ranks: 60 / 90 / 120 / 160, on a
+  // scale that tops out far above 240 in principle but whose named-tier ceiling is 240 (see
+  // rooms.js's IMPRESSIVENESS_SCALE = 1/240, already used for that file's own label thresholds --
+  // reused here instead of inventing a second scale factor). Scaled: 60/240=0.25, 90/240=0.375,
+  // 120/240=0.5, 160/240=0.667. Applied starting at tier 3 -- the first two promotions stay
+  // unconstrained the same way Royalty's own lowest title (Yeoman) needs no throne room at all.
+  { tier: 3, name: 'Elder', skillThreshold: 1.5, scrapCost: 8, workSpeedMult: 1.09, healthMult: 1.04, minImpressiveness: 60 / 240 },
+  { tier: 4, name: 'Chief', skillThreshold: 2.0, scrapCost: 10, workSpeedMult: 1.12, healthMult: 1.06, minImpressiveness: 90 / 240 },
+  { tier: 5, name: 'Marshal', skillThreshold: 2.5, scrapCost: 14, workSpeedMult: 1.15, healthMult: 1.08, minImpressiveness: 120 / 240 },
+  { tier: 6, name: 'Founder', skillThreshold: 3.0, scrapCost: 20, workSpeedMult: 1.18, healthMult: 1.10, minImpressiveness: 160 / 240 },
+];
+
+const MAX_RANK_TIER = RANKS.length - 1;
+
+function rankOf(store, i) {
+  return RANKS[store.citizenRank[i]] ?? RANKS[0];
+}
+
+function rankLabel(store, i) {
+  return rankOf(store, i).name;
+}
+
+function combinedSkillFor(store, i) {
+  return store.skillConstruction[i] + store.skillCombat[i];
+}
+
+// Per-citizen work-speed multiplier from rank alone -- multiplied alongside trait.workSpeedMult
+// at every jobs.js rate-calc call site (Building/Harvesting/Cleaning/Processing), same
+// null-safe-default-1 convention as every other multiplier in this codebase.
+function rankWorkSpeedMultFor(store, i) {
+  return rankOf(store, i).workSpeedMult ?? 1;
+}
+
+// Per-citizen health multiplier from rank alone -- multiplied alongside trait.healthMult at every
+// siege.js damage-reduction call site (`damage / healthMult`), same convention as
+// rankWorkSpeedMultFor above.
+function rankHealthMultFor(store, i) {
+  return rankOf(store, i).healthMult ?? 1;
+}
+
+// Checks whether citizen i can rank up right now, without spending anything -- used both by the
+// actual rank-up action below and by the inspector UI to show why a rank-up button is disabled.
+// Returns { ok: true, rank } or { ok: false, reason }.
+function canRankUp(store, i, world) {
+  if (!store.isAliveAt(i)) return { ok: false, reason: 'not alive' };
+  const currentTier = store.citizenRank[i];
+  if (currentTier >= MAX_RANK_TIER) return { ok: false, reason: 'already at maximum rank' };
+  const next = RANKS[currentTier + 1];
+  const combined = combinedSkillFor(store, i);
+  if (combined < next.skillThreshold) {
+    return { ok: false, reason: `needs ${next.skillThreshold.toFixed(1)} combined skill (has ${combined.toFixed(2)})` };
+  }
+  if ((world?.scrap ?? 0) < next.scrapCost) {
+    return { ok: false, reason: `needs ${next.scrapCost} scrap (have ${Math.floor(world?.scrap ?? 0)})` };
+  }
+  if (next.minImpressiveness > 0) {
+    const room = (world?.rooms && world?.grid) ? roomContaining(world.rooms, world.grid, store.x[i], store.y[i]) : null;
+    const impressiveness = room ? (room.impressiveness ?? 0) : 0;
+    if (impressiveness < next.minImpressiveness) {
+      return {
+        ok: false,
+        reason: `needs a room at least ${Math.round(next.minImpressiveness * 100)}% impressive `
+          + `(currently ${room ? Math.round(impressiveness * 100) : 0}%) -- veteran's quarters requirement`,
+      };
+    }
+  }
+  return { ok: true, rank: next };
+}
+
+// Actually spends the scrap and advances citizen i's rank, if canRankUp allows it. Mirrors
+// economy.js's spend() bookkeeping (world.finance.buildSpend) rather than routing through
+// world.addScrap's income-kind buckets, since a rank-up is an expense like a build purchase, not
+// an income event.
+function tryRankUp(store, i, world) {
+  const check = canRankUp(store, i, world);
+  if (!check.ok) return check;
+  world.scrap -= check.rank.scrapCost;
+  if (world.finance) world.finance.buildSpend += check.rank.scrapCost;
+  store.citizenRank[i] = check.rank.tier;
+  return { ok: true, rank: check.rank };
+}
 
 
 // ---- power.js ----
@@ -2299,15 +2852,37 @@ function tickPipeFreezing(world) {
 
 
 
+
 const CitizenFlags = Object.freeze({
   None: 0,
   Dead: 1 << 0,
   OnBreak: 1 << 1,
   Downed: 1 << 2, // incapacitated but alive (RimWorld-style) -- see siege.js for the transition rules
+  Drafted: 1 << 3, // RimWorld-style manual control -- see draft.js for the full command system this
+                    // flag gates. A drafted citizen is pulled out of jobs.js's autonomous
+                    // priority state machine entirely (jobs.js checks this flag first thing in
+                    // tickJobs) and only moves/fights on a direct player order.
 });
 
 const DOWNED_RECOVERY_RATE = 0.0015; // per tick, passive -- no dedicated first-aid job yet
+// Exported so coverageplans.js's Medical Response Plan call-in can stabilize a downed citizen to
+// exactly the same "no longer incapacitated" bar this file already uses, rather than duplicating
+// the number.
 const DOWNED_RECOVER_THRESHOLD = 0.3;
+// First-aid tending (jobs.js's JobState.SeekingTend/Tending): a citizen with construction or
+// combat skill invested can walk to and actively tend a Downed ally, swapping the passive rate
+// above for this one -- real RimWorld tending gives roughly a 4x recovery-speed bonus over
+// untended healing, mirrored here as a flat 4x (0.0015 * 4 = 0.006). store.beingTended (set by
+// jobs.js's Tending job tick, read-then-cleared here every tick -- see the doc comment at its use
+// below) is the single signal this file needs; it doesn't need to know jobs.js's JobState values.
+const TEND_RECOVERY_RATE = 0.006;
+// Infirmary bonus (rooms.js RoomRole.Medical, PA full prefab/object catalog): a tended citizen
+// recovers faster while inside a validated Medical room (a Medical zone + at least 1 Medical Bed,
+// see rooms.js's classifyRoomRole) -- RimWorld's real hospital-bed medical-tend-quality bonus is
+// the closest real analog, mirrored here as a flat 2x on top of the active-tend rate (only
+// stacks with an actual tender present; an untended Downed citizen gets no bonus from merely
+// lying in the room, matching "Medical" being about treatment quality, not passive rest).
+const MEDICAL_ROOM_TEND_MULT = 2;
 
 // Exported so weather.js can scale its extra Cold/Heatwave decay proportionally to these base
 // rates rather than hardcoding a second copy of the numbers.
@@ -2348,6 +2923,22 @@ const HYDRATION_BURST_REFILL = 0.2; // per tick while on/adjacent to a watered t
 // hunger/rest/social, rather than a separate raw additive term -- see that function's doc
 // comment for why an earlier raw-additive version of this destabilized a fresh colony badly.
 
+// ---------------------------------------------------------------- exercise (PA's Exercise need)
+// Real Prison Architect data (needs.txt): gym equipment refills Exercise in a fast burst while
+// actively used -- Treadmill/TyreApparatus at the high end (-3.0/tick), PullUpBars/PushUpStones/
+// GymMat at the low end (-0.3 to -1.5/tick) -- on top of a slow ambient per-tick drain, the same
+// two-speed shape this codebase already uses for every other need (a slow *_DECAY drain here vs.
+// jobs.js's REFILL_RATE fast active-use refill). Consolidated into ONE new buildable for v1 (the
+// Fitness Station, siege.js Structure kind 'fitness_station') standing in for PA's whole ~10-object
+// gym-equipment catalog, matching the same real-object-consolidation precedent every other
+// buildable in this codebase already follows. No trait multiplier applied here (deliberately
+// matching HYDRATION_DECAY just above -- the most recent need added, and also unmultiplied), and
+// the decay rate itself is pinned to the same order of magnitude as HUNGER_DECAY/REST_DECAY per
+// the "don't over-tune, match existing needs' proportions" brief rather than being independently
+// tuned against PA's raw per-use numbers, which don't translate directly onto this project's
+// per-tick decay model anyway.
+const EXERCISE_DECAY = 0.00045; // same order of magnitude as HUNGER_DECAY/REST_DECAY/HYDRATION_DECAY
+
 // ---------------------------------------------------------------- hunger spiral (malnutrition)
 // RimWorld's real malnutrition ramps hungerRateFactorOffset 0.5 -> 0.6 across its severity stages
 // (a mild compounding ramp, not a cliff) once a pawn has been starving for a while. Mirrored here
@@ -2367,6 +2958,11 @@ const HUNGER_SPIRAL_MAX_MULT = 1.2; // RimWorld's 0.5->0.6 is a 20% relative inc
 const MOOD_EVENT_STACK_LIMITS = {
   witnessedDeath: 3,
   finishedBuild: 2,
+  // Community Gathering (programs.js's ProgramKind.CommunityGathering, RimWorld Ideology's real
+  // Party/Festival Thought): a one-time completion event, same low stack cap as finishedBuild --
+  // a citizen shouldn't be able to carry more than a couple live "just had a gathering" (or "that
+  // gathering was a letdown") thoughts at once.
+  communityGathering: 2,
 };
 const DEFAULT_MOOD_EVENT_STACK_LIMIT = 3;
 
@@ -2460,23 +3056,60 @@ class CitizenStore {
     this.y = new Float32Array(capacity);
     this.targetX = new Float32Array(capacity);
     this.targetY = new Float32Array(capacity);
+    // Age (RimWorld Biotech LifeStageDef-style, see traits.js's AGE_BANDS): ticks-since-spawn,
+    // NOT wall-clock/real age -- a starting citizen gets a randomized starting age (spawn() below)
+    // so the colony isn't uniformly "born at tick 0", then increments by 1 every tick for every
+    // alive citizen (tickNeedsAndMood below, same per-tick loop everything else in this file
+    // already walks) regardless of downed/on-break state -- aging is passive and doesn't pause for
+    // an incapacitated citizen, same convention as DOWNED_RECOVERY_RATE's passive recovery above.
+    this.age = new Float32Array(capacity);
     this.hunger = new Float32Array(capacity).fill(1);
     this.rest = new Float32Array(capacity).fill(1);
     this.social = new Float32Array(capacity).fill(1);
     this.hydration = new Float32Array(capacity).fill(1); // PA-style Hydration need, see HYDRATION_DECAY above
+    this.exercise = new Float32Array(capacity).fill(1); // PA-style Exercise need, see EXERCISE_DECAY above
     this.mood = new Float32Array(capacity).fill(1);
     this.health = new Float32Array(capacity).fill(1);
+    // Vest armor (siege.js's CITIZEN_VEST_ARMOR_RATING/resolveCitizenArmorRoll, economy.js
+    // BUILD_COST.vest) -- 1 once a citizen has been equipped via world.buyVest, 0 (Uint8Array
+    // zero-init) otherwise. Read by siege.js's tickAttackerVsCitizens every contact-damage tick;
+    // read here rather than a Set so it's a plain SoA field like every other per-citizen combat
+    // stat in this store (health, skillCombat, ...).
+    this.hasVest = new Uint8Array(capacity);
     this.flags = new Uint8Array(capacity);
     this.alive = new Uint8Array(capacity);
     this._hungerSpiralTicks = new Float32Array(capacity); // ticks spent near-zero hunger, see HUNGER_SPIRAL_*
+    // Sickness (sickness.js -- real RimWorld Flu numbers, rescaled): 0 = healthy, >0 = currently
+    // sick. _sickOffset staggers the per-citizen onset-roll/mood-refresh check the same way
+    // rats.js's Rat._offset staggers each rat's periodic-action roll, so SICKNESS_CHECK_INTERVAL
+    // citizens don't all roll on the exact same tick. Hardcoded modulus (50) rather than importing
+    // sickness.js's SICKNESS_CHECK_INTERVAL constant here -- citizens.js loads before sickness.js
+    // in build.py's ORDER and sickness.js already imports addMoodEvent from this file, so importing
+    // back would be circular; keep the two values in sync by hand if either ever changes.
+    this.sickSeverity = new Float32Array(capacity);
+    this._sickOffset = new Uint16Array(capacity);
     this.moodEvents = new Array(capacity).fill(null); // index -> array of {magnitude, startTick, durationTicks, stackKey}, see addMoodEvent
     this.breakSeverity = new Uint8Array(capacity); // index into BREAK_TIERS, set when a break triggers
     this._breakTicksRemaining = new Float32Array(capacity); // MTB-style: break runs its own course instead of clearing on mood alone
     this.jobState = new Uint8Array(capacity); // JobState from jobs.js
     this.skillCombat = new Float32Array(capacity);
     this.skillConstruction = new Float32Array(capacity);
+    // Citizen Rank / Prestige (ranks.js -- RimWorld Royalty-style seniority ladder, condensed
+    // non-carceral). Index into ranks.js's RANKS array, 0 = 'Settler' (starting rank, no bonus).
+    // A plain Uint8Array like breakSeverity above -- 7 tiers fits comfortably, no need for a
+    // wider type.
+    this.citizenRank = new Uint8Array(capacity);
     this._staffCooldown = new Float32Array(capacity); // used by siege.js tickStaffCombat
     this._jobRef = {}; // used by jobs.js: index -> blueprint/resource-node object currently targeted
+    // First-aid tending (jobs.js's JobState.SeekingTend/Tending, see TEND_RECOVERY_RATE above).
+    // tendClaimedBy: -1 = no tender assigned, else the tender's stable id (idOf(i), NOT an index
+    // -- same "id, not index" precedent as blueprint.claimedBy elsewhere) currently walking to or
+    // actively tending this Downed citizen. Prevents two citizens converging on the same patient,
+    // same role findNearestBlueprint's claimedBy plays for construction. beingTended: a plain
+    // per-tick flag (0/1), set by jobs.js's Tending handler and read-then-cleared by
+    // tickNeedsAndMood below every tick -- see that function's doc comment for the exact ordering.
+    this.tendClaimedBy = new Int32Array(capacity).fill(-1);
+    this.beingTended = new Uint8Array(capacity);
     this.trait = new Array(capacity).fill(null);
     this.backstory = new Array(capacity).fill(null); // see backstories.js -- childhood/adult flavor pair + skill nudge
     this.passionCombat = new Uint8Array(capacity); // Passion tier (backstories.js), biases skillCombat gain rate
@@ -2490,7 +3123,8 @@ class CitizenStore {
     // Idle branch runs its original fixed-order ladder for them, completely untouched. Only once
     // a citizen has been customized (see main.js's Work Priorities panel) does hasWorkPriorities
     // flip to 1 and these four arrays start mattering: each cell is 0 (never do this job) or a
-    // 1-3 priority tier, lower number = higher priority (RimWorld's inverted-number convention).
+    // 1-4 priority tier, lower number = higher priority (RimWorld's inverted-number convention --
+    // matches RimWorld's real Work-tab granularity of Off/1/2/3/4, not a coarser tier scheme).
     this.hasWorkPriorities = new Uint8Array(capacity);
     this.workPriorityConstruction = new Uint8Array(capacity); // JobState SeekingBuild/Building
     this.workPriorityProcessing = new Uint8Array(capacity); // JobState SeekingWorkshop/Processing
@@ -2510,6 +3144,45 @@ class CitizenStore {
     this.programSessionsDone = new Uint8Array(capacity);
     this.programAttendTicks = new Float32Array(capacity);
 
+    // Draft/undraft order state (draft.js -- RimWorld-style manual control, see CitizenFlags.
+    // Drafted above). Kept as its own small set of arrays, same SoA precedent as everything else
+    // in this store, rather than a non-typed-array object per citizen -- there's exactly one
+    // active order per citizen at a time, so this is cheap and matches jobState's own shape.
+    // orderKind: 0 = none (drafted but idle, "stand and hold"), 1 = Move, 2 = Attack.
+    this.orderKind = new Uint8Array(capacity);
+    this.orderTargetX = new Float32Array(capacity);
+    this.orderTargetY = new Float32Array(capacity);
+    // Index into world.attackers (AttackerStore, siege.js) for an Attack order -- NOT a stable
+    // id (AttackerStore has no id field, see draft.js's header comment for why this is an
+    // accepted, documented simplification), -1 means "no attack order".
+    this.orderAttackIndex = new Int32Array(capacity).fill(-1);
+
+    // Force Job pending state (forcejob.js -- RimWorld-style "Prioritize", see that file's header
+    // comment for the full design). forcedJobKind[i] is a ForceJobKind string ('blueprint'/'node'/
+    // 'room'/'workshop') or null; _forcedJobRef (a plain object map, index -> target object, same
+    // non-typed-array precedent as _jobRef above) holds the actual blueprint/node/room/station
+    // reference. Deliberately separate from jobState/_jobRef (the ACTIVE job) and from
+    // orderKind/orderTargetX/Y (draft.js's very different always-on manual-control orders) -- this
+    // is a one-shot future instruction consumed once by jobs.js's tickJobs Idle branch, then
+    // cleared, whether or not the claim actually succeeds.
+    this.forcedJobKind = new Array(capacity).fill(null);
+    this._forcedJobRef = {};
+
+    // Per-citizen Schedule override (schedule.js's ScheduleOverride) -- RimWorld Schedule-tab
+    // style. 0 (Uint8Array zero-init) = ScheduleOverride.None = no override, the colony-wide
+    // schedule.js cycle applies exactly as before this feature existed. Only a citizen the player
+    // has explicitly set an override for (see main.js's inspector control) ever reads as nonzero.
+    this.scheduleOverride = new Uint8Array(capacity);
+
+    // Per-citizen Allowed Area restriction (RimWorld Restrict-tab style). null (the Array default
+    // below) = unrestricted, identical to every citizen's behavior before this feature existed.
+    // Once the player paints an area for a citizen (main.js's "Restrict Area" tool, reusing
+    // zones.js's per-cell paint UX pattern -- see input.js), this becomes a Uint8Array(width*height)
+    // bitmask (1 = allowed cell) lazily allocated by paintAllowedAreaCell below. One mask per
+    // citizen, not a shared grid -- these are expected to be painted for at most a handful of
+    // citizens at once, not the whole colony, so the per-citizen memory cost is trivial.
+    this.allowedAreaMask = new Array(capacity).fill(null);
+
     this._nextId = 1;
   }
 
@@ -2521,11 +3194,19 @@ class CitizenStore {
     this.name[i] = name;
     this.x[i] = x; this.y[i] = y;
     this.targetX[i] = x; this.targetY[i] = y;
-    this.hunger[i] = 1; this.rest[i] = 1; this.social[i] = 1; this.hydration[i] = 1;
+    // Randomized starting age: 2000-24000 ticks, spanning most of the Young band (see
+    // traits.js's AGE_BANDS -- Young/Veteran cutoff is 20000) with some overlap into Veteran, so a
+    // freshly-spawned colony already reads as a mixed-age population rather than everyone being
+    // "born" at tick 0 together.
+    this.age[i] = 2000 + rng() * 22000;
+    this.hunger[i] = 1; this.rest[i] = 1; this.social[i] = 1; this.hydration[i] = 1; this.exercise[i] = 1;
     this.mood[i] = 1; this.health[i] = 1;
     this.flags[i] = CitizenFlags.None;
+    this.hasVest[i] = 0;
     this.alive[i] = 1;
     this._hungerSpiralTicks[i] = 0;
+    this.sickSeverity[i] = 0;
+    this._sickOffset[i] = Math.floor(rng() * 50); // keep '50' in sync with sickness.js's SICKNESS_CHECK_INTERVAL
     this.moodEvents[i] = [];
     this.breakSeverity[i] = 0;
     this._breakTicksRemaining[i] = 0;
@@ -2534,6 +3215,7 @@ class CitizenStore {
     this.backstory[i] = backstory;
     this.skillCombat[i] = backstory.skillCombatStart ?? 0;
     this.skillConstruction[i] = backstory.skillConstructionStart ?? 0;
+    this.citizenRank[i] = 0; // ranks.js RANKS[0] 'Settler' -- everyone starts here
     const passions = randomPassions(rng, backstory);
     this.passionCombat[i] = passions.combat;
     this.passionConstruction[i] = passions.construction;
@@ -2551,6 +3233,15 @@ class CitizenStore {
     this.programSite[i] = null;
     this.programSessionsDone[i] = 0;
     this.programAttendTicks[i] = 0;
+    this.orderKind[i] = 0;
+    this.orderTargetX[i] = x; this.orderTargetY[i] = y;
+    this.orderAttackIndex[i] = -1;
+    this.forcedJobKind[i] = null;
+    this._forcedJobRef[i] = null;
+    this.scheduleOverride[i] = 0;
+    this.allowedAreaMask[i] = null;
+    this.tendClaimedBy[i] = -1;
+    this.beingTended[i] = 0;
     return i;
   }
 
@@ -2562,29 +3253,105 @@ class CitizenStore {
     return (this.flags[i] & CitizenFlags.Downed) !== 0;
   }
 
+  isSickAt(i) {
+    return this.sickSeverity[i] > 0;
+  }
+
   isOnBreakAt(i) {
     return (this.flags[i] & CitizenFlags.OnBreak) !== 0;
+  }
+
+  isDraftedAt(i) {
+    return (this.flags[i] & CitizenFlags.Drafted) !== 0;
+  }
+
+  // Vest armor (see hasVest field above / siege.js's resolveCitizenArmorRoll).
+  isVestedAt(i) {
+    return this.hasVest[i] === 1;
+  }
+
+  // Force Job pending (forcejob.js) -- true from the moment forceJob() marks a target until
+  // jobs.js's tickJobs Idle branch consumes it (claim success or failure), same "cheap glance
+  // check" convention as isDraftedAt/isOnBreakAt above. Used by render.js for the pending-order
+  // indicator and by forcejob.js itself.
+  hasForcedJobAt(i) {
+    return !!this.forcedJobKind[i];
+  }
+
+  // ---- Allowed Area restriction (RimWorld Restrict-tab style) -----------------------------
+  hasAllowedArea(i) {
+    return this.allowedAreaMask[i] != null;
+  }
+
+  // True if (x, y) is inside citizen i's painted area, or if they have no restriction at all
+  // (the default -- every citizen behaves exactly as before this feature existed unless the
+  // player has explicitly painted an area for them). gridWidth is passed in rather than stored
+  // on the store itself since CitizenStore has no grid reference of its own (same reason
+  // paintAllowedAreaCell below takes width/height as params instead of caching them).
+  isInAllowedArea(i, gridWidth, x, y) {
+    const mask = this.allowedAreaMask[i];
+    if (!mask) return true;
+    const gx = Math.floor(x), gy = Math.floor(y);
+    if (gx < 0 || gy < 0) return false;
+    const idx = gy * gridWidth + gx;
+    if (idx < 0 || idx >= mask.length) return false;
+    return mask[idx] === 1;
+  }
+
+  // Paints (allowed=true) or erases (allowed=false) one grid cell of citizen i's restriction
+  // mask, lazily allocating it on first paint -- mirrors zones.js's ZoneGrid.set, the existing
+  // player-painted-area UX pattern this feature reuses (see input.js's 'restrict-area' tool).
+  paintAllowedAreaCell(i, gridWidth, gridHeight, x, y, allowed) {
+    if (x < 0 || y < 0 || x >= gridWidth || y >= gridHeight) return;
+    if (!this.allowedAreaMask[i]) this.allowedAreaMask[i] = new Uint8Array(gridWidth * gridHeight);
+    this.allowedAreaMask[i][y * gridWidth + x] = allowed ? 1 : 0;
+  }
+
+  // Clears citizen i's restriction entirely -- back to "can go anywhere", the default.
+  clearAllowedArea(i) {
+    this.allowedAreaMask[i] = null;
   }
 }
 
 // ---------------------------------------------------------------- per-citizen unrest score
 // Prison Architect dynamicRep.txt's per-prisoner riot-proneness, reframed genre-neutral: built
-// additively from state this codebase already tracks per-citizen, mirroring the real file's
-// factor list (Is Riled Up +20, Is Violent +15 (trait-based), Fighting Nearby +10, offset by
-// Good Room Quality +40, Per Program Passed +5). Deliberately a SEPARATE per-citizen readout from
-// world.js's colony-wide unrestLevel blend -- one citizen can carry a high score here well before
-// the aggregate ever crosses a tier threshold, which is the point: it gives the player (and
-// future features) something concrete to target instead of the pure aggregate. Surfaced in the
-// inspector panel, see main.js.
+// additively from state this codebase already tracks per-citizen, calibrated directly against
+// the REAL boilingpoint_settings.txt weight table (see SESSION_HANDOFF.md's round-9 research
+// notes): Good Room Quality -40 (the single biggest protective factor in the real data), Armed
+// Guard Presence +30, Is Riled Up +20, Has Withdrawal +40, Fighting Nearby +10, Is Violent +15,
+// Per Program Passed -5. Deliberately a SEPARATE per-citizen readout from world.js's colony-wide
+// unrestLevel blend -- one citizen can carry a high score here well before the aggregate ever
+// crosses a tier threshold, which is the point: it gives the player (and future features)
+// something concrete to target instead of the pure aggregate. Surfaced in the inspector panel,
+// see main.js.
+//
+// Calibration pass (this session): the four factors this codebase already modeled (Riled Up,
+// Violent, Fighting Nearby, Room Quality) already matched the real magnitudes/signs exactly --
+// no change needed there. But TWO real factors were entirely unmodeled (an effective weight of 0
+// vs. the real 30 and 40), which is the actual mis-proportion worth fixing: Armed Guard Presence
+// and Has Withdrawal. Both are now wired to real per-citizen state this codebase already tracks
+// rather than adding new fields:
+//   - Armed Guard Presence: an on-duty Guard/Sniper (security.js's StaffRoster) within sight --
+//     reskinned as "an armed protector working nearby is itself a tension factor", the same
+//     ambient-provocation reading the real data gives it, not a judgment about the guard.
+//   - Has Withdrawal: this codebase's closest analog to PA's drug-withdrawal craving is the
+//     hunger spiral (citizens.js's _hungerSpiralTicks -- sustained near-zero hunger, a real
+//     "crashing need" state already tracked per-citizen, see HUNGER_SPIRAL_* above).
 const UNREST_SCORE_RILED_UP = 20;       // currently OnBreak -- PA's "Is Riled Up" is also a live state, not a trait
 const UNREST_SCORE_VOLATILE_TRAIT = 15; // Neurotic (raised break threshold, see traits.js) is this codebase's
                                          // closest trait-based analog to PA's Violent trait -- both mean "flips
                                          // into distress more easily than average"
 const UNREST_SCORE_FIGHT_NEARBY = 10;   // relationships.js's fight-event log, see hasFightNearby
-const UNREST_SCORE_ROOM_QUALITY_OFFSET = 40; // scaled by the citizen's current room quality (rooms.js, 0..1)
+const UNREST_SCORE_ROOM_QUALITY_OFFSET = 40; // scaled by the citizen's current room quality (rooms.js, 0..1) --
+                                              // real PA's single LARGEST factor, matched 1:1 here already
 const UNREST_SCORE_PROGRAM_OFFSET = 5;       // per skill track advanced past Novice -- this codebase's closest
                                               // analog to PA's "Per Program Passed" (see main.js's SKILL_LEVELS)
 const SKILL_INVESTED_THRESHOLD = 0.15;       // matches main.js's SKILL_LEVELS Novice cutoff exactly
+const UNREST_SCORE_ARMED_PRESENCE = 30; // real PA "Armed Guard Presence" weight, previously unmodeled (was 0)
+const ARMED_PRESENCE_RADIUS = 4;        // grid cells -- same order of magnitude as this file's other
+                                         // nearby-state checks (e.g. relationships.js's hasFightNearby radius)
+const UNREST_SCORE_WITHDRAWAL = 40; // real PA "Has Withdrawal" weight, previously unmodeled (was 0) -- tied
+                                     // for the single largest magnitude in the real table, alongside room quality
 
 function computeCitizenUnrestScore(store, i, world) {
   if (!store.isAliveAt(i)) return 0;
@@ -2595,6 +3362,21 @@ function computeCitizenUnrestScore(store, i, world) {
   if ((trait?.breakThresholdOffset ?? 0) > 0) score += UNREST_SCORE_VOLATILE_TRAIT;
   if (world?.relationships?.hasFightNearby?.(store.x[i], store.y[i], world.currentTick)) {
     score += UNREST_SCORE_FIGHT_NEARBY;
+  }
+  if ((store._hungerSpiralTicks?.[i] ?? 0) > 0) score += UNREST_SCORE_WITHDRAWAL;
+
+  if (world?.roster?.isStaff && world?.isStaffAt) {
+    for (let j = 0; j < store.count; j++) {
+      if (j === i || !store.isAliveAt(j)) continue;
+      if (!world.isStaffAt(j)) continue;
+      const kind = world.roster.kindOf(store.id[j]);
+      if (kind !== StaffRoleKind.Guard && kind !== StaffRoleKind.Sniper) continue;
+      const dx = store.x[i] - store.x[j], dy = store.y[i] - store.y[j];
+      if (dx * dx + dy * dy <= ARMED_PRESENCE_RADIUS * ARMED_PRESENCE_RADIUS) {
+        score += UNREST_SCORE_ARMED_PRESENCE;
+        break;
+      }
+    }
   }
 
   if (world?.rooms && world?.grid) {
@@ -2619,12 +3401,31 @@ function tickNeedsAndMood(store, isStaffAt, rng, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
 
+    store.age[i]++;
+
     if (store.isDownedAt(i)) {
       // Incapacitated: needs don't spiral further while down, but health slowly recovers
-      // (RimWorld-style "downed, not dead" reprieve -- no dedicated first-aid job yet, so
-      // recovery is passive rather than requiring a medic to tend them).
-      store.health[i] = Math.min(1, store.health[i] + DOWNED_RECOVERY_RATE);
-      if (store.health[i] >= DOWNED_RECOVER_THRESHOLD) store.flags[i] &= ~CitizenFlags.Downed;
+      // (RimWorld-style "downed, not dead" reprieve). store.beingTended[i] is set every tick by
+      // jobs.js's Tending job handler (world.js calls tickNeedsAndMood *before* tickJobs each
+      // tick, so this reads the PREVIOUS tick's tend status -- a harmless one-tick lag on a
+      // per-tick-continuous system). Read it, then immediately clear it: if a tender is still
+      // actively tending this same tick, jobs.js's Tending handler re-sets it before the next
+      // tickNeedsAndMood call; if the tender left, it stays cleared and recovery falls straight
+      // back to the passive rate on the very next tick.
+      const tended = store.beingTended[i] === 1;
+      store.beingTended[i] = 0;
+      let recoveryRate = tended ? TEND_RECOVERY_RATE : DOWNED_RECOVERY_RATE;
+      // Infirmary bonus (see MEDICAL_ROOM_TEND_MULT doc comment above) -- only applies to an
+      // actively-tended citizen who happens to be lying inside a validated Medical room.
+      if (tended && world?.rooms && world?.grid) {
+        const room = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+        if (room && room.role === RoomRole.Medical && room.roleValid) recoveryRate *= MEDICAL_ROOM_TEND_MULT;
+      }
+      store.health[i] = Math.min(1, store.health[i] + recoveryRate);
+      if (store.health[i] >= DOWNED_RECOVER_THRESHOLD) {
+        store.flags[i] &= ~CitizenFlags.Downed;
+        if (store.tendClaimedBy[i] !== -1) store.tendClaimedBy[i] = -1; // recovered out from under an active tender
+      }
       continue;
     }
 
@@ -2656,18 +3457,25 @@ function tickNeedsAndMood(store, isStaffAt, rng, world) {
       store.hydration[i] = Math.max(0, store.hydration[i] - HYDRATION_DECAY);
     }
 
-    // Hydration folds into the SAME eased need-average as hunger/rest/social, not a separate raw
-    // additive nudge -- an earlier version of this added a small unbounded (hydration-0.5)*weight
-    // term directly to mood every tick, same shape as the room-quality term below, but unlike a
-    // room (which simply has no term at all until the citizen stands inside one) an un-plumbed
-    // colony has EVERY citizen's hydration pinned at 0 for the entire early game, so that raw term
-    // permanently dragged mood toward 0 tick after tick with nothing to counteract it -- caught in
-    // this pass's soak test (population collapsed from 24 to 3 by tick ~9000 on a fresh Calm
-    // colony with no pump built yet). Folding it into avgNeed instead means it only pulls mood
-    // toward a lower *target* (proportionally diluted 1-in-4 rather than 1-in-3), which the
-    // existing 0.05 easing already keeps gentle -- same bounded behavior as hunger/rest/social,
-    // no separate uncapped accumulation path.
-    const avgNeed = (store.hunger[i] + store.rest[i] + store.social[i] + store.hydration[i]) / 4;
+    // Exercise (see EXERCISE_DECAY doc comment above): pure ambient drain here, no passive burst
+    // path like Hydration's isWateredAt check -- refill is entirely job-driven (jobs.js's
+    // SeekingExercise/Exercising states, which walk a citizen to the new Fitness Station buildable
+    // and refill at the same REFILL_RATE every other zone-seeking need uses), matching the
+    // Hunger/Rest/Social precedent more closely than Hydration's passive-plumbing one.
+    store.exercise[i] = Math.max(0, store.exercise[i] - EXERCISE_DECAY);
+
+    // Hydration/Exercise fold into the SAME eased need-average as hunger/rest/social, not a
+    // separate raw additive nudge -- an earlier version of this added a small unbounded
+    // (hydration-0.5)*weight term directly to mood every tick, same shape as the room-quality term
+    // below, but unlike a room (which simply has no term at all until the citizen stands inside
+    // one) an un-plumbed colony has EVERY citizen's hydration pinned at 0 for the entire early
+    // game, so that raw term permanently dragged mood toward 0 tick after tick with nothing to
+    // counteract it -- caught in that pass's soak test (population collapsed from 24 to 3 by tick
+    // ~9000 on a fresh Calm colony with no pump built yet). Folding it into avgNeed instead means
+    // it only pulls mood toward a lower *target* (proportionally diluted 1-in-5 now that Exercise
+    // is included, was 1-in-4), which the existing 0.05 easing already keeps gentle -- same bounded
+    // behavior as hunger/rest/social, no separate uncapped accumulation path.
+    const avgNeed = (store.hunger[i] + store.rest[i] + store.social[i] + store.hydration[i] + store.exercise[i]) / 5;
 
     // Stacking mood events (RimWorld "Thought" mechanic, see addMoodEvent above): each live
     // event's magnitude decays linearly to zero over its duration. RimWorld recomputes mood fresh
@@ -2729,6 +3537,7 @@ function tickNeedsAndMood(store, isStaffAt, rng, world) {
       store.flags[i] |= CitizenFlags.OnBreak;
       store.breakSeverity[i] = tierIdx;
       store._breakTicksRemaining[i] = BREAK_TIERS[tierIdx].durationTicks;
+      world?.onCitizenOnBreak?.();
     }
   }
 }
@@ -2743,7 +3552,13 @@ function tickNeedsAndMood(store, isStaffAt, rng, world) {
 // Heatwave's real penalty only applies to citizens who are actually outdoors right now, which a
 // single flat scalar for the whole population can't express -- this callback lets world.js supply
 // that per-citizen variance without citizens.js needing to know anything about weather.js itself.
-function tickWander(store, grid, rng, speed = 0.04, skipIf = null, perCitizenMult = null) {
+// isAllowedAt: optional (i, x, y) -> bool (jobs.js/world.js's per-citizen Allowed Area check,
+// see citizens.js's isInAllowedArea). Omitted for every pre-existing call site, byte-for-byte
+// the old behavior. This is the one autonomous-movement path jobs.js's per-target filtering
+// doesn't cover on its own (an idle citizen with no job just wanders to a random nearby point,
+// not through any of jobs.js's finder functions) -- caught during this feature's own soak-test
+// verification, see world.js's call site for the real closure passed in.
+function tickWander(store, grid, rng, speed = 0.04, skipIf = null, perCitizenMult = null, isAllowedAt = null) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
     if (store.isDownedAt(i)) continue;
@@ -2753,12 +3568,18 @@ function tickWander(store, grid, rng, speed = 0.04, skipIf = null, perCitizenMul
     const dy = store.targetY[i] - store.y[i];
     const dist = Math.hypot(dx, dy);
     if (dist < 0.15) {
-      let tx, ty, tries = 0;
+      let tx, ty, tries = 0, valid = false;
       do {
         tx = Math.max(1, Math.min(grid.width - 2, store.x[i] + (rng() - 0.5) * 10));
         ty = Math.max(1, Math.min(grid.height - 2, store.y[i] + (rng() - 0.5) * 10));
         tries++;
-      } while (grid.isBlocked(tx | 0, ty | 0) && tries < 8);
+        valid = !grid.isBlocked(tx | 0, ty | 0) && (!isAllowedAt || isAllowedAt(i, tx, ty));
+      } while (!valid && tries < 8);
+      // Ran out of retries without ever landing a point inside a restricted citizen's area (a
+      // small painted area, or bad luck) -- hold in place rather than wandering out. Matches
+      // every other autonomous-target filter in this feature: "no valid option found" means
+      // "don't move", never "fall back to ignoring the restriction".
+      if (!valid && isAllowedAt) { tx = store.x[i]; ty = store.y[i]; }
       store.targetX[i] = tx;
       store.targetY[i] = ty;
     } else {
@@ -2767,6 +3588,156 @@ function tickWander(store, grid, rng, speed = 0.04, skipIf = null, perCitizenMul
       store.y[i] += (dy / dist) * effSpeed;
     }
   }
+}
+
+
+// ---- coverageplans.js ----
+// Coverage Plans -- pre-purchased "insurance bundle" economy sink, ported directly from real
+// Prison Architect data (see coverage_plans.txt / SESSION_HANDOFF.md's research note): a plan is
+// bought once for an upfront scrap cost, permanently discounts a themed set of related
+// buildables while active, AND unlocks an on-demand emergency call-in action that only fires once
+// a real in-game threshold is crossed. PA's real examples are a cold-snap plan (discounted
+// cold-related training/buildables + an emergency road-maintenance call-in) and a first-aid plan
+// (discounted first-aid buildables + an emergency responder call-in gated at Injuries>=10). Both
+// ported as genuinely economy-neutral bundles -- reskinned non-carceral per this project's
+// explicit rule (SESSION_HANDOFF.md: never frame anything as a prison), no gameplay concept here
+// is carceral in mechanism (a themed discount bundle + a threshold-gated one-shot response is
+// exactly as applicable to a civil settlement as to anything else).
+//
+// Two plans, each mapped onto a real, already-existing crisis this project's own systems produce:
+//  - Fire Response Plan: discounts the flammable furniture kinds fire.js already tracks (bed/
+//    table/door -- the actual things that can catch fire, sold as a fireproofing-retrofit
+//    discount, not an arbitrary bundle) and unlocks a firefighter call-in usable once 2+
+//    structures are actually on fire (fire.js's `onFire` flag), extinguishing all of them at once.
+//  - Medical Response Plan: discounts the Infirmary's real furniture requirement (rooms.js's
+//    RoomRole.Medical / medical_bed) and unlocks an emergency-responder call-in usable once 3+
+//    citizens are actually Downed (citizens.js's CitizenFlags.Downed), instantly stabilizing all
+//    of them -- mirrors PA's real Injuries>=10 threshold pattern at a scale that fits this
+//    project's much smaller colony sizes.
+
+const CoveragePlanKind = Object.freeze({
+  FireResponse: 'fire_response',
+  MedicalResponse: 'medical_response',
+});
+
+const COVERAGE_PLAN_DEFS = Object.freeze({
+  [CoveragePlanKind.FireResponse]: Object.freeze({
+    label: 'Fire Response Plan',
+    // One-time purchase, priced between a turret (25) and a Tesla Coil (40) -- a real
+    // colony-wide utility bundle, not a single structure.
+    cost: 25,
+    discounts: Object.freeze({ bed: 0.5, table: 0.5, door: 0.5 }), // fire.js's FLAMMABLE_KINDS, 50% off
+    callIn: Object.freeze({
+      label: 'Call In Firefighters',
+      description: 'Instantly extinguishes every structure currently on fire.',
+      threshold: 2, // active (onFire, undestroyed) structures required
+      thresholdNoun: 'structures on fire',
+    }),
+  }),
+  [CoveragePlanKind.MedicalResponse]: Object.freeze({
+    label: 'Medical Response Plan',
+    cost: 25,
+    discounts: Object.freeze({ medical_bed: 0.5 }), // rooms.js's Infirmary furniture requirement, 50% off
+    callIn: Object.freeze({
+      label: 'Call In Emergency Responders',
+      description: 'Instantly stabilizes every citizen currently downed.',
+      threshold: 3, // downed citizens required -- PA's real Injuries>=10 pattern, scaled to this project's colony sizes
+      thresholdNoun: 'citizens downed',
+    }),
+  }),
+});
+
+const COVERAGE_PLAN_ORDER = [CoveragePlanKind.FireResponse, CoveragePlanKind.MedicalResponse];
+
+/** True once `kind` has been purchased this run (persists via world.js's serialize/deserialize). */
+function isPlanActive(world, kind) {
+  return !!(world.coveragePlans && world.coveragePlans.has(kind));
+}
+
+/** One-time purchase. Returns false (no-op, no spend) if already owned, unknown kind, or the
+ *  colony can't afford it -- same canAfford-before-spend contract as economy.js's spend(). */
+function purchaseCoveragePlan(world, kind) {
+  const def = COVERAGE_PLAN_DEFS[kind];
+  if (!def) return false;
+  if (!world.coveragePlans) world.coveragePlans = new Set();
+  if (world.coveragePlans.has(kind)) return false;
+  if (world.scrap < def.cost) return false;
+  world.scrap -= def.cost;
+  if (world.finance) world.finance.buildSpend += def.cost; // budget-report ledger, same convention as economy.js's spend()
+  world.coveragePlans.add(kind);
+  return true;
+}
+
+/** Combined discount multiplier for `buildKind` across every currently-active plan -- this is the
+ *  actual point-of-sale hook, called from economy.js's buildCost() the same way trader-voucher
+ *  discounts already are. Multiplicative in case a buildable ever appears in two plans at once
+ *  (none currently overlap); returns 1 (no discount) if no active plan touches this buildable. */
+function coveragePlanDiscountMult(world, buildKind) {
+  if (!world.coveragePlans || world.coveragePlans.size === 0) return 1;
+  let mult = 1;
+  for (const kind of world.coveragePlans) {
+    const pct = COVERAGE_PLAN_DEFS[kind]?.discounts?.[buildKind];
+    if (pct) mult *= (1 - pct);
+  }
+  return mult;
+}
+
+function activeFireCount(world) {
+  let n = 0;
+  for (const s of world.structures) if (s.onFire && !s.destroyed) n++;
+  return n;
+}
+
+function downedCitizenCount(world) {
+  let n = 0;
+  for (let i = 0; i < world.citizens.count; i++) {
+    if (world.citizens.isAliveAt(i) && world.citizens.isDownedAt(i)) n++;
+  }
+  return n;
+}
+
+/** Current live count feeding `kind`'s call-in threshold, regardless of purchase state -- so a UI
+ *  panel can show real "N / threshold" progress even before the plan is bought. */
+function callInLiveCount(world, kind) {
+  if (kind === CoveragePlanKind.FireResponse) return activeFireCount(world);
+  if (kind === CoveragePlanKind.MedicalResponse) return downedCitizenCount(world);
+  return 0;
+}
+
+/** True only when the plan is both purchased AND its real threshold is currently crossed -- the
+ *  actual gate the task asked to verify (unavailable below threshold, available above it). */
+function isCallInReady(world, kind) {
+  const def = COVERAGE_PLAN_DEFS[kind];
+  if (!def || !isPlanActive(world, kind)) return false;
+  return callInLiveCount(world, kind) >= def.callIn.threshold;
+}
+
+/** Fires `kind`'s one-time call-in bonus. Re-checks isCallInReady itself (not just trusting the
+ *  caller's last-rendered UI state) so it can never silently no-op-succeed from a stale button.
+ *  Returns true iff it actually applied an effect. */
+function triggerCallIn(world, kind) {
+  if (!isCallInReady(world, kind)) return false;
+
+  if (kind === CoveragePlanKind.FireResponse) {
+    for (const s of world.structures) {
+      if (s.onFire) { s.onFire = false; s.fireTicks = 0; }
+    }
+    return true;
+  }
+
+  if (kind === CoveragePlanKind.MedicalResponse) {
+    const store = world.citizens;
+    for (let i = 0; i < store.count; i++) {
+      if (!store.isAliveAt(i) || !store.isDownedAt(i)) continue;
+      store.health[i] = Math.max(store.health[i], DOWNED_RECOVER_THRESHOLD);
+      store.flags[i] &= ~CitizenFlags.Downed;
+      if (store.beingTended) store.beingTended[i] = 0;
+      if (store.tendClaimedBy && store.tendClaimedBy[i] !== -1) store.tendClaimedBy[i] = -1;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 
@@ -2787,6 +3758,12 @@ function tickWander(store, grid, rng, speed = 0.04, skipIf = null, perCitizenMul
 // corruption section near the bottom of this file. research.js precedes security.js in
 // build.py's ORDER, so this named import is safe in the flat-concatenated bundle too.
 
+// Staff training-program dispatch (see tickStaffTraining near the bottom of this file):
+// programs.js comes AFTER security.js in build.py's ORDER, same "later-ordered module, function-
+// body-only usage" shape as the JobState import from jobs.js right above (jobs.js itself imports
+// FROM security.js already -- TAME_CHANCE_PER_TICK etc -- so this is the exact same already-
+// proven-safe circular-import pattern, not a new risk).
+
 const AlertLevel = Object.freeze({
   Calm: 0,
   Alert: 1,
@@ -2804,16 +3781,47 @@ const WeaponTier = Object.freeze({
   Sidearm: 'Sidearm',
   Rifle: 'Rifle',
   Heavy: 'Heavy',
+  // Non-lethal takedown weapon (real PA anchor: StunBaton, cost 350, 40% stun chance, 1hr
+  // cooldown -- see WEAPON_TIERS.StunBaton below for how the 1hr converts onto this project's
+  // tick rate). Deliberately NOT part of the Sidearm->Rifle->Heavy armory-stock progression
+  // (WEAPON_TIER_ORDER below) -- it's a distinct tactical choice a player opts a specific
+  // guard/sniper into via the existing manual-override system, not a strictly-better tier that
+  // more Armories should auto-issue.
+  StunBaton: 'StunBaton',
 });
 
+// penetrationBonus (0-100, same units as siege.js's ARMOR_RATING/armorPenetration scale): added
+// on top of GUARD_PENETRATION(15)/SNIPER_PENETRATION(40) in siege.js's tickStaffCombat (and
+// draft.js's drafted-combat mirror of the same pipeline) -- a higher tier doesn't just hit
+// harder, it also punches through more armor, same real-anchor shape as RimWorld's own gun
+// spread (armorPenetrationBase runs roughly 0 -> 0.35 across its tiers, i.e. 0-35 on this
+// project's 0-100 scale). Sidearm stays +0 so an unarmoried roster's penetration is byte-for-byte
+// unchanged from before this field existed.
 const WEAPON_TIERS = Object.freeze({
-  [WeaponTier.Sidearm]: Object.freeze({ label: 'Sidearm', damageMult: 1,    rangeMult: 1,    cooldownMult: 1 }),
-  [WeaponTier.Rifle]:   Object.freeze({ label: 'Rifle',   damageMult: 1.6,  rangeMult: 1.15, cooldownMult: 1.15 }),
-  [WeaponTier.Heavy]:   Object.freeze({ label: 'Heavy',   damageMult: 2.4,  rangeMult: 0.8,  cooldownMult: 1.75 }),
+  [WeaponTier.Sidearm]: Object.freeze({ label: 'Sidearm', damageMult: 1,    rangeMult: 1,    cooldownMult: 1,    penetrationBonus: 0 }),
+  [WeaponTier.Rifle]:   Object.freeze({ label: 'Rifle',   damageMult: 1.6,  rangeMult: 1.15, cooldownMult: 1.15, penetrationBonus: 10 }),
+  [WeaponTier.Heavy]:   Object.freeze({ label: 'Heavy',   damageMult: 2.4,  rangeMult: 0.8,  cooldownMult: 1.75, penetrationBonus: 20 }),
+  // Stun Baton (see WeaponTier.StunBaton above). damageMult: 0 -- siege.js's tickStaffCombat
+  // special-cases `nonLethal` tiers to skip damageAttacker entirely and roll stunChance instead,
+  // so damageMult never actually multiplies anything, but it's kept at the honest value (this
+  // weapon deals zero lethal damage) rather than left undefined. rangeMult 0.85: a baton is a
+  // shorter-reach tool than a firearm, real tradeoff for the utility it buys. cooldownMult 25:
+  // GUARD_COOLDOWN(4 ticks) * 25 = 100 ticks = exactly 1 in-game hour at this project's
+  // GAME_DAY_TICKS(2400)/24 = 100-ticks-per-hour rate -- the real "1hr cooldown" anchor, not an
+  // arbitrary tuning pick. stunDurationTicks(30) is deliberately much shorter than the cooldown
+  // (a "brief" incapacitation per the task brief, not a lockdown) -- picked in the same
+  // neighborhood as siege.js's HELD_CITIZEN_BEAT_PAUSE_TICKS(30), this project's existing
+  // "~3-second dramatic beat" unit.
+  [WeaponTier.StunBaton]: Object.freeze({
+    label: 'Stun Baton', damageMult: 0, rangeMult: 0.85, cooldownMult: 25, penetrationBonus: 0,
+    nonLethal: true, stunChance: 0.4, stunDurationTicks: 30,
+  }),
 });
 
 // Weakest -> strongest; how far up this list a guard/sniper can be issued is gated by how many
-// Armories the settlement has actually built (see tickArmoryIssuance).
+// Armories the settlement has actually built (see tickArmoryIssuance). StunBaton is deliberately
+// NOT in this progression list -- see its doc comment on WeaponTier above -- tickArmoryIssuance
+// special-cases it separately, gated on "at least one Armory exists" rather than a stock rung.
 const WEAPON_TIER_ORDER = [WeaponTier.Sidearm, WeaponTier.Rifle, WeaponTier.Heavy];
 
 // Patrol routes + staff fatigue (FEATURE_RESEARCH.md's Prison Architect section): `post` may be
@@ -2832,6 +3840,13 @@ class StaffRoster {
     this._roleById = new Map(); // citizenId -> StaffRoleKind
     this._postById = new Map(); // citizenId -> array of 1-4 {x, y} waypoints (1 = static post)
     this._weaponById = new Map(); // citizenId -> WeaponTier, see tickArmoryIssuance
+    // Manual weapon-tier override (RimWorld-style "player picks this one's gear" ask): citizenId
+    // -> WeaponTier the PLAYER explicitly requested, distinct from `_weaponById` above (which is
+    // the tier they're actually currently carrying -- may lag behind the request, see
+    // tickArmoryIssuance's queueing behavior). A citizen with no entry here is untouched and keeps
+    // the fully-automatic armory-count-based assignment exactly as before -- this map only ever
+    // holds staff the player has actually clicked an override for.
+    this._manualWeaponById = new Map();
     this._patrolIndexById = new Map(); // citizenId -> index of the waypoint currently being walked to
     this._patrolPauseById = new Map(); // citizenId -> ticks spent paused at the current waypoint
     this._offDutyById = new Set(); // citizenId currently clocked off, recovering hunger/rest like a normal citizen
@@ -2842,6 +3857,14 @@ class StaffRoster {
     this._corruptEligible = new Set();      // citizenId flagged "crooked" -- capable of going actively corrupt
     this._corruptActiveUntil = new Map();   // citizenId -> tick an active bribe period ends
     this._corruptDiscovered = new Set();    // citizenId caught mid-bribe, awaiting the player firing them
+
+    // Staff training-program track (programs.js's ProgramKind.GuardResponseTraining, see
+    // tickStaffTraining near the bottom of this file): citizenId -> true once this staffer has
+    // graduated the full course. Distinct from citizens.js's store.programSessionsDone (which
+    // resets to 0 after every completed course, citizen-facing programs included) -- this is a
+    // one-way "already trained" flag tickStaffTraining reads so it stops re-dispatching a
+    // graduate, matching the task's "cheap item" scope: one course, not a repeatable grind.
+    this._trainingGraduated = new Set();
   }
 
   // post may be a single {x, y} (backward compat / old save shape) or an array of 2-4 {x, y}
@@ -2903,29 +3926,92 @@ class StaffRoster {
     this._weaponById.set(citizenId, tier);
   }
 
+  // ---- manual weapon-tier override (see tickArmoryIssuance) ----
+  // Player-requested tier, or null if this staffer has never been manually touched (still fully
+  // automatic).
+  manualWeaponOf(citizenId) {
+    return this._manualWeaponById.get(citizenId) ?? null;
+  }
+
+  setManualWeapon(citizenId, tier) {
+    this._manualWeaponById.set(citizenId, tier);
+  }
+
+  // Hands a staffer back to fully-automatic armory-count-based assignment.
+  clearManualWeapon(citizenId) {
+    this._manualWeaponById.delete(citizenId);
+  }
+
+  // True while a manual override is set but the armory doesn't yet stock enough of that tier to
+  // actually issue it -- tickArmoryIssuance falls back to the best tier it CAN issue in the
+  // meantime and keeps re-checking every tick, so this flips false on its own once enough
+  // Armories are built (or the player lowers the request).
+  isManualWeaponPending(citizenId) {
+    const requested = this._manualWeaponById.get(citizenId);
+    if (requested == null) return false;
+    return this._weaponById.get(citizenId) !== requested;
+  }
+
   // ---- corrupt/bribable staff (see tickStaffCorruption below) ----
   isCorruptEligible(citizenId) { return this._corruptEligible.has(citizenId); }
   isCorruptActive(citizenId) { return this._corruptActiveUntil.has(citizenId); }
   isCorruptDiscovered(citizenId) { return this._corruptDiscovered.has(citizenId); }
+
+  // ---- staff training (see tickStaffTraining below) ----
+  isTrainingGraduated(citizenId) { return this._trainingGraduated.has(citizenId); }
+  markTrainingGraduated(citizenId) { this._trainingGraduated.add(citizenId); }
 }
 
-// Armory issuance (scoped version per FEATURE_RESEARCH.md: no per-citizen pick-a-tier UI --
-// simply, once assigned to Guard/Sniper AND an Armory exists, they're equipped with whatever
-// tier the settlement's Armory count supports). Every built (not destroyed/under-construction)
-// Armory unlocks one more rung of WEAPON_TIER_ORDER, so a second Armory is a real strategic
-// payoff, not just a cosmetic duplicate. Runs every tick (world.js) so a freshly-assigned guard
-// or a freshly-completed Armory both propagate immediately, and a destroyed Armory correctly
-// downgrades everyone back rather than leaving them permanently over-equipped.
+// Armory issuance. Originally (per FEATURE_RESEARCH.md) scoped as no per-citizen pick-a-tier UI
+// -- every Guard/Sniper on the roster with no manual override just gets whatever tier the
+// settlement's Armory count supports. That automatic behavior is UNCHANGED below for anyone the
+// player hasn't touched. RimWorld-style manual override (later ask): a staffer with a
+// `roster._manualWeaponById` entry gets THAT tier instead, but never above what current armory
+// stock actually supports -- there's no per-unit weapon inventory in this game (an Armory unlocks
+// a whole rung of WEAPON_TIER_ORDER for everyone, not N individual weapons), so "stock" for a
+// tier here means "the armory count has unlocked that rung", the same real gate the automatic
+// path already uses. If the player requests a tier stock doesn't support yet, this QUEUES the
+// request (documented choice, not a straight reject): the staffer keeps the best tier stock
+// currently allows and is auto-promoted to the requested tier the moment enough Armories exist,
+// with zero further action needed -- natural to implement since this function already re-runs
+// every tick anyway, and it means the player's choice is never silently lost or requires them to
+// remember to re-click it later. Every built (not destroyed/under-construction) Armory unlocks
+// one more rung of WEAPON_TIER_ORDER, so a second Armory is a real strategic payoff, not just a
+// cosmetic duplicate. Runs every tick (world.js) so a freshly-assigned guard, a freshly-completed
+// Armory, or a fresh manual override all propagate immediately, and a destroyed Armory correctly
+// downgrades everyone (auto AND manual-but-now-unsupported) back rather than leaving them
+// permanently over-equipped -- no weapon is ever "created out of thin air" beyond what the
+// armory count actually backs.
 function tickArmoryIssuance(roster, structures) {
   let armoryCount = 0;
   for (const s of structures) {
     if (s.kind === 'armory' && !s.destroyed && !s.underConstruction) armoryCount++;
   }
-  const tierIndex = Math.min(WEAPON_TIER_ORDER.length - 1, armoryCount);
-  const tier = WEAPON_TIER_ORDER[tierIndex];
+  const stockTierIndex = Math.min(WEAPON_TIER_ORDER.length - 1, armoryCount);
+  const autoTier = WEAPON_TIER_ORDER[stockTierIndex];
   for (const [citizenId, kind] of roster._roleById.entries()) {
     if (kind !== StaffRoleKind.Guard && kind !== StaffRoleKind.Sniper) continue;
-    roster.equip(citizenId, tier);
+    const manualTier = roster.manualWeaponOf(citizenId);
+    if (manualTier == null) {
+      roster.equip(citizenId, autoTier);
+      continue;
+    }
+    // Stun Baton (WeaponTier.StunBaton): outside WEAPON_TIER_ORDER's stock-rung progression, so
+    // it can't be looked up by index below. Real gate: needs at least one Armory built at all
+    // (the same "an Armory is what lets you issue anything beyond bare hands" premise the
+    // automatic path uses), independent of how many Armories -- a second/third Armory unlocks
+    // Rifle/Heavy stock, not "more" non-lethal capability. Falls back to the best tier the armory
+    // DOES support (same queueing behavior as an unsupported Rifle/Heavy request) if no Armory
+    // exists yet.
+    if (manualTier === WeaponTier.StunBaton) {
+      roster.equip(citizenId, armoryCount >= 1 ? WeaponTier.StunBaton : autoTier);
+      continue;
+    }
+    const manualIndex = WEAPON_TIER_ORDER.indexOf(manualTier);
+    // Clamp to whatever the armory actually stocks right now -- issues the requested tier
+    // immediately if stock covers it, otherwise the best available tier while the request queues.
+    const grantedIndex = Math.min(manualIndex, stockTierIndex);
+    roster.equip(citizenId, WEAPON_TIER_ORDER[grantedIndex]);
   }
 }
 
@@ -2938,6 +4024,10 @@ function tickStaffDuty(store, roster, idOf, speed = 0.05) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
     if (store.isDownedAt(i)) continue; // downed staff can't hold their post
+    // Drafted (draft.js): a drafted guard/sniper/monitor leaves their post entirely and follows
+    // direct player orders instead -- same "pulled out of autonomy, even mid-task" rule jobs.js
+    // applies, just for the staff-duty side of things.
+    if (store.isDraftedAt(i)) continue;
     const id = idOf(i);
     if (!roster.isStaff(id)) continue;
     if (roster.isOffDuty(id)) continue; // clocked off recovering a need -- see tickStaffOffDuty
@@ -3004,6 +4094,9 @@ function tickStaffOffDuty(store, roster, idOf, zones) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
     if (store.isDownedAt(i)) continue;
+    // Drafted (draft.js): no needs-seeking at all while drafted, same rule as jobs.js's tickJobs
+    // -- a drafted citizen doesn't get auto-dispatched off duty for food/rest either.
+    if (store.isDraftedAt(i)) continue;
     const id = idOf(i);
     if (!roster.isStaff(id)) continue;
 
@@ -3041,6 +4134,35 @@ const DOG_RANGE = 2.5; const DOG_DAMAGE = 0.08; const DOG_COOLDOWN = 3; const DO
 // TURRET/GUARD/TESLA/TRAP/SNIPER_PENETRATION constants) -- a dog is cheap/fast, not armor-piercing.
 const DOG_PENETRATION = 10;
 
+// Upgraded K9 tier (real PA anchor: RobotDog -- ~0.75x health / 1.3x endurance / 1.3x range /
+// 1.2x speed vs a normal dog). This project's dogs have no damage-taking system of their own --
+// nothing in the sim currently attacks a K9 unit, tickDogs below is bite-out only -- so
+// K9_UPGRADE_HEALTH_MULT is stored as real per-dog data (dog.healthMult, readable/verifiable via
+// window.__debug) rather than gated behind a whole new dog-combat system this scope doesn't call
+// for; endurance/range/speed are all real, immediately measurable effects on tickDogs below (a
+// shorter cooldown between bites, a longer detection range, a faster follow speed).
+const K9_UPGRADE_HEALTH_MULT = 0.75;
+const K9_UPGRADE_ENDURANCE_MULT = 1.3; // cuts effective cooldown -- more bites per minute
+const K9_UPGRADE_RANGE_MULT = 1.3;
+const K9_UPGRADE_SPEED_MULT = 1.2;
+// Priced with trap(15)/turret(25) (economy.js BUILD_COST) -- upgrading a dog you already own is a
+// real strategic investment in an existing K9, not a cheap add-on.
+const K9_UPGRADE_SCRAP_COST = 25;
+
+// Upgrades an already-tamed dog (any entry in world.dogs) in place. Mirrors world.buyVest's
+// per-unit-purchase shape (spend scrap, flip a flag) rather than economy.js's structure-purchase
+// path, since a dog isn't a Structure. Returns { ok: true } or { ok: false, reason }.
+function upgradeDog(world, dog) {
+  if (!dog) return { ok: false, reason: 'invalid' };
+  if (dog.upgraded) return { ok: false, reason: 'already' };
+  if (world.scrap < K9_UPGRADE_SCRAP_COST) return { ok: false, reason: 'cost' };
+  world.scrap -= K9_UPGRADE_SCRAP_COST;
+  if (world.finance) world.finance.buildSpend += K9_UPGRADE_SCRAP_COST;
+  dog.upgraded = true;
+  dog.healthMult = K9_UPGRADE_HEALTH_MULT;
+  return { ok: true };
+}
+
 // K9 units: each dog follows its handler loosely and bites the nearest attacker in range,
 // fast and cheap per-hit compared to a guard's sidearm -- matches the GDD's non-carceral
 // civil-protection-force framing ("guards/snipers/K9/CCTV", never inmates).
@@ -3051,23 +4173,29 @@ function tickDogs(dogs, citizens, roster, attackers, onScrap, rng = Math.random)
     const ownerIdx = findCitizenIndexById(citizens, dog.ownerId);
     if (ownerIdx < 0 || !citizens.isAliveAt(ownerIdx)) continue;
 
+    // Upgraded K9 stats (see K9_UPGRADE_* above) -- unupgraded dogs get exactly the old constants
+    // unchanged, byte-for-byte, so this is backward compatible with every existing save/dog.
+    const range = dog.upgraded ? DOG_RANGE * K9_UPGRADE_RANGE_MULT : DOG_RANGE;
+    const speed = dog.upgraded ? DOG_SPEED * K9_UPGRADE_SPEED_MULT : DOG_SPEED;
+    const cooldownMax = dog.upgraded ? Math.max(1, Math.round(DOG_COOLDOWN / K9_UPGRADE_ENDURANCE_MULT)) : DOG_COOLDOWN;
+
     const dx = citizens.x[ownerIdx] - dog.x;
     const dy = citizens.y[ownerIdx] - dog.y;
     const dist = Math.hypot(dx, dy);
     if (dist > 1.2) {
-      dog.x += (dx / dist) * DOG_SPEED;
-      dog.y += (dy / dist) * DOG_SPEED;
+      dog.x += (dx / dist) * speed;
+      dog.y += (dy / dist) * speed;
     }
 
     if (dog.cooldown > 0) { dog.cooldown--; continue; }
-    let bestI = -1, bestDist = DOG_RANGE;
+    let bestI = -1, bestDist = range;
     for (let i = 0; i < attackers.count; i++) {
       if (!attackers.isAliveAt(i)) continue;
       const d = Math.hypot(attackers.x[i] - dog.x, attackers.y[i] - dog.y);
       if (d < bestDist) { bestDist = d; bestI = i; }
     }
     if (bestI >= 0) {
-      dog.cooldown = DOG_COOLDOWN;
+      dog.cooldown = cooldownMax;
       if (damageAttacker(attackers, bestI, DOG_DAMAGE, DamageType.Kinetic, DOG_PENETRATION, rng)) onScrap?.(4);
     }
   }
@@ -3311,6 +4439,7 @@ function fireCorruptStaff(world, citizenId) {
   roster._roleById.delete(citizenId);
   roster._postById.delete(citizenId);
   roster._weaponById.delete(citizenId);
+  roster._manualWeaponById.delete(citizenId);
   roster._patrolIndexById.delete(citizenId);
   roster._patrolPauseById.delete(citizenId);
   roster._offDutyById.delete(citizenId);
@@ -3358,10 +4487,75 @@ function forceActivateCorruption(world, citizenId) {
   return true;
 }
 
+// --- Staff training-program track (Prison Architect reform_programs_dlc.txt's real staff-facing
+// training tracks, distinct from programs.js's citizen-facing programs -- see
+// ProgramKind.GuardResponseTraining there) ---
+//
+// Staff never reach jobs.js's Idle branch while on duty (world.js's isStaffOnDutyAt gates
+// staffOnDuty(i) true for anyone not off-duty, and tickJobs's very first per-citizen check
+// `if (staffOnDuty(i)) continue;` skips them entirely) -- so unlike a citizen, who opportunistically
+// finds a joinable program site through jobs.js's own findJoinableSite call, an eligible
+// Guard/Sniper/Monitor needs to be dispatched here directly, same shape as dispatchStaffToNeed's
+// food/rest trip above. The trick: temporarily flip roster.setOffDuty(id, true) -- that's the one
+// existing signal that makes world.js's isStaffOnDutyAt go false, which is what actually lets
+// tickJobs process this citizen's SeekingProgram/Attending state machine (programs.js's exact same
+// machinery every citizen-facing program already uses). tickStaffOffDuty's own existing "back to
+// Idle -> resume on-duty if no food/rest need" branch (see above) then hands them back to
+// tickStaffDuty's patrol automatically once jobs.js resets jobState to Idle -- no new "resume"
+// code needed here, that plumbing already existed for the food/rest case and is generic.
+const TRAINABLE_ROLES = new Set([StaffRoleKind.Guard, StaffRoleKind.Sniper, StaffRoleKind.Monitor]);
+
+function findTrainingSite(world) {
+  if (!world.programSites) return null;
+  for (const site of world.programSites) {
+    if (site.kind !== 'guard_response_training') continue;
+    if (site.attendeeIds.length >= PROGRAM_DEFS[site.kind].places) continue;
+    if (!isSiteStaffed(world, site)) continue;
+    return site;
+  }
+  return null;
+}
+
+// Called once per world tick (world.js), after tickStaffOffDuty and before tickJobs -- same
+// ordering reasoning as tickStaffOffDuty's own doc comment (the dispatch needs to land before
+// tickJobs runs the same tick so the fresh SeekingProgram state actually gets walked). Cheap:
+// bails instantly if no training site exists yet (the common case for most of a run), and even
+// once one does, only iterates the (small) roster-eligible population, same cost shape as
+// tickArmoryIssuance above.
+function tickStaffTraining(world, idOf) {
+  if (!world.programSites || world.programSites.length === 0) return;
+  const roster = world.roster;
+  const store = world.citizens;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i) || store.isDownedAt(i) || store.isDraftedAt(i)) continue;
+    const id = idOf(i);
+    if (!roster.isStaff(id)) continue;
+    if (!TRAINABLE_ROLES.has(roster.kindOf(id))) continue;
+    if (roster.isTrainingGraduated(id)) continue; // one course is enough, see the StaffRoster doc comment
+    if (roster.isOffDuty(id)) continue; // busy with a genuine food/rest trip, don't interrupt it
+    // On-duty staff's jobState is otherwise untouched by tickStaffDuty (it only moves store.x/y),
+    // so Idle here means "currently just holding post/patrol, free to dispatch" -- same bar
+    // dispatchStaffToNeed implicitly relies on for the food/rest case via the off-duty flag.
+    if (store.jobState[i] !== JobState.Idle) continue;
+
+    const site = findTrainingSite(world);
+    if (!site) continue;
+
+    const target = roomPostFor(site.room, world.grid);
+    store.jobState[i] = JobState.SeekingProgram;
+    store.targetX[i] = target.x; store.targetY[i] = target.y;
+    store._jobRef[i] = site;
+    store.programSite[i] = site;
+    roster.setOffDuty(id, true);
+  }
+}
+
 
 // ---- siege.js ----
 // Ported/condensed from SD.Siege (wave spawner, AttackerStore, turret/fence/trap placement +
 // combat resolution, scrap rewards).
+
+
 
 
 
@@ -3496,24 +4690,69 @@ function resetArmorStats() {
   armorStats.deflect = 0; armorStats.half = 0; armorStats.full = 0;
 }
 
+// Core 3-outcome roll, factored out so both the attacker-side roll (resolveArmorRoll, below) and
+// the citizen-side roll (resolveCitizenArmorRoll, see the Vest section further down) share the
+// exact same mechanism -- effectiveArmor = armor - penetration, one roll 0-100, three thresholds.
+// Returns { outcome, fracMult } where fracMult is the fraction of `amount` that gets through
+// (0 / 0.5 / 1) BEFORE any archetype-specific vulnerability multiplier is applied -- callers that
+// have no such multiplier (citizens) can use fracMult directly.
+function rollArmorMitigation(armor, penetration, rng) {
+  const effectiveArmor = armor - penetration;
+  const roll = rng() * 100;
+  if (effectiveArmor > 0 && roll < effectiveArmor / 2) return { outcome: 'deflect', fracMult: 0 };
+  if (effectiveArmor > 0 && roll <= effectiveArmor) return { outcome: 'half', fracMult: 0.5 };
+  return { outcome: 'full', fracMult: 1 };
+}
+
 // The actual 3-outcome roll described at the top of this section. `amount` is the pre-roll base
 // damage; returns { dealt, outcome } where outcome is 'deflect' | 'half' | 'full' (reported as
 // DamageType.Blunt-flavored when 'half', per the comment above). Tallies armorStats as a side
 // effect so soak tests can confirm a real mix of outcomes rather than one branch always firing.
 function resolveArmorRoll(kind, damageType, amount, penetration, rng = Math.random) {
   const armor = armorRatingOf(kind, damageType);
-  const effectiveArmor = armor - penetration;
-  const roll = rng() * 100;
-  let outcome, dealt;
-  if (effectiveArmor > 0 && roll < effectiveArmor / 2) {
-    outcome = 'deflect'; dealt = 0;
-  } else if (effectiveArmor > 0 && roll <= effectiveArmor) {
-    outcome = 'half'; dealt = amount * 0.5;
-  } else {
-    outcome = 'full'; dealt = amount * vulnerabilityMult(kind, damageType);
-  }
+  const { outcome, fracMult } = rollArmorMitigation(armor, penetration, rng);
+  const dealt = outcome === 'full' ? amount * vulnerabilityMult(kind, damageType) : amount * fracMult;
   armorStats[outcome]++;
   return { dealt, outcome };
+}
+
+// ---------------------------------------------------------------- citizen armor (Vest)
+// Citizens previously had ZERO defense stat of any kind -- an attacker's contact damage was a
+// flat subtraction with no armor roll at all, unlike every combat-side hit in this file. This is
+// the fix: a purchasable/craftable Vest (economy.js BUILD_COST.vest, equipped per-citizen via
+// world.buyVest -- see world.js/citizens.js's hasVest flag) grants a flat armor-rating bonus on
+// this SAME ARMOR_RATING 0-100 scale, run through the exact rollArmorMitigation core above rather
+// than a parallel mechanic. Real RimWorld anchor: Flak Vest's real ArmorRating_Sharp is ~1.00 on
+// RimWorld's own 0-2ish scale (its "100%" reference point) -- CITIZEN_VEST_ARMOR_RATING (25) is
+// picked proportionally on this project's scale, in the same neighborhood as a Grunt's own 20
+// Kinetic armor rating (ARMOR_RATING[Grunt][Kinetic] above), i.e. "roughly as protected as the
+// weakest raider archetype's own plate", a reasonable civilian-grade vest.
+// ATTACKER_CONTACT_PENETRATION is 0 (not one of the gun-tier PENETRATION consts below) -- a raider's
+// bare-handed/melee contact hit is not a piercing weapon, so it carries no penetration of its own;
+// an unvested citizen (armorRating 0) still rolls effectiveArmor = 0-0 = 0, which the roll's own
+// `effectiveArmor > 0` guard sends straight to 'full' every time -- i.e. byte-for-byte the same
+// flat-damage behavior citizens had before this feature existed. Only a vested citizen (armorRating
+// 25) ever sees a nonzero effectiveArmor and a real chance to deflect/halve a hit.
+const CITIZEN_VEST_ARMOR_RATING = 25;
+const ATTACKER_CONTACT_PENETRATION = 0;
+
+// Same live-tally pattern as armorStats above, kept as its own counter (not merged into armorStats)
+// so a soak test can read "how did the citizen population's hits resolve" independently of the
+// attacker-facing combat tally.
+const citizenArmorStats = { deflect: 0, half: 0, full: 0 };
+function resetCitizenArmorStats() {
+  citizenArmorStats.deflect = 0; citizenArmorStats.half = 0; citizenArmorStats.full = 0;
+}
+
+// `amount` is the pre-roll base damage a citizen is about to take; `armorRating` is 0 for an
+// unvested citizen, CITIZEN_VEST_ARMOR_RATING for a vested one (see tickAttackerVsCitizens below,
+// which reads citizens.hasVest to decide which). Returns { dealt, outcome }, same shape as
+// resolveArmorRoll -- citizens have no per-archetype vulnerability table, so 'full' is always a
+// flat 1x rather than resolveArmorRoll's vulnerabilityMult lookup.
+function resolveCitizenArmorRoll(armorRating, penetration, amount, rng = Math.random) {
+  const { outcome, fracMult } = rollArmorMitigation(armorRating, penetration, rng);
+  citizenArmorStats[outcome]++;
+  return { dealt: amount * fracMult, outcome };
 }
 
 class AttackerStore {
@@ -3525,6 +4764,11 @@ class AttackerStore {
     this.health = new Float32Array(capacity);
     this.alive = new Uint8Array(capacity);
     this.kind = new Uint8Array(capacity); // AttackerKind enum, same SoA style as the rest
+    // Non-lethal takedown (security.js's WeaponTier.StunBaton, see applyStun/tickAttackers/
+    // tickAttackerVsCitizens below): ticks remaining incapacitated. 0 = not stunned, the default
+    // for every existing spawn call site (tests/console pokes) -- byte-for-byte the old
+    // behavior for anyone who never gets stunned.
+    this.stunTicksRemaining = new Uint16Array(capacity);
   }
 
   // `health` is the wave-scaled base health; the archetype's own healthMult is applied here so
@@ -3536,6 +4780,7 @@ class AttackerStore {
       for (let i = 0; i < this.count; i++) {
         if (!this.alive[i]) {
           this.x[i] = x; this.y[i] = y; this.health[i] = hp; this.alive[i] = 1; this.kind[i] = kind;
+          this.stunTicksRemaining[i] = 0; // a recycled dead slot must not inherit a stale stun
           return i;
         }
       }
@@ -3543,6 +4788,7 @@ class AttackerStore {
     }
     const i = this.count++;
     this.x[i] = x; this.y[i] = y; this.health[i] = hp; this.alive[i] = 1; this.kind[i] = kind;
+    this.stunTicksRemaining[i] = 0;
     return i;
   }
 
@@ -3550,9 +4796,23 @@ class AttackerStore {
     return this.alive[i] === 1;
   }
 
+  isStunnedAt(i) {
+    return this.stunTicksRemaining[i] > 0;
+  }
+
   archetypeAt(i) {
     return archetypeOf(this.kind[i]);
   }
+}
+
+// Single choke point for applying a non-lethal incapacitation (security.js's WeaponTier.StunBaton
+// is the only current caller, via siege.js's own tickStaffCombat below) -- takes the max of any
+// existing stun rather than stacking additively, so a second baton hit on an already-stunned
+// target refreshes the duration instead of letting stuns compound into an effectively-permanent
+// lock.
+function applyStun(attackers, i, ticks) {
+  if (!attackers.isAliveAt(i)) return;
+  attackers.stunTicksRemaining[i] = Math.max(attackers.stunTicksRemaining[i], ticks);
 }
 
 // Weather-scaled hit roll (RimWorld WeatherDefs/Weathers.xml accuracy modifiers, see weather.js's
@@ -3881,8 +5141,16 @@ const FENCE_CONTACT_RANGE = 0.7;
 const FENCE_DAMAGE_PER_TICK = 0.015;
 const TRAP_TRIGGER_RANGE = 0.5;
 const TRAP_DAMAGE = 3; // instant-kill-ish burst
-const GUARD_RANGE = 3.5; const GUARD_DAMAGE = 0.05; const GUARD_COOLDOWN = 4;
-const SNIPER_RANGE = 9; const SNIPER_DAMAGE = 0.12; const SNIPER_COOLDOWN = 10;
+// Exported: draft.js reuses these directly as the baseline "unarmed civilian" attack-order stats
+// for any drafted citizen who isn't already a Guard/Sniper (see that file's tickDraftedCombat) --
+// same conventional-sidearm ballpark as an unarmored guard, rather than inventing a second set of
+// combat numbers for manually-controlled citizens.
+const GUARD_RANGE = 3.5;
+const GUARD_DAMAGE = 0.05;
+const GUARD_COOLDOWN = 4;
+const SNIPER_RANGE = 9;
+const SNIPER_DAMAGE = 0.12;
+const SNIPER_COOLDOWN = 10; // exported for draft.js, see GUARD_* comment above
 
 // Tesla coil (SEA:R): weaker per-hit than a plain turret but chains to every attacker in range
 // each activation -- a crowd-control pick over a single-target DPS pick, not a strict upgrade.
@@ -3897,8 +5165,8 @@ const TESLA_RANGE = 4.5; const TESLA_DAMAGE = 0.12; const TESLA_COOLDOWN_TICKS =
 const TURRET_PENETRATION = 20;
 const TESLA_PENETRATION = 30;
 const TRAP_PENETRATION = 35;
-const GUARD_PENETRATION = 15;
-const SNIPER_PENETRATION = 40;
+const GUARD_PENETRATION = 15; // exported for draft.js, see the GUARD_RANGE/DAMAGE/COOLDOWN comment above
+const SNIPER_PENETRATION = 40; // exported for draft.js, see GUARD_* comment above
 
 // Floodlight (SEA:R's "soft wall" -- an area-denial light that slows rather than blocks, so it
 // doesn't need its own health/destroy state like a fence does).
@@ -3940,7 +5208,7 @@ function tickNuclearHazard(structures, citizens) {
         citizens.alive[c] = 0;
         continue;
       }
-      const healthMult = citizens.trait[c]?.healthMult ?? 1;
+      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c);
       citizens.health[c] -= NUCLEAR_HAZARD_CITIZEN_DAMAGE / healthMult;
       if (citizens.health[c] <= 0) {
         citizens.health[c] = 0.05;
@@ -3978,6 +5246,11 @@ function nearestLivingCitizen(citizens, x, y) {
 function tickAttackers(attackers, structures, grid, centerX, centerY, citizens, onScrap, onKill, weatherSpeedMult = 1, rng = Math.random) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
+    // Non-lethal incapacitation (security.js's WeaponTier.StunBaton, see applyStun above): frozen
+    // in place for the duration -- no movement, no fence-chewing, no trap-triggering this tick.
+    // Ticks down here rather than a separate pass so a stunned attacker's clock only advances on
+    // ticks it would otherwise have acted, matching the "briefly incapacitated" framing.
+    if (attackers.stunTicksRemaining[i] > 0) { attackers.stunTicksRemaining[i]--; continue; }
 
     const arch = attackers.archetypeAt(i);
 
@@ -4066,6 +5339,8 @@ function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng = Math.
   }
 }
 
+// Exported so draft.js can reuse it for right-click "attack this target" detection (is there a
+// live attacker under the cursor?) instead of re-implementing the same nearest-in-range scan.
 function nearestAliveAttacker(attackers, x, y, maxRange) {
   let bestI = -1, bestDist = maxRange;
   for (let i = 0; i < attackers.count; i++) {
@@ -4100,6 +5375,9 @@ function nearestAliveAttacker(attackers, x, y, maxRange) {
 function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math.random, accuracyMult = 1, onContact = null) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
+    // Non-lethal incapacitation (see applyStun/tickAttackers above): a stunned attacker can't
+    // land a contact hit on anyone this tick either -- the whole point of the takedown.
+    if (attackers.stunTicksRemaining[i] > 0) continue;
     // Per-archetype reach: a Boss's contactRange is wide enough that it hits every citizen in a
     // small area each tick (this loop damages everyone in range), which is its cleave attack.
     const arch = attackers.archetypeAt(i);
@@ -4118,8 +5396,16 @@ function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math.random
         continue;
       }
 
-      const healthMult = citizens.trait[c]?.healthMult ?? 1;
-      citizens.health[c] -= (ATTACKER_CITIZEN_DAMAGE * arch.damageMult) / healthMult;
+      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c);
+      const baseDamage = (ATTACKER_CITIZEN_DAMAGE * arch.damageMult) / healthMult;
+      // Vest armor (see the "citizen armor (Vest)" section above) -- citizens.hasVest is a plain
+      // Uint8Array duck-typed off the passed-in store, same access pattern as citizens.trait just
+      // above, so this stays backward compatible with any older/test CitizenStore that predates
+      // the field (hasVest undefined -> `?.[c]` reads undefined -> falsy -> armorRating 0, exactly
+      // the old always-full-damage behavior).
+      const armorRating = citizens.hasVest?.[c] ? CITIZEN_VEST_ARMOR_RATING : 0;
+      const { dealt } = resolveCitizenArmorRoll(armorRating, ATTACKER_CONTACT_PENETRATION, baseDamage, rng);
+      citizens.health[c] -= dealt;
       if (citizens.health[c] <= 0) {
         citizens.health[c] = 0.05;
         citizens.flags[c] |= CitizenFlags.Downed;
@@ -4139,6 +5425,9 @@ function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKill, rng
   for (let i = 0; i < citizens.count; i++) {
     if (!citizens.isAliveAt(i)) continue;
     if (citizens.isDownedAt(i)) continue; // downed guards/snipers can't fight back
+    // Drafted (draft.js): a drafted guard/sniper fights whatever the player specifically ordered
+    // (draft.js's own tickDraftedCombat), not the nearest-target auto-engage below.
+    if (citizens.isDraftedAt(i)) continue;
     const kind = roster.kindOf(idOf(i));
     if (kind !== 'Guard' && kind !== 'Sniper') continue;
 
@@ -4154,13 +5443,29 @@ function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKill, rng
     // Guards carry conventional sidearms (Kinetic); snipers carry the long-range armor-piercing
     // rifle (Energy), so a sniper line is the personnel answer to Brutes/Bosses.
     const dtype = kind === 'Sniper' ? DamageType.Energy : DamageType.Kinetic;
-    const penetration = kind === 'Sniper' ? SNIPER_PENETRATION : GUARD_PENETRATION;
+    // Weapon-tier penetration bonus (security.js WEAPON_TIERS.penetrationBonus) stacks on top of
+    // the role's baseline -- Sidearm's +0 keeps this byte-for-byte identical to the pre-tier
+    // constant for anyone nobody's built an Armory for yet.
+    const penetration = (kind === 'Sniper' ? SNIPER_PENETRATION : GUARD_PENETRATION) + (tier.penetrationBonus || 0);
 
     const targetI = nearestAliveAttacker(attackers, citizens.x[i], citizens.y[i], range);
     if (targetI >= 0) {
       citizens._staffCooldown[i] = cooldown;
+      // Non-lethal (Stun Baton, security.js WEAPON_TIERS.StunBaton): skip damageAttacker
+      // entirely -- a real percentage chance (tier.stunChance) to incapacitate rather than a
+      // damage roll, distinct from every other tier's lethal outcome. Same weather-scaled hit
+      // roll gates whether the swing connects at all (a miss is a miss regardless of what the
+      // weapon does on a hit); the stunChance roll only happens once it does. No scrap/kill/skill
+      // reward -- there's no kill to reward, matching "distinct from the lethal tiers" rather
+      // than a strictly-better freebie.
+      if (tier.nonLethal) {
+        if (rollsHit(rng, accuracyMult) && attackers.isAliveAt(targetI) && rng() < tier.stunChance) {
+          applyStun(attackers, targetI, tier.stunDurationTicks);
+        }
+        continue;
+      }
       if (rollsHit(rng, accuracyMult) && damageAttacker(attackers, targetI, damage, dtype, penetration, rng)) {
-        citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]];
+        citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]] * ageBandFor(citizens.age[i]).skillGainMult;
         onScrap?.(SCRAP_PER_KILL);
         onKill?.();
       }
@@ -4294,7 +5599,7 @@ function tickHeldCitizenCrisis(world) {
   if (!responded) {
     // No timely response -- this beat escalates with a real injury (not just a scare), matching
     // "some beats end safely, some don't" rather than a single binary check deciding everything.
-    const healthMult = store.trait[idx]?.healthMult ?? 1;
+    const healthMult = (store.trait[idx]?.healthMult ?? 1) * ageBandFor(store.age[idx]).healthMult * rankHealthMultFor(store, idx);
     store.health[idx] = Math.max(0.05, store.health[idx] - HELD_CITIZEN_ESCALATION_INJURY / healthMult);
     if (store.health[idx] <= 0.05) store.flags[idx] |= CitizenFlags.Downed;
     const name = store.name[idx];
@@ -4542,6 +5847,126 @@ function isNight(timeOfDay) {
   return t < 0.25 || t >= 0.85;
 }
 
+// Per-citizen Schedule override (RimWorld Schedule-tab style, the stretch goal referenced in the
+// doc comment above -- now built). Lets the player pin one specific citizen to a fixed behavior
+// bias regardless of the colony-wide cycle, e.g. force a citizen toward Work priority through the
+// night, or toward Recreation/Sleep during the colony's normal workday. Values mirror
+// ScheduleBlock exactly, offset by +1 so 0 can mean "no override" -- citizens.js's
+// scheduleOverride field is a Uint8Array (zero-init), matching the same "0 means untouched"
+// convention hasWorkPriorities/workPriority* already established for the per-citizen Work
+// Priorities table.
+const ScheduleOverride = Object.freeze({
+  None: 0,
+  Sleep: ScheduleBlock.Sleep + 1,
+  Work: ScheduleBlock.Work + 1,
+  Recreation: ScheduleBlock.Recreation + 1,
+});
+
+const SCHEDULE_OVERRIDE_LABELS = {
+  [ScheduleOverride.None]: 'Colony schedule',
+  [ScheduleOverride.Sleep]: 'Sleep (forced)',
+  [ScheduleOverride.Work]: 'Work (forced)',
+  [ScheduleOverride.Recreation]: 'Recreation (forced)',
+};
+
+// Resolves the effective schedule block jobs.js should use for one citizen this tick: their own
+// override if the player has set one, otherwise the colony-wide block computed from
+// world.timeOfDay via getScheduleBlock above. jobs.js's tickJobs calls this once per citizen and
+// reuses the result everywhere it previously used the raw colony block (the Sleep-block
+// interrupt check, the Idle-branch threshold bias, and findJoinableSite's scheduleBlock param) --
+// so a citizen with no override (the default, every existing citizen/save) behaves byte-for-byte
+// as before this feature existed.
+function effectiveScheduleBlock(overrideValue, colonyBlock) {
+  if (overrideValue == null || overrideValue === ScheduleOverride.None) return colonyBlock;
+  return overrideValue - 1;
+}
+
+
+// ---- sickness.js ----
+// Sickness -- real RimWorld Flu disease-progression numbers, rescaled to this project. A mild,
+// self-limiting debuff (deliberately NOT a threat -- no organ-failure/body-part model exists in
+// this codebase to justify a death path, so severity is hard-capped well below anything lethal).
+// Staggered-per-entity-roll pattern reused verbatim from rats.js (see that file's Rat._offset):
+// citizens.js's CitizenStore carries a `_sickOffset` field so SICKNESS_CHECK_INTERVAL citizens
+// don't all roll on the exact same tick, and mood integration reuses citizens.js's addMoodEvent
+// (the same stacking/decaying "Thought" mechanic every other mood event in this project already
+// uses) rather than a parallel mood-blending mechanic.
+
+
+const SICKNESS_CHECK_INTERVAL = 50; // per-citizen onset-roll/mood-refresh cadence -- keep in sync
+                                            // with citizens.js's CitizenStore.spawn() '50' literal
+const SICKNESS_CHANCE = 0.0015;     // per check, per healthy citizen
+
+// Real Flu day-rates (RimWorld), rescaled to this project's DAY_NIGHT_CYCLE_TICKS. Kept exactly as
+// specified for traceability to the source data, but NOT applied as two simultaneous opposing
+// per-tick forces (verified analytically before shipping: WORSEN is fractionally larger than
+// RECOVER -- 0.2488 vs 0.2388/day -- so a flat per-tick sum of the two converges to a stable
+// equilibrium pinned at maxSeverity and never actually returns to 0, contradicting "self-resolves
+// in ~1-2 in-game days" no matter how the onset value is tuned: once clamped at the cap, WORSEN's
+// extra contribution is wasted by the clamp while RECOVER keeps subtracting in full, so recovery
+// only ever wins once a case is already pinned at the ceiling, and climbing there at a net +0.01
+// severity/day takes on the order of 45+ days from a small onset value, not 1-2).
+//
+// Instead: WORSEN sets the ONE-TIME onset jump (one day's worth of unchecked worsening, the real
+// SeverityPerDay figure, capped defensively at maxSeverity), and RECOVER governs the ongoing,
+// monotonic per-tick decline back to 0 -- this uses both real numbers verbatim and meaningfully,
+// avoids the equilibrium trap entirely (no two opposing forces ever fight over the same tick), and
+// lands almost exactly on the "~1-2 in-game days" target by construction: onset (0.2488) / RECOVER
+// (0.2388/day) = ~1.04 days to fully clear.
+const SICKNESS_WORSEN_PER_TICK = 0.2488 / DAY_NIGHT_CYCLE_TICKS;
+const SICKNESS_RECOVER_PER_TICK = 0.2388 / DAY_NIGHT_CYCLE_TICKS;
+
+// Never lethal by design -- no organ-failure/body-part-damage path exists in this codebase to
+// justify death from sickness, this is a debuff, not a threat. Hard-capped well below anything
+// that could plausibly read as dangerous.
+const SICKNESS_MAX_SEVERITY = 0.6;
+
+// jobs.js applies this alongside the existing needsThrottleMultFor multiplier chain (Building/
+// Harvesting/Processing rate calcs) -- see that file's call sites.
+const SICK_WORK_SPEED_MULT = 0.85;
+
+const SICK_MOOD_MAGNITUDE = -0.08;
+const SICK_MOOD_DURATION_TICKS = 2400; // one in-game day (schedule.js's DAY_NIGHT_CYCLE_TICKS) --
+                                        // refreshed every SICKNESS_CHECK_INTERVAL below so it never
+                                        // lapses mid-illness even though illness itself typically
+                                        // clears within ~1 day (see the progression comment above).
+
+function refreshSickMood(store, i, currentTick) {
+  addMoodEvent(store, i, currentTick, { magnitude: SICK_MOOD_MAGNITUDE, durationTicks: SICK_MOOD_DURATION_TICKS, stackKey: 'sick' });
+}
+
+/** Per-citizen work-speed multiplier while sick -- jobs.js multiplies this into the same rate
+ *  chain needsThrottleMultFor already feeds. Returns 1 (no penalty) if not currently sick. */
+function sickRateMultFor(store, i) {
+  return store.isSickAt(i) ? SICK_WORK_SPEED_MULT : 1;
+}
+
+/** Staggered onset roll for healthy citizens + continuous progression for sick ones. Call once
+ *  per tick from SimWorld.tick(). */
+function tickSickness(world) {
+  const store = world.citizens;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i)) continue;
+    if (store.isDownedAt(i)) continue; // incapacitated citizens don't roll for or progress illness
+
+    const onStaggerCheck = (world.currentTick + (store._sickOffset[i] || 0)) % SICKNESS_CHECK_INTERVAL === 0;
+
+    if (!store.isSickAt(i)) {
+      if (!onStaggerCheck) continue;
+      if (world.rng() < SICKNESS_CHANCE) {
+        store.sickSeverity[i] = Math.min(SICKNESS_MAX_SEVERITY, SICKNESS_WORSEN_PER_TICK * DAY_NIGHT_CYCLE_TICKS);
+        refreshSickMood(store, i, world.currentTick);
+      }
+      continue;
+    }
+
+    // Already sick: recovers a little every tick (the real, rescaled day-rate); mood event
+    // refreshed on the same staggered cadence as the onset roll so it doesn't lapse mid-illness.
+    store.sickSeverity[i] = Math.max(0, store.sickSeverity[i] - SICKNESS_RECOVER_PER_TICK);
+    if (onStaggerCheck) refreshSickMood(store, i, world.currentTick);
+  }
+}
+
 
 // ---- programs.js ----
 // Structured Group Programs -- direct port of Prison Architect's real reform-program schema
@@ -4565,12 +5990,32 @@ function isNight(timeOfDay) {
 
 
 
+
 const MINUTES_TO_TICKS = 2400 / (24 * 60); // see doc comment above
 
 const ProgramKind = Object.freeze({
   SkillsWorkshop: 'skills_workshop',
   WellnessCounseling: 'wellness_counseling',
   CommunityCircle: 'community_circle',
+  // Community Gathering (RimWorld Ideology DLC's real Party/Festival mechanic, reskinned
+  // non-carceral): a scheduled ONE-TIME group event, not an ongoing multi-session course like the
+  // three programs above. Rides the exact same ProgramSite/isSiteStaffed/findJoinableSite/
+  // completeSession machinery -- the only real difference is numSessions: 1 below (so
+  // completeSession's existing "course complete" check fires the instant a single session ends)
+  // and there's no per-tick applyAttendingTick effect for this kind at all (see that function --
+  // it simply has no branch for CommunityGathering, so attending it discharges nothing tick by
+  // tick). The payoff is entirely in the one-shot mood event fired by completeSession below,
+  // magnitude gated by the room's own computeRoomStats().quality at the moment the session ends.
+  CommunityGathering: 'community_gathering',
+  // Staff training-program track (Prison Architect reform_programs_dlc.txt's real staff-facing
+  // training tracks, distinct from every program above -- those are all citizen-facing). Reuses
+  // the exact same ProgramSite/room-role/staffing/session-loop machinery; the only real
+  // difference is WHO can attend (security.js's tickStaffTraining dispatches on-duty
+  // Guard/Sniper/Monitor staff directly, since staff never reach jobs.js's Idle branch --
+  // world.js's isStaffOnDutyAt gates them out of the citizen-facing findJoinableSite path
+  // entirely) and the payoff (combat-skill gain plus, on full-course graduation, a real reduction
+  // in this specific staffer's own bribery odds -- see completeSession below).
+  GuardResponseTraining: 'guard_response_training',
 });
 
 // PROGRAM_DEFS: the balance table, PA's real numbers (per the task doc) converted into this
@@ -4632,9 +6077,74 @@ const PROGRAM_DEFS = Object.freeze({
     hydrationDischargePerTick: 0.015,
     moodGainPerTick: 0.0003,
   }),
+  [ProgramKind.CommunityGathering]: Object.freeze({
+    label: 'Community Gathering',
+    staffRole: StaffRoleKind.Organizer,
+    roomRole: RoomRole.RecreationRoom, // same reuse reasoning as Wellness Counseling/Community
+                                        // Circle above -- a gathering is a Recreation-block event,
+                                        // no dedicated "hall" Structure/RoomRole exists or is needed
+    sessionCost: 3,                               // PA analog: a light one-off social event, cheaper
+                                                    // than the ongoing-discharge programs above
+    places: 8,                                     // a real group event -- matches Community Circle's size
+    sessionLengthTicks: Math.round(60 * MINUTES_TO_TICKS), // one scheduled block, ~1 real hour
+    numSessions: 1,                                // ONE-TIME: the "course" completes the instant
+                                                     // the single session ends -- see completeSession
+    scheduleBlock: ScheduleBlock.Recreation,
+    // RimWorld Ideology's real Party/Festival mood range is roughly -3 (poor venue) / -1 (mediocre)
+    // / +8 (good) / +16 (great) on RimWorld's own mood-point scale -- scaled 1:1 onto this
+    // project's 0-1 mood scale (i.e. /100) per the task brief, tiered off the room's
+    // computeRoomStats().quality (0..1) at the moment the session ends. See
+    // GATHERING_MOOD_TIERS/gatheringMoodMagnitude below -- kept here as documentation of the real
+    // anchor numbers, the actual tier table lives next to the function that reads it.
+    gatheringMoodDurationTicks: 1000, // ~half this project's DAY_NIGHT_CYCLE_TICKS -- a festival's
+                                       // afterglow (or letdown) fades over the following day, not
+                                       // instantly and not forever
+  }),
+  [ProgramKind.GuardResponseTraining]: Object.freeze({
+    label: 'Guard Response Training',
+    staffRole: StaffRoleKind.Instructor,
+    // Reuses Skills Workshop's RoomRole.Training -- a training room can validate BOTH a citizen
+    // Skills Workshop site and this staff-facing site at once (syncProgramSites makes one
+    // ProgramSite per (room, matching kind) pair), same as how RecreationRoom already hosts three
+    // different citizen program kinds simultaneously above. No dedicated "armory classroom" role
+    // is needed for this.
+    roomRole: RoomRole.Training,
+    sessionCost: 6,                                // between Community Circle (4) and Skills Workshop (8)
+    places: 2,                                      // a small drill pairing, not a whole-roster muster
+    sessionLengthTicks: Math.round(90 * MINUTES_TO_TICKS), // PA SessionLength 60-120 real-minutes, same range as Wellness/Community Circle
+    numSessions: 4,
+    scheduleBlock: ScheduleBlock.Work,              // a duty-shift drill, not off-hours recreation
+    // Direct combat-skill boost per tick attended -- same shape/scale as SkillsWorkshop's
+    // skillGainPerTick above but targeting skillCombat, the stat this trainee's actual job (guard
+    // duty) draws on.
+    skillGainPerTick: 0.02 / Math.round(90 * MINUTES_TO_TICKS) * 6,
+  }),
 });
 
-const PROGRAM_ORDER = [ProgramKind.SkillsWorkshop, ProgramKind.WellnessCounseling, ProgramKind.CommunityCircle];
+const PROGRAM_ORDER = [
+  ProgramKind.SkillsWorkshop, ProgramKind.WellnessCounseling, ProgramKind.CommunityCircle,
+  ProgramKind.CommunityGathering, ProgramKind.GuardResponseTraining,
+];
+
+// Community Gathering's mood-magnitude ladder (see the PROGRAM_DEFS.gatheringMoodDurationTicks
+// doc comment above for the real RimWorld Party/Festival numbers this is anchored on): poor-quality
+// venue gives a small negative, good-to-great gives the +0.08..+0.16 positive range the task brief
+// asked for. Tiers checked ascending, last matching one wins (same pattern as citizens.js's
+// breakTierForDepth).
+const GATHERING_MOOD_TIERS = [
+  { minQuality: 0, magnitude: -0.03 },   // poor room (RimWorld's -3 real points / 100)
+  { minQuality: 0.3, magnitude: -0.01 }, // mediocre (RimWorld's -1 real points / 100)
+  { minQuality: 0.5, magnitude: 0.08 },  // good (RimWorld's +8 real points / 100)
+  { minQuality: 0.75, magnitude: 0.16 }, // great (RimWorld's +16 real points / 100)
+];
+
+function gatheringMoodMagnitude(quality) {
+  let magnitude = GATHERING_MOOD_TIERS[0].magnitude;
+  for (const tier of GATHERING_MOOD_TIERS) {
+    if (quality >= tier.minQuality) magnitude = tier.magnitude; else break;
+  }
+  return magnitude;
+}
 
 // One ProgramSite per validated room matching a program kind's roomRole. Sites are synced (not
 // rebuilt) so an assigned staffId/attendee list survives room stat recomputation each tick --
@@ -4718,6 +6228,10 @@ function citizenBenefits(kind, store, i) {
   if (kind === ProgramKind.SkillsWorkshop) return store.skillConstruction[i] < 2.5; // below "Master", see main.js SKILL_LEVELS
   if (kind === ProgramKind.WellnessCounseling) return store.mood[i] < 0.75;
   if (kind === ProgramKind.CommunityCircle) return store.social[i] < 0.85 || (store.hydration != null && store.hydration[i] < 0.85);
+  // Community Gathering: broader gate than the other three, matching a real "everyone's invited"
+  // social event rather than a targeted need-refill -- benefits anyone not already thoroughly
+  // content, same threshold style as WellnessCounseling's mood gate just above.
+  if (kind === ProgramKind.CommunityGathering) return store.mood[i] < 0.9 || store.social[i] < 0.9;
   return false;
 }
 
@@ -4726,7 +6240,11 @@ function citizenBenefits(kind, store, i) {
 // for citizen i to walk to. Returns the site if one was found and claimed (attendeeIds gains i's
 // citizenId as a placeholder reservation -- see jobs.js SeekingProgram/Attending handling for how
 // it actually gets added for real on arrival), or null.
-function findJoinableSite(world, store, i, scheduleBlock) {
+// isAllowed: optional (x, y) -> bool predicate (jobs.js's per-citizen Allowed Area check) --
+// checked against the site's actual post tile (roomPostFor), since that's where the citizen
+// would actually have to walk to. Omitted for every pre-existing call site, byte-for-byte the
+// old behavior.
+function findJoinableSite(world, store, i, scheduleBlock, isAllowed = null) {
   if (!world.programSites) return null;
   for (const site of world.programSites) {
     const def = PROGRAM_DEFS[site.kind];
@@ -4734,6 +6252,10 @@ function findJoinableSite(world, store, i, scheduleBlock) {
     if (site.attendeeIds.length >= def.places) continue;
     if (!isSiteStaffed(world, site)) continue;
     if (!citizenBenefits(site.kind, store, i)) continue;
+    if (isAllowed) {
+      const post = roomPostFor(site.room, world.grid);
+      if (!isAllowed(post.x, post.y)) continue;
+    }
     return site;
   }
   return null;
@@ -4752,6 +6274,8 @@ function applyAttendingTick(site, store, i) {
     store.social[i] = Math.min(1, store.social[i] + def.socialDischargePerTick);
     if (store.hydration != null) store.hydration[i] = Math.min(1, store.hydration[i] + def.hydrationDischargePerTick);
     store.mood[i] = Math.min(1, store.mood[i] + def.moodGainPerTick);
+  } else if (site.kind === ProgramKind.GuardResponseTraining) {
+    store.skillCombat[i] += def.skillGainPerTick;
   }
 }
 
@@ -4768,11 +6292,39 @@ function completeSession(world, site, store, i, sessionsDone) {
   // framing; Skills Workshop/Community Circle always "graduate" since their whole benefit is the
   // continuous per-tick effect already applied above, not a pass/fail outcome).
   let graduated = true;
+  let moodMagnitude;
   if (site.kind === ProgramKind.WellnessCounseling) {
     graduated = (world.rng ? world.rng() : Math.random()) * 100 < def.difficultyPct;
     if (graduated) store.mood[i] = Math.min(1, store.mood[i] + def.graduationMoodBonus);
+  } else if (site.kind === ProgramKind.CommunityGathering) {
+    // ONE-TIME completion mood event (see the ProgramKind.CommunityGathering doc comment above):
+    // unlike every other program kind here, this has no continuous applyAttendingTick effect at
+    // all -- the whole payoff is this single addMoodEvent, magnitude gated by the room's current
+    // computeRoomStats().quality (site.room.quality, recomputed every tick by world.js before
+    // programs are ticked, so this reads a fresh value, not a stale one from claim time).
+    const quality = site.room?.quality ?? 0.5;
+    moodMagnitude = gatheringMoodMagnitude(quality);
+    graduated = moodMagnitude > 0; // reused purely as a "went well" flag for jobs.js's flavor text
+    addMoodEvent(store, i, world.currentTick, {
+      magnitude: moodMagnitude,
+      durationTicks: def.gatheringMoodDurationTicks,
+      stackKey: 'communityGathering',
+    });
+  } else if (site.kind === ProgramKind.GuardResponseTraining) {
+    // Always "graduates" -- the combat-skill gain already happened tick-by-tick in
+    // applyAttendingTick above, same always-succeeds framing as SkillsWorkshop/CommunityCircle.
+    // Real PA anchor for the graduation payoff (task brief: "reducing corrupt-staff chance"):
+    // clears this specific staffer's crooked-eligible flag on the roster if they had one --
+    // security.js's tickStaffCorruption never rolls a bribe-activation for anyone not in
+    // roster._corruptEligible, so this is a real, permanent, per-citizen reduction in their own
+    // future bribery odds, not a colony-wide stat tweak.
+    graduated = true;
+    const citizenId = store.id[i];
+    if (world.roster?.isCorruptEligible(citizenId)) {
+      world.roster._corruptEligible.delete(citizenId);
+    }
   }
-  return { courseComplete: true, graduated };
+  return { courseComplete: true, graduated, moodMagnitude };
 }
 
 
@@ -4782,6 +6334,10 @@ function completeSession(world, site, store, i, sessionsDone) {
 // with nothing urgent pending instead work the colony's economy -- finishing player-placed
 // blueprints first (Prison-Architect-style "you ordered it, someone builds it"), then
 // harvesting scrap nodes when nothing needs building (RimWorld-style raw-material gathering).
+
+
+
+
 
 
 
@@ -4830,6 +6386,30 @@ const JobState = Object.freeze({
   // walks to a staffed, scheduled-in program site and occupies it for the session length.
   SeekingProgram: 19,
   Attending: 20,
+  // First-aid tending (citizens.js's TEND_RECOVERY_RATE, ~4x the passive DOWNED_RECOVERY_RATE --
+  // real RimWorld tend-bonus ratio): a citizen with construction or combat skill invested walks to
+  // and actively tends a Downed ally, same Seeking*/active-job pair shape as every other job above.
+  // See tryClaimTend below for the eligibility gate and citizens.js's tickNeedsAndMood for how the
+  // recovery-rate swap actually happens.
+  SeekingTend: 21,
+  Tending: 22,
+  // Exercise (citizens.js's EXERCISE_DECAY, PA needs.txt's Exercise need): a citizen with a low
+  // Exercise need walks directly to the new Fitness Station buildable (siege.js Structure kind
+  // 'fitness_station') and refills there, same Seeking*/active-job pair shape as every other
+  // need-fulfillment job above. See findNearestFitnessStation below for the structure-targeted
+  // lookup (no zone-tile targeting like Food/Bedroom/Recreation -- the buildable itself is the
+  // destination, matching the "a citizen actually uses the Fitness Station" requirement).
+  SeekingExercise: 23,
+  Exercising: 24,
+  // Farming (research.js's Agronomy node, siege.js Structure kind 'farm_plot'): a citizen tends a
+  // built, renewable Farm Plot over real time, same single-worker staffed-station shape as
+  // SeekingWorkshop/Processing above (reuses Structure's generic workerId/_workTimer fields), but
+  // distinct in one real way -- it doesn't consume a raw-material input to start a cycle, it just
+  // pays out a food/scrap-equivalent trickle once enough tend-time has accumulated, then keeps
+  // running for the same worker rather than needing to be re-claimed. See FARM_CYCLE_TICKS/
+  // FARM_YIELD_PER_CYCLE below and tryClaimFarming/findNearestFarmPlot.
+  SeekingFarm: 25,
+  Farming: 26,
 });
 
 // Work Priorities (RimWorld Work-tab-style, see citizens.js's hasWorkPriorities/workPriority*
@@ -4877,6 +6457,10 @@ const WORK_CATEGORY_FIELD = {
 const SEEK_SOCIAL_THRESHOLD = 0.35;
 const SEEK_HUNGER_THRESHOLD = 0.45;
 const SEEK_REST_THRESHOLD = 0.4;
+// Exercise (see citizens.js's EXERCISE_DECAY): same threshold as Rest -- "similar magnitude to
+// Hunger/Rest" per the task brief, and Rest is this codebase's closest existing precedent for a
+// need with no schedule-block bias of its own.
+const SEEK_EXERCISE_THRESHOLD = 0.4;
 const SATISFIED_THRESHOLD = 0.85;
 
 // Duty Roster scheduling (see schedule.js) biases which need-thresholds apply this tick --
@@ -4892,9 +6476,14 @@ const SCHEDULE_WORK_THRESHOLD_MULT = 0.4; // during the Work block, only break f
 const NIGHT_INTERRUPT_REST_THRESHOLD = 0.6; // Sleep block will pull a not-yet-exhausted citizen off a work task
 const REFILL_RATE = 0.05; // per tick while occupying the zone
 const ETHANOL_FOOD_REFILL_MULT = 0.5; // Food zone refill halved while world.ethanolPenaltyTimer counts down, see vehicles.js
+// Exported: draft.js reuses these directly for move-order arrival/travel speed rather than
+// inventing a second set of movement constants for manually-controlled citizens.
 const ARRIVE_DIST = 0.35;
 const JOB_SPEED = 0.09; // citizens hustle to zones -- travel time was the dominant cost in the needs loop
 
+// Exported: drones.js reuses these two exact rates for its own Construction/Harvesting work
+// loops rather than inventing parallel constants -- a drone builds/harvests at the flat
+// (skill=0) rate a brand-new citizen would, see that file's header comment.
 const BUILD_RATE = 0.012; // per tick, scaled by construction skill below
 const BUILD_SKILL_GAIN = 0.02;
 const HARVEST_RATE = 3; // scrap per tick pulled from a node
@@ -4925,8 +6514,25 @@ function unrestRateMultFor(world) {
   return mult;
 }
 
+// worldmap.js's arrival-mishap system (Odyssey LandingOutcomeDef-style, toned down -- see that
+// file's constants block for the real-numbers rationale): a "debuff" mishap sets
+// world.arrivalMishapTicks to a short countdown (world.js ticks it down) rather than harming a
+// citizen directly, applied here as a flat work-speed penalty, same "small local constant,
+// world.js owns the timer" pattern as UNREST_RATE_MULT/unrestRateMultFor above.
+const ARRIVAL_MISHAP_RATE_MULT = 0.7;
+function arrivalMishapRateMultFor(world) {
+  return world?.arrivalMishapTicks > 0 ? ARRIVAL_MISHAP_RATE_MULT : 1;
+}
+
+// Exported: forcejob.js's right-click job-target detection (input.js) reuses this exact gate so
+// a room only offers a Force-Clean target when findNearestMessyRoom's own autonomous claim would
+// also consider it worth cleaning -- one threshold, not two drifting copies.
 const MESS_CLEAN_THRESHOLD = 0.15; // don't send a citizen to scrub a room that's only barely dusty
+// Exported: drones.js reuses this exact rate rather than inventing a second cleaning-speed
+// constant for its own, much simpler, needs-free work loop (see that file's header comment).
 const CLEAN_RATE = 0.01; // per tick reduction of room.mess while actively cleaning (rooms.js)
+// Exported: drones.js reuses this exact arrival radius for the same reason CLEAN_RATE is exported
+// above -- rooms.js's roomCentroid can land on a wall/furniture cell.
 const CLEAN_ARRIVE_DIST = 0.6; // rooms.js's roomCentroid can land on a wall/furniture cell; a looser arrival radius than ARRIVE_DIST avoids a citizen stalling trying to stand exactly on it
 
 // Materials-processing station (real Prison Architect materials.txt: SheetMetal price -10 -> two
@@ -4934,12 +6540,84 @@ const CLEAN_ARRIVE_DIST = 0.6; // rooms.js's roomCentroid can land on a wall/fur
 // ConstructionTime on those stations is 20 real-minutes -- mirrored here as 20 ticks per unit
 // processed, not construction time of the station itself, which uses the normal BUILD_RATE path
 // like any other blueprint). WORKSHOP_PROCESSED_PER_UNIT is exactly 2x WORKSHOP_RAW_PER_UNIT.
+// Exported: drones.js's own Processing work loop reuses these three exact numbers rather than a
+// parallel set -- a drone staffing a workshop station processes at the identical rate/economics
+// a citizen would.
 const WORKSHOP_RAW_PER_UNIT = 5;        // scrap consumed from world.scrap to start one unit
 const WORKSHOP_PROCESSED_PER_UNIT = 10; // scrap paid out on completion -- the real 2x uplift
 const WORKSHOP_PROCESS_TICKS = 20;      // ticks to finish one unit once a worker is staffing it
 
+// Farm Plot (siege.js Structure kind 'farm_plot', research.js's Agronomy node): a renewable,
+// citizen-tended producer -- distinct from resource-node Harvesting (a finite deposit that
+// depletes) and from Processing (consumes a raw-scrap input per unit). A Farm Plot needs no input:
+// a tending citizen just accrues real tend-time via Structure's generic `_workTimer` field until a
+// cycle completes, pays out FARM_YIELD_PER_CYCLE, and keeps running for the same worker into the
+// next cycle. FARM_CYCLE_TICKS is priced between HARVEST_RATE's near-instant per-tick trickle and
+// WORKSHOP_PROCESS_TICKS's 20-tick unit -- slower than either since it's meant to reward a citizen
+// staying put on one plot rather than a quick in-and-out.
+const FARM_CYCLE_TICKS = 60;      // ticks of active tending to complete one growth cycle
+const FARM_YIELD_PER_CYCLE = 6;   // food/scrap-equivalent resource paid out per completed cycle
+const FARM_SKILL_GAIN = 0.008;           // construction-skill trickle while tending, same family as HARVEST_SKILL_GAIN
+
+// First-aid tending (JobState.SeekingTend/Tending, see citizens.js's TEND_RECOVERY_RATE). No
+// dedicated Medicine skill exists in this codebase and FEATURE_RESEARCH.md's precedent (see
+// jobs.js's own Taming comment above) is not to add one just for a single job type -- construction
+// skill (patching someone up is a hands-on fix-it task, same instinct as patching a wall) and
+// combat skill (a citizen who's fought alongside the wounded knows real battlefield first aid) are
+// both narratively defensible, so either qualifies rather than picking one over the other.
+// TEND_SKILL_THRESHOLD reuses the exact "Novice" cutoff citizens.js's SKILL_INVESTED_THRESHOLD and
+// main.js's SKILL_LEVELS already use -- "skill invested" means past that bar, not just whatever
+// small (occasionally negative) starting nudge a backstory happens to give.
+const TEND_SKILL_THRESHOLD = 0.15;
+// Small chance-based variance on tend quality (RimWorld's real medicine-quality curve, mirrored
+// here without an item-tier system): each tick spent actively tending has a small chance of a
+// minor extra bonus/malus nudge to the patient's health, layered on top of the flat
+// TEND_RECOVERY_RATE swap in citizens.js -- symmetric (bonus and malus equally likely), so it reads
+// as "quality varies" rather than a hidden buff or nerf to the headline 4x number.
+const TEND_VARIANCE_CHANCE = 0.02; // per tick, while actively Tending
+const TEND_VARIANCE_MAG = 0.01;    // +/- health, applied on a variance-roll tick
+
 function isOnJob(store, i) {
   return store.jobState[i] !== JobState.Idle;
+}
+
+// Releases whatever job claim citizen i currently holds (blueprint.claimedBy, an animal's
+// claimedBy, a workshop's workerId, a program site's attendeeIds entry) and snaps them back to
+// Idle -- factored out of the Duty Roster sleep-interrupt block below so draft.js's draftCitizen
+// can call the exact same release logic when a player drafts a citizen mid-task, rather than
+// leaving a phantom claim behind that blocks everyone else from picking that job back up. A
+// citizen with no active claim-bearing job (Idle, Eating/Sleeping/Recreating/Driving, or already
+// Attacking/whatever draft.js itself put them in) is simply left alone -- state === Idle after the
+// switch either way.
+function releaseCurrentJobClaim(store, i, idOf) {
+  const state = store.jobState[i];
+  if (state === JobState.Building || state === JobState.SeekingBuild) {
+    const bp = store._jobRef?.[i];
+    if (bp) bp.claimedBy = null;
+  } else if (state === JobState.SeekingAnimal || state === JobState.Taming) {
+    const animal = store._jobRef?.[i];
+    if (animal) animal.claimedBy = null;
+  } else if (state === JobState.SeekingWorkshop || state === JobState.Processing) {
+    const station = store._jobRef?.[i];
+    if (station) station.workerId = null;
+  } else if (state === JobState.SeekingProgram || state === JobState.Attending) {
+    const site = store._jobRef?.[i];
+    if (site) {
+      const idx = site.attendeeIds.indexOf(idOf(i));
+      if (idx >= 0) site.attendeeIds.splice(idx, 1);
+    }
+    store.programSite[i] = null;
+  } else if (state === JobState.SeekingTend || state === JobState.Tending) {
+    const targetIdx = store._jobRef?.[i];
+    if (targetIdx != null && store.tendClaimedBy[targetIdx] === idOf(i)) store.tendClaimedBy[targetIdx] = -1;
+  } else if (state === JobState.SeekingFarm || state === JobState.Farming) {
+    const plot = store._jobRef?.[i];
+    if (plot && plot.workerId === idOf(i)) plot.workerId = null;
+  }
+  // Harvesting/SeekingScrap/SeekingVehicle/Cleaning/SeekingClean/Idle/Eating/Sleeping/
+  // Recreating/Driving have no claim to release (findNearestNode/findUndrivenVehicle/
+  // findNearestMessyRoom deliberately don't track claimedBy, see their own doc comments above).
+  store.jobState[i] = JobState.Idle;
 }
 
 // One try-to-claim helper per WorkCategory, each doing exactly what the original inline Idle-
@@ -4947,8 +6625,8 @@ function isOnJob(store, i) {
 // both the legacy fixed-order ladder and a citizen's custom Work Priorities order can call the
 // same claim logic instead of drifting apart. Returns true (and mutates store/jobState/_jobRef)
 // only if a job of that category was actually available and claimed this tick.
-function tryClaimConstruction(store, i, structures, idOf) {
-  const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i));
+function tryClaimConstruction(store, i, structures, idOf, isAllowed) {
+  const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i), isAllowed);
   if (!blueprint) return false;
   blueprint.claimedBy = idOf(i);
   store.jobState[i] = JobState.SeekingBuild;
@@ -4957,8 +6635,8 @@ function tryClaimConstruction(store, i, structures, idOf) {
   return true;
 }
 
-function tryClaimHauling(store, i, world) {
-  const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i]);
+function tryClaimHauling(store, i, world, isAllowed) {
+  const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i], isAllowed);
   if (!vehicle) return false;
   store.jobState[i] = JobState.SeekingVehicle;
   store.targetX[i] = vehicle.x; store.targetY[i] = vehicle.y;
@@ -4966,8 +6644,8 @@ function tryClaimHauling(store, i, world) {
   return true;
 }
 
-function tryClaimHarvesting(store, i, resourceNodes) {
-  const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
+function tryClaimHarvesting(store, i, resourceNodes, isAllowed) {
+  const node = findNearestNode(resourceNodes, store.x[i], store.y[i], isAllowed);
   if (!node) return false;
   store.jobState[i] = JobState.SeekingScrap;
   store.targetX[i] = node.x; store.targetY[i] = node.y;
@@ -4975,8 +6653,8 @@ function tryClaimHarvesting(store, i, resourceNodes) {
   return true;
 }
 
-function tryClaimAnimal(store, i, world, idOf) {
-  const animal = findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i]);
+function tryClaimAnimal(store, i, world, idOf, isAllowed) {
+  const animal = findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i], isAllowed);
   if (!animal) return false;
   animal.claimedBy = idOf(i);
   store.jobState[i] = JobState.SeekingAnimal;
@@ -4985,8 +6663,8 @@ function tryClaimAnimal(store, i, world, idOf) {
   return true;
 }
 
-function tryClaimCleaning(store, i, world) {
-  const room = findNearestMessyRoom(world.rooms, world.grid, store.x[i], store.y[i]);
+function tryClaimCleaning(store, i, world, isAllowed) {
+  const room = findNearestMessyRoom(world.rooms, world.grid, store.x[i], store.y[i], isAllowed);
   if (!room) return false;
   const target = roomCentroid(room, world.grid);
   store.jobState[i] = JobState.SeekingClean;
@@ -4999,9 +6677,9 @@ function tryClaimCleaning(store, i, world) {
 // walk across the map to stand at an idle workshop with nothing to process, same "is there
 // genuinely work here" gate findNearestNode/findUndrivenVehicle apply implicitly by only
 // existing when they have something to offer.
-function tryClaimProcessing(store, i, structures, world, idOf) {
+function tryClaimProcessing(store, i, structures, world, idOf, isAllowed) {
   if (world.scrap < WORKSHOP_RAW_PER_UNIT) return false;
-  const station = findNearestWorkshop(structures, store.x[i], store.y[i]);
+  const station = findNearestWorkshop(structures, store.x[i], store.y[i], isAllowed);
   if (!station) return false;
   station.workerId = idOf(i);
   store.jobState[i] = JobState.SeekingWorkshop;
@@ -5010,30 +6688,51 @@ function tryClaimProcessing(store, i, structures, world, idOf) {
   return true;
 }
 
+// Farm Plot (see findNearestFarmPlot/FARM_CYCLE_TICKS above): no scrap-on-hand gate, deliberately
+// -- unlike tryClaimProcessing (which shouldn't send a citizen to stand at a station with nothing
+// to process), a Farm Plot needs no input to be worth tending, it just needs an idle citizen.
+function tryClaimFarming(store, i, structures, idOf, isAllowed) {
+  const plot = findNearestFarmPlot(structures, store.x[i], store.y[i], isAllowed);
+  if (!plot) return false;
+  plot.workerId = idOf(i);
+  store.jobState[i] = JobState.SeekingFarm;
+  store.targetX[i] = plot.x; store.targetY[i] = plot.y;
+  store._jobRef[i] = plot;
+  return true;
+}
+
+// Every claim lambda now takes an extra trailing isAllowed arg (the citizen's per-tick Allowed
+// Area check built in tickJobs, see its own doc comment) and threads it straight through to its
+// finder -- null for every citizen with no restriction painted, which every finder treats as "no
+// filtering at all", byte-for-byte the old behavior.
 const WORK_CATEGORY_CLAIM = {
-  [WorkCategory.Construction]: (store, i, structures, resourceNodes, world, idOf) => tryClaimConstruction(store, i, structures, idOf),
-  [WorkCategory.Processing]: (store, i, structures, resourceNodes, world, idOf) => tryClaimProcessing(store, i, structures, world, idOf),
-  [WorkCategory.Hauling]: (store, i, structures, resourceNodes, world, idOf) => tryClaimHauling(store, i, world),
-  [WorkCategory.Harvesting]: (store, i, structures, resourceNodes, world, idOf) => tryClaimHarvesting(store, i, resourceNodes),
-  [WorkCategory.Animal]: (store, i, structures, resourceNodes, world, idOf) => tryClaimAnimal(store, i, world, idOf),
-  [WorkCategory.Cleaning]: (store, i, structures, resourceNodes, world, idOf) => tryClaimCleaning(store, i, world),
+  [WorkCategory.Construction]: (store, i, structures, resourceNodes, world, idOf, isAllowed) => tryClaimConstruction(store, i, structures, idOf, isAllowed),
+  [WorkCategory.Processing]: (store, i, structures, resourceNodes, world, idOf, isAllowed) => tryClaimProcessing(store, i, structures, world, idOf, isAllowed),
+  [WorkCategory.Hauling]: (store, i, structures, resourceNodes, world, idOf, isAllowed) => tryClaimHauling(store, i, world, isAllowed),
+  [WorkCategory.Harvesting]: (store, i, structures, resourceNodes, world, idOf, isAllowed) => tryClaimHarvesting(store, i, resourceNodes, isAllowed),
+  [WorkCategory.Animal]: (store, i, structures, resourceNodes, world, idOf, isAllowed) => tryClaimAnimal(store, i, world, idOf, isAllowed),
+  [WorkCategory.Cleaning]: (store, i, structures, resourceNodes, world, idOf, isAllowed) => tryClaimCleaning(store, i, world, isAllowed),
 };
 
-function findNearestBlueprint(structures, x, y, excludeClaimedBy) {
+// isAllowed: optional (x, y) -> bool predicate (jobs.js's per-citizen Allowed Area check).
+// Omitted for every pre-existing call site, byte-for-byte the old behavior.
+function findNearestBlueprint(structures, x, y, excludeClaimedBy, isAllowed = null) {
   let best = null, bestDist = Infinity;
   for (const s of structures) {
     if (!s.underConstruction || s.destroyed) continue;
     if (s.claimedBy != null && s.claimedBy !== excludeClaimedBy) continue;
+    if (isAllowed && !isAllowed(s.x, s.y)) continue;
     const d = Math.hypot(s.x - x, s.y - y);
     if (d < bestDist) { bestDist = d; best = s; }
   }
   return best;
 }
 
-function findNearestNode(nodes, x, y) {
+function findNearestNode(nodes, x, y, isAllowed = null) {
   let best = null, bestDist = Infinity;
   for (const n of nodes) {
     if (n.depleted) continue;
+    if (isAllowed && !isAllowed(n.x, n.y)) continue;
     const d = Math.hypot(n.x - x, n.y - y);
     if (d < bestDist) { bestDist = d; best = n; }
   }
@@ -5044,42 +6743,115 @@ function findNearestNode(nodes, x, y) {
 // citizens converging on the same resource node is an accepted non-issue, not a bug to fix), and
 // a room being cleaned by more than one citizen at once is even less of a problem since .mess
 // just floors at 0 instead of going negative.
-function findNearestMessyRoom(rooms, grid, x, y) {
+function findNearestMessyRoom(rooms, grid, x, y, isAllowed = null) {
   let best = null, bestDist = Infinity;
   for (const room of rooms) {
     if ((room.mess || 0) < MESS_CLEAN_THRESHOLD) continue;
     const c = roomCentroid(room, grid);
+    if (isAllowed && !isAllowed(c.x, c.y)) continue;
     const d = Math.hypot(c.x - x, c.y - y);
     if (d < bestDist) { bestDist = d; best = room; }
   }
   return best;
 }
 
-function findNearestWorkshop(structures, x, y) {
+function findNearestWorkshop(structures, x, y, isAllowed = null) {
   let best = null, bestDist = Infinity;
   for (const s of structures) {
     if (s.kind !== 'workshop' || s.destroyed || s.underConstruction) continue;
     if (s.workerId != null) continue; // already staffed
+    if (isAllowed && !isAllowed(s.x, s.y)) continue;
     const d = Math.hypot(s.x - x, s.y - y);
     if (d < bestDist) { bestDist = d; best = s; }
   }
   return best;
 }
 
-function findNearestTameableAnimal(wildAnimals, x, y) {
+// Farm Plot (siege.js Structure kind 'farm_plot'): single-worker exclusivity, same shape as
+// findNearestWorkshop above -- one citizen tends one plot at a time.
+function findNearestFarmPlot(structures, x, y, isAllowed = null) {
+  let best = null, bestDist = Infinity;
+  for (const s of structures) {
+    if (s.kind !== 'farm_plot' || s.destroyed || s.underConstruction) continue;
+    if (s.workerId != null) continue; // already staffed
+    if (isAllowed && !isAllowed(s.x, s.y)) continue;
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  return best;
+}
+
+// No staffing exclusivity, deliberately -- unlike findNearestWorkshop above (single-worker
+// 'workshop' station), a Fitness Station is closer in spirit to a zone tile: any number of
+// citizens can use it to refill Exercise at once, matching how zones.nearestOfKind never gates on
+// "already occupied" either.
+function findNearestFitnessStation(structures, x, y, isAllowed = null) {
+  let best = null, bestDist = Infinity;
+  for (const s of structures) {
+    if (s.kind !== 'fitness_station' || s.destroyed || s.underConstruction) continue;
+    if (isAllowed && !isAllowed(s.x, s.y)) continue;
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  return best;
+}
+
+function findNearestTameableAnimal(wildAnimals, x, y, isAllowed = null) {
   let best = null, bestDist = Infinity;
   for (const a of wildAnimals) {
     if (a.claimedBy != null) continue; // someone's already taming this one
+    if (isAllowed && !isAllowed(a.x, a.y)) continue;
     const d = Math.hypot(a.x - x, a.y - y);
     if (d < bestDist) { bestDist = d; best = a; }
   }
   return best;
 }
 
+// Downed-ally targets are other citizens in the SAME store, not a separate list -- unlike every
+// finder above (structures/nodes/vehicles/animals/rooms), this walks store.count directly. Returns
+// an index (not an id): CitizenStore never compacts/removes slots on death (dead citizens just stay
+// isAliveAt()===false forever at their original index, see citizens.js), so a raw index is exactly
+// as stable a reference as the object references every other finder above returns -- safe to hold
+// in _jobRef the same way. Excludes the tender's own index and anyone already claimed by a
+// different tender (store.tendClaimedBy, an id -- see citizens.js's doc comment on that field).
+function findNearestDownedAlly(store, tenderIdx, x, y, isAllowed = null) {
+  let best = -1, bestDist = Infinity;
+  for (let j = 0; j < store.count; j++) {
+    if (j === tenderIdx) continue;
+    if (!store.isAliveAt(j) || !store.isDownedAt(j)) continue;
+    if (store.tendClaimedBy[j] !== -1) continue; // already being tended (or walked to) by someone else
+    if (isAllowed && !isAllowed(store.x[j], store.y[j])) continue;
+    const d = Math.hypot(store.x[j] - x, store.y[j] - y);
+    if (d < bestDist) { bestDist = d; best = j; }
+  }
+  return best;
+}
+
+// First-aid tending eligibility: construction OR combat skill past the Novice bar (see
+// TEND_SKILL_THRESHOLD's doc comment above for why either qualifies). Checked before the (cheap
+// but not free) store.count scan for a downed ally, same "cheap gate first" ordering every other
+// tryClaim* above uses.
+function tryClaimTend(store, i, world, idOf, isAllowed) {
+  if (store.skillConstruction[i] < TEND_SKILL_THRESHOLD && store.skillCombat[i] < TEND_SKILL_THRESHOLD) return false;
+  const targetIdx = findNearestDownedAlly(store, i, store.x[i], store.y[i], isAllowed);
+  if (targetIdx < 0) return false;
+  store.tendClaimedBy[targetIdx] = idOf(i);
+  store.jobState[i] = JobState.SeekingTend;
+  store.targetX[i] = store.x[targetIdx]; store.targetY[i] = store.y[targetIdx];
+  store._jobRef[i] = targetIdx;
+  return true;
+}
+
 function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, onScrapGain, world) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
     if (store.isDownedAt(i)) continue; // incapacitated, can't work until recovered
+    // Drafted (draft.js -- RimWorld-style manual control, see citizens.js's CitizenFlags.Drafted):
+    // pulled out of the autonomous priority state machine entirely, even mid-task. draft.js's own
+    // tickDrafted (called separately from world.js) owns all movement/combat for a drafted citizen
+    // from here on; this is the one, single place that removal happens, so undrafting later just
+    // means this check stops firing and the citizen falls right back into Idle same as always.
+    if (store.isDraftedAt(i)) continue;
     if (staffOnDuty(i)) continue; // guards/snipers hold their post, no eat/sleep/work jobs
 
     // Duty Roster: a citizen deep in a work/harvest task at scheduled sleep-time gets pulled off
@@ -5087,33 +6859,36 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
     // already close to exhausted (that path is handled below via the normal Idle/SeekingBed
     // branch regardless of schedule) and only for interruptible states; Driving and the
     // short Eating/Sleeping/Recreating fulfillment states are left to finish.
-    const scheduleBlock = world ? getScheduleBlock(world.timeOfDay) : ScheduleBlock.Work;
+    // Per-citizen Schedule override (schedule.js's ScheduleOverride, RimWorld Schedule-tab style):
+    // effectiveScheduleBlock returns the citizen's own pinned block if the player has set one,
+    // otherwise the colony-wide block computed from world.timeOfDay -- every use of scheduleBlock
+    // below (this Sleep-interrupt check, the Idle-branch threshold bias, and findJoinableSite)
+    // transparently respects it. Default (no override) is byte-for-byte the old behavior.
+    const colonyScheduleBlock = world ? getScheduleBlock(world.timeOfDay) : ScheduleBlock.Work;
+    const scheduleBlock = effectiveScheduleBlock(store.scheduleOverride[i], colonyScheduleBlock);
+
+    // Allowed Area restriction (RimWorld Restrict-tab style, see citizens.js's isInAllowedArea):
+    // a single (x, y) -> bool closure built once per citizen per tick, threaded through every
+    // autonomous target-selection call below (zone lookups, blueprint/node/vehicle/animal/room/
+    // program-site finders). null for the vast majority of citizens (no restriction painted),
+    // which every finder treats as "no filtering at all" -- byte-for-byte the old behavior. Does
+    // NOT gate draft.js's move/attack orders (those run in a separate tickDrafted pass, never
+    // through tickJobs) -- a direct drafted order is explicit player intent and always wins,
+    // exactly as the task spec requires.
+    const allowedCheck = (world && store.hasAllowedArea(i))
+      ? (ax, ay) => store.isInAllowedArea(i, world.grid.width, ax, ay)
+      : null;
     if (scheduleBlock === ScheduleBlock.Sleep && store.rest[i] < NIGHT_INTERRUPT_REST_THRESHOLD) {
       const interruptible = store.jobState[i];
-      if (interruptible === JobState.Building || interruptible === JobState.SeekingBuild) {
-        const bp = store._jobRef?.[i];
-        if (bp) bp.claimedBy = null;
-        store.jobState[i] = JobState.Idle;
-      } else if (interruptible === JobState.Harvesting || interruptible === JobState.SeekingScrap
+      if (interruptible === JobState.Building || interruptible === JobState.SeekingBuild
+        || interruptible === JobState.Harvesting || interruptible === JobState.SeekingScrap
         || interruptible === JobState.SeekingVehicle
-        || interruptible === JobState.Cleaning || interruptible === JobState.SeekingClean) {
-        store.jobState[i] = JobState.Idle;
-      } else if (interruptible === JobState.SeekingAnimal || interruptible === JobState.Taming) {
-        const animal = store._jobRef?.[i];
-        if (animal) animal.claimedBy = null; // release it so someone else (or the same citizen later) can try again
-        store.jobState[i] = JobState.Idle;
-      } else if (interruptible === JobState.SeekingWorkshop || interruptible === JobState.Processing) {
-        const station = store._jobRef?.[i];
-        if (station) station.workerId = null; // release the station -- any work-in-progress (station._workTimer) just waits for the next worker
-        store.jobState[i] = JobState.Idle;
-      } else if (interruptible === JobState.SeekingProgram || interruptible === JobState.Attending) {
-        const site = store._jobRef?.[i];
-        if (site) {
-          const idx = site.attendeeIds.indexOf(idOf(i));
-          if (idx >= 0) site.attendeeIds.splice(idx, 1);
-        }
-        store.programSite[i] = null;
-        store.jobState[i] = JobState.Idle;
+        || interruptible === JobState.Cleaning || interruptible === JobState.SeekingClean
+        || interruptible === JobState.SeekingAnimal || interruptible === JobState.Taming
+        || interruptible === JobState.SeekingWorkshop || interruptible === JobState.Processing
+        || interruptible === JobState.SeekingProgram || interruptible === JobState.Attending
+        || interruptible === JobState.SeekingFarm || interruptible === JobState.Farming) {
+        releaseCurrentJobClaim(store, i, idOf);
       }
     }
 
@@ -5140,15 +6915,35 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       // Starvation always wins the tie against a Sleep-block bed trip, regardless of check
       // order below -- a citizen shouldn't be walked past food to a bed because it's night.
       if (store.hunger[i] < CRITICAL_HUNGER_OVERRIDE) {
-        const food = zones.nearestOfKind(ZoneKind.Food, store.x[i], store.y[i]);
+        const food = zones.nearestOfKind(ZoneKind.Food, store.x[i], store.y[i], allowedCheck);
         if (food) { store.jobState[i] = JobState.SeekingFood; store.targetX[i] = food.x; store.targetY[i] = food.y; continue; }
       }
+
+      // Force Job (forcejob.js -- RimWorld-style "Prioritize", player-issued one-shot override,
+      // see input.js's right-click-on-a-job-target wiring): jumps every check below -- the soft
+      // rest/hunger/social thresholds, Structured Group Programs, and the whole Work-Priorities/
+      // legacy-ladder autonomy -- but NOT the genuine starvation emergency just above, same "a
+      // real crisis still wins" precedent CRITICAL_HUNGER_OVERRIDE already sets for the rest of
+      // this branch. tryClaimForcedJob always consumes the pending order (success or failure), so
+      // a stale target (vanished/claimed elsewhere since the order was given) just falls through
+      // to normal evaluation this same tick rather than leaving the citizen doing nothing.
+      if (store.forcedJobKind[i] && tryClaimForcedJob(store, i, world, idOf)) continue;
+
+      // First-aid tending (JobState.SeekingTend/Tending, see TEND_SKILL_THRESHOLD/tryClaimTend
+      // above): checked near the top of the ladder, right after the two genuine emergencies
+      // (starvation, an explicit Force Job order) and before the citizen's own soft need
+      // thresholds -- a Downed ally recovering 4x faster is worth a construction/combat-skilled
+      // citizen's next few seconds even ahead of their own not-yet-critical hunger/rest/social.
+      // tryClaimTend no-ops instantly (skill gate, then a cheap scan) when no one's down or this
+      // citizen isn't eligible, so this never taxes a healthy colony's Idle branch meaningfully.
+      if (tryClaimTend(store, i, world, idOf, allowedCheck)) continue;
+
       if (store.rest[i] < restThreshold) {
-        const bed = zones.nearestOfKind(ZoneKind.Bedroom, store.x[i], store.y[i]);
+        const bed = zones.nearestOfKind(ZoneKind.Bedroom, store.x[i], store.y[i], allowedCheck);
         if (bed) { store.jobState[i] = JobState.SeekingBed; store.targetX[i] = bed.x; store.targetY[i] = bed.y; continue; }
       }
       if (store.hunger[i] < hungerThreshold) {
-        const food = zones.nearestOfKind(ZoneKind.Food, store.x[i], store.y[i]);
+        const food = zones.nearestOfKind(ZoneKind.Food, store.x[i], store.y[i], allowedCheck);
         if (food) { store.jobState[i] = JobState.SeekingFood; store.targetX[i] = food.x; store.targetY[i] = food.y; continue; }
       }
       // Structured Group Programs (programs.js): voluntary attendance, checked BEFORE the plain
@@ -5164,7 +6959,7 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       // an open place, and this citizen would genuinely benefit -- so this never fires for an
       // unstaffed program, satisfying the "no program runs without its staffer" requirement.
       if (world) {
-        const site = findJoinableSite(world, store, i, scheduleBlock);
+        const site = findJoinableSite(world, store, i, scheduleBlock, allowedCheck);
         if (site) {
           const target = roomPostFor(site.room, world.grid);
           store.jobState[i] = JobState.SeekingProgram;
@@ -5176,8 +6971,25 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       }
 
       if (store.social[i] < socialThreshold) {
-        const rec = zones.nearestOfKind(ZoneKind.Recreation, store.x[i], store.y[i]);
+        const rec = zones.nearestOfKind(ZoneKind.Recreation, store.x[i], store.y[i], allowedCheck);
         if (rec) { store.jobState[i] = JobState.SeekingRec; store.targetX[i] = rec.x; store.targetY[i] = rec.y; continue; }
+      }
+
+      // Exercise (citizens.js's EXERCISE_DECAY, PA's Exercise need): checked right after Social,
+      // same "soft need, not a genuine emergency" tier as Rest/Hunger/Social above it -- targets
+      // the Fitness Station buildable directly (findNearestFitnessStation) rather than a zone
+      // tile, since v1 has no zone-tile refill path for Exercise the way Food/Bedroom/Recreation
+      // do. No-ops (falls through to Work Priorities/the legacy ladder below) if no Fitness
+      // Station has been built yet -- a colony with no gym just never seeks this, same "not yet
+      // buildable, so not yet a job" precedent findNearestWorkshop/findUndrivenVehicle already set.
+      if (store.exercise[i] < SEEK_EXERCISE_THRESHOLD) {
+        const station = findNearestFitnessStation(structures, store.x[i], store.y[i], allowedCheck);
+        if (station) {
+          store.jobState[i] = JobState.SeekingExercise;
+          store.targetX[i] = station.x; store.targetY[i] = station.y;
+          store._jobRef[i] = station;
+          continue;
+        }
       }
 
       // Work Priorities override (RimWorld Work-tab-style, see citizens.js's hasWorkPriorities/
@@ -5193,12 +7005,12 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
           .filter(cat => store[WORK_CATEGORY_FIELD[cat]][i] > 0)
           .sort((a, b) => store[WORK_CATEGORY_FIELD[a]][i] - store[WORK_CATEGORY_FIELD[b]][i]);
         for (const cat of order) {
-          if (WORK_CATEGORY_CLAIM[cat](store, i, structures, resourceNodes, world, idOf)) break;
+          if (WORK_CATEGORY_CLAIM[cat](store, i, structures, resourceNodes, world, idOf, allowedCheck)) break;
         }
         continue;
       }
 
-      const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i));
+      const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i), allowedCheck);
       if (blueprint) {
         blueprint.claimedBy = idOf(i);
         store.jobState[i] = JobState.SeekingBuild;
@@ -5214,15 +7026,26 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       // gather more raw material that just piles up further behind it. tryClaimProcessing already
       // no-ops when there's no scrap banked or no unstaffed station, so this never steals an idle
       // citizen away from real hauling/harvesting work when there's nothing to process yet.
-      if (tryClaimProcessing(store, i, structures, world, idOf)) continue;
+      if (tryClaimProcessing(store, i, structures, world, idOf, allowedCheck)) continue;
+
+      // Farming (Agronomy research node, see FARM_CYCLE_TICKS above): checked right after
+      // Processing, same "a built staffed producer beats going to fetch more raw material" logic
+      // -- a Farm Plot needing a worker is exactly as ready-to-use as an unstaffed workshop with
+      // scrap on hand. Not yet part of the Work Priorities system (WorkCategory in jobs.js only
+      // covers Construction/Processing/Hauling/Harvesting/Animal/Cleaning) -- a v1 scope choice,
+      // so a citizen with a custom priority order set (store.hasWorkPriorities[i]) won't reach
+      // this branch (see the `continue` a few lines above); only the legacy fixed-ladder citizens
+      // below do, same "not yet buildable, so not yet a job" precedent as everything else this
+      // ladder gates on the buildable actually existing.
+      if (tryClaimFarming(store, i, structures, idOf, allowedCheck)) continue;
 
       // Driving a built truck is checked before manual harvesting -- one haul cycle moves far
       // more scrap than one citizen picking at a node by hand, so an idle truck should win the
       // idle-citizen's attention. With resource nodes almost always available, checking this
       // after harvesting meant no citizen ever reached it in testing -- a real bug, not a
       // priority nuance.
-      const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i]);
-      const node = findNearestNode(resourceNodes, store.x[i], store.y[i]);
+      const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i], allowedCheck);
+      const node = findNearestNode(resourceNodes, store.x[i], store.y[i], allowedCheck);
 
       // Passion tie-break (RimWorld-style): only when there's a genuine choice -- both an idle
       // truck and a harvestable node are actually available this tick -- a citizen who burns for
@@ -5254,7 +7077,7 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       // the idle-fallback jobs -- an idle wild animal to approach only matters once there's
       // nothing else productive to do, same reasoning as vehicle/node above but one rung further
       // down, since taming doesn't feed the scrap economy the way those two do.
-      const animal = findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i]);
+      const animal = findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i], allowedCheck);
       if (animal) {
         animal.claimedBy = idOf(i);
         store.jobState[i] = JobState.SeekingAnimal;
@@ -5267,7 +7090,7 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       // real 17-category list -- below Construction/Hauling/Harvesting, ahead of only Research):
       // lowest rung of the whole idle-fallback ladder, one further down than Taming. A mess only
       // gets swept once there's genuinely nothing else productive for an idle citizen to do.
-      const messyRoom = findNearestMessyRoom(world.rooms, world.grid, store.x[i], store.y[i]);
+      const messyRoom = findNearestMessyRoom(world.rooms, world.grid, store.x[i], store.y[i], allowedCheck);
       if (messyRoom) {
         const target = roomCentroid(messyRoom, world.grid);
         store.jobState[i] = JobState.SeekingClean;
@@ -5281,7 +7104,8 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
     if (state === JobState.SeekingFood || state === JobState.SeekingBed || state === JobState.SeekingRec
       || state === JobState.SeekingBuild || state === JobState.SeekingScrap || state === JobState.SeekingVehicle
       || state === JobState.SeekingAnimal || state === JobState.SeekingClean || state === JobState.SeekingWorkshop
-      || state === JobState.SeekingProgram) {
+      || state === JobState.SeekingProgram || state === JobState.SeekingTend || state === JobState.SeekingExercise
+      || state === JobState.SeekingFarm) {
       const dx = store.targetX[i] - store.x[i];
       const dy = store.targetY[i] - store.y[i];
       const dist = Math.hypot(dx, dy);
@@ -5301,6 +7125,19 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
           store.jobState[i] = JobState.Taming;
           continue;
         }
+        if (state === JobState.SeekingTend) {
+          const targetIdx = store._jobRef[i];
+          // Re-check on arrival, same "beaten to it / patient moved on" bar as SeekingVehicle/
+          // SeekingWorkshop/SeekingProgram above -- the patient can recover (or die) during the
+          // walk over, or (defensively) end up claimed by someone else if state ever desyncs.
+          if (targetIdx == null || !store.isAliveAt(targetIdx) || !store.isDownedAt(targetIdx)
+            || store.tendClaimedBy[targetIdx] !== idOf(i)) {
+            store.jobState[i] = JobState.Idle;
+            continue;
+          }
+          store.jobState[i] = JobState.Tending;
+          continue;
+        }
         if (state === JobState.SeekingClean) {
           store.jobState[i] = JobState.Cleaning;
           continue;
@@ -5309,6 +7146,12 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
           const station = store._jobRef[i];
           if (station.workerId !== idOf(i)) { store.jobState[i] = JobState.Idle; continue; } // beaten to it
           store.jobState[i] = JobState.Processing;
+          continue;
+        }
+        if (state === JobState.SeekingFarm) {
+          const plot = store._jobRef[i];
+          if (plot.workerId !== idOf(i)) { store.jobState[i] = JobState.Idle; continue; } // beaten to it
+          store.jobState[i] = JobState.Farming;
           continue;
         }
         if (state === JobState.SeekingProgram) {
@@ -5331,10 +7174,11 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
           : state === JobState.SeekingBed ? JobState.Sleeping
           : state === JobState.SeekingRec ? JobState.Recreating
           : state === JobState.SeekingBuild ? JobState.Building
+          : state === JobState.SeekingExercise ? JobState.Exercising
           : JobState.Harvesting;
       } else {
         const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1) * breakRateMultFor(store, i)
-          * unrestRateMultFor(world);
+          * unrestRateMultFor(world) * arrivalMishapRateMultFor(world);
         store.x[i] += (dx / dist) * speed;
         store.y[i] += (dy / dist) * speed;
       }
@@ -5381,14 +7225,31 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       continue;
     }
 
+    if (state === JobState.Exercising) {
+      // Defensive bail, same shape as Building's destroyed-blueprint check and Processing's
+      // destroyed-station check below -- a Fitness Station can be destroyed mid-use.
+      const station = store._jobRef?.[i];
+      if (!station || station.destroyed || station.underConstruction) { store.jobState[i] = JobState.Idle; continue; }
+      const exRoom = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      // Same role gate as Eating/Sleeping/Recreating above: the enclosed-room bonus only applies
+      // to a room actually validated as a Gymnasium (Gymnasium zone + >=1 Fitness Station, see
+      // rooms.js's classifyRoomRole) -- an unroofed Fitness Station still refills Exercise (the
+      // buildable itself is what's required, matching "a citizen actually uses the Fitness
+      // Station"), just at the baseline rate rather than the enclosed-room bonus rate.
+      const roomBonus = (exRoom && exRoom.role === RoomRole.Gymnasium && exRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
+      store.exercise[i] = Math.min(1, store.exercise[i] + REFILL_RATE * roomBonus);
+      if (store.exercise[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
+      continue;
+    }
+
     if (state === JobState.Building) {
       const bp = store._jobRef?.[i];
       if (!bp || bp.destroyed || !bp.underConstruction) { store.jobState[i] = JobState.Idle; continue; }
       // needsThrottleMultFor (citizens.js): RimWorld's real StatPart_Food/StatPart_Rest
       // work-speed factors -- urgently hungry/tired citizens build measurably slower even before
       // they're miserable enough to actually go on break.
-      const buildRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * needsThrottleMultFor(store, i);
+      const buildRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i);
       // bp.buildWorkMult (siege.js's Structure, per-kind construction work) slows the flat
       // BUILD_RATE down for pricier buildings -- default 1 covers any pre-existing structure
       // from a save saved before this field existed.
@@ -5396,7 +7257,7 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       if (bp.buildProgress >= 1) {
         bp.underConstruction = false;
         bp.claimedBy = null;
-        store.skillConstruction[i] += BUILD_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]];
+        store.skillConstruction[i] += BUILD_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
         store.jobState[i] = JobState.Idle;
         // Mood event trigger #2 (positive, see citizens.js's addMoodEvent/MOOD_EVENT_STACK_LIMITS):
         // finishing a build is a small, stacking, decaying morale boost -- RimWorld-scaled
@@ -5409,12 +7270,12 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
     if (state === JobState.Harvesting) {
       const node = store._jobRef?.[i];
       if (!node || node.depleted) { store.jobState[i] = JobState.Idle; continue; }
-      const harvestRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * needsThrottleMultFor(store, i);
+      const harvestRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i);
       const take = Math.min(HARVEST_RATE * harvestRateMult, node.amount);
       node.amount -= take;
       onScrapGain?.(take);
-      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2 * PASSION_GAIN_MULT[store.passionConstruction[i]];
+      store.skillConstruction[i] += HARVEST_SKILL_GAIN * 0.2 * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
       if (node.amount <= 0) node.depleted = true;
       if (node.depleted) store.jobState[i] = JobState.Idle;
       continue;
@@ -5439,9 +7300,35 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       // (detectRooms rebuilds this.rooms, see world.js) -- same defensive bail as Building's
       // destroyed-blueprint check and Harvesting's depleted-node check above.
       if (!room || !world.rooms.includes(room)) { store.jobState[i] = JobState.Idle; continue; }
-      const cleanRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * (store.trait[i]?.workSpeedMult ?? 1);
+      const cleanRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world) * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i);
       room.mess = Math.max(0, (room.mess || 0) - CLEAN_RATE * cleanRateMult);
       if (room.mess <= 0) store.jobState[i] = JobState.Idle;
+      continue;
+    }
+
+    if (state === JobState.Tending) {
+      const targetIdx = store._jobRef?.[i];
+      // Defensive bail, same shape as Cleaning's vanished-room check above -- the patient can
+      // recover (citizens.js's tickNeedsAndMood runs BEFORE tickJobs every tick, so a health
+      // crossing DOWNED_RECOVER_THRESHOLD this same tick is already reflected in isDownedAt here),
+      // die, or (defensively) end up reassigned if state ever desyncs.
+      if (targetIdx == null || !store.isAliveAt(targetIdx) || !store.isDownedAt(targetIdx)
+        || store.tendClaimedBy[targetIdx] !== idOf(i)) {
+        if (targetIdx != null && store.tendClaimedBy[targetIdx] === idOf(i)) store.tendClaimedBy[targetIdx] = -1;
+        store.jobState[i] = JobState.Idle;
+        continue;
+      }
+      // The signal citizens.js's tickNeedsAndMood reads NEXT tick to swap the passive
+      // DOWNED_RECOVERY_RATE for the ~4x TEND_RECOVERY_RATE -- see that function's own doc comment
+      // for the exact one-tick-lag ordering (tickNeedsAndMood always runs before tickJobs).
+      store.beingTended[targetIdx] = 1;
+      // Small chance-based variance on tend quality (echoing RimWorld's real medicine-quality
+      // curve without an item-tier system): a rare extra nudge to the patient's health, symmetric
+      // bonus/malus, layered on top of the flat rate swap above rather than replacing it.
+      if (world?.rng && world.rng() < TEND_VARIANCE_CHANCE) {
+        const bonus = world.rng() < 0.5 ? -TEND_VARIANCE_MAG : TEND_VARIANCE_MAG;
+        store.health[targetIdx] = Math.min(1, Math.max(0, store.health[targetIdx] + bonus));
+      }
       continue;
     }
 
@@ -5467,8 +7354,8 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
         world.addScrap(-WORKSHOP_RAW_PER_UNIT, 'processing');
         station._workTimer = WORKSHOP_PROCESS_TICKS;
       }
-      const processRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * needsThrottleMultFor(store, i);
+      const processRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i);
       station._workTimer -= processRateMult;
       if (station._workTimer <= 0) {
         station._workTimer = 0;
@@ -5477,7 +7364,35 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
         // hauling system exists for a distinct "Components" resource, so this is the option that
         // actually integrates with the rest of the economy instead of adding a parallel one).
         world.addScrap(WORKSHOP_PROCESSED_PER_UNIT, 'processing');
-        store.skillConstruction[i] += HARVEST_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]];
+        store.skillConstruction[i] += HARVEST_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
+      }
+      continue;
+    }
+
+    if (state === JobState.Farming) {
+      const plot = store._jobRef?.[i];
+      // Defensive bail, same shape as Processing's destroyed-station check above -- a Farm Plot
+      // can be destroyed mid-tend, or (defensively) end up worked by someone else if state ever
+      // gets out of sync.
+      if (!plot || plot.destroyed || plot.underConstruction || plot.workerId !== idOf(i)) {
+        store.jobState[i] = JobState.Idle;
+        continue;
+      }
+      // No raw-input gate here, deliberately (see tryClaimFarming's doc comment) -- tending just
+      // accrues real time toward the next cycle, using Structure's generic `_workTimer` field the
+      // same way 'workshop' does for its own work-in-progress countdown.
+      const farmRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i);
+      plot._workTimer = (plot._workTimer || 0) + farmRateMult;
+      if (plot._workTimer >= FARM_CYCLE_TICKS) {
+        plot._workTimer = 0;
+        // Paid out as scrap (see FARM_YIELD_PER_CYCLE's doc comment -- no separate Food-stockpile
+        // resource exists in this codebase, same "integrate with the economy that actually exists"
+        // choice the Processing job already made for its own Components output). The worker stays
+        // assigned into the next cycle rather than being released -- a Farm Plot is a standing job,
+        // not a one-shot claim like a blueprint or a single workshop unit.
+        world.addScrap(FARM_YIELD_PER_CYCLE, 'farm');
+        store.skillConstruction[i] += FARM_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
       }
       continue;
     }
@@ -5510,10 +7425,19 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
         store.jobState[i] = JobState.Idle;
         if (courseComplete) {
           store.programSessionsDone[i] = 0;
+          // Staff training (programs.js's ProgramKind.GuardResponseTraining, dispatched by
+          // security.js's tickStaffTraining, never through this Idle-branch's own
+          // findJoinableSite path): mark the graduate on the roster so tickStaffTraining stops
+          // re-dispatching them -- see that function's doc comment for why it needs its own
+          // "already done" tracking distinct from a citizen's programSessionsDone counter alone.
+          if (site.kind === 'guard_response_training') world.roster?.markTrainingGraduated?.(idOf(i));
           if (world?.milestoneLog) {
-            const text = `${store.name[i]} completes ${def.label}${site.kind === 'wellness_counseling' ? (graduated ? ' -- graduated' : ' -- did not graduate this time') : ''}`;
+            const suffix = site.kind === 'wellness_counseling' ? (graduated ? ' -- graduated' : ' -- did not graduate this time')
+              : site.kind === 'community_gathering' ? (graduated ? ' -- had a great time' : ' -- didn\'t go so well') : '';
+            const text = `${store.name[i]} completes ${def.label}${suffix}`;
             world.milestoneLog.push({ tick: world.currentTick, text });
             if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+            world.onRandomEvent?.(text);
           }
         }
       }
@@ -5558,6 +7482,739 @@ function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, idOf, on
       }
       continue;
     }
+  }
+}
+
+
+// ---- drones.js ----
+// Labor drones -- RimWorld Biotech's mech-companion analog (see FEATURE_RESEARCH.md's Biotech
+// research pass: "recommends mech-companion labor drones, cheapest/highest-value addition"). A
+// drone is a tireless, non-needs-having autonomous worker, distinct from the K9 dog companion
+// (security.js -- that one fights, doesn't work). Reskinned per SEA:R's salvage-tech aesthetic
+// rather than "robot" sci-fi framing: a small mechanical fabrication unit, not an AI/android.
+//
+// Real RimWorld anchor numbers this was ported from, and how they map onto this project:
+//  - Light worker mech: ~50 Steel + minor component to build, ~1800 work-amount (~2 in-game days
+//    at RimWorld's day length) to construct, locked to exactly ONE WorkTypeDef per unit.
+//  - This project's scrap economy runs far cheaper than RimWorld's (BUILD_COST tops out in the
+//    40-90 range) and its "day" is DAY_NIGHT_CYCLE_TICKS=2400 ticks (schedule.js) -- RimWorld's
+//    literal "~2 days" doesn't scale honestly onto that (it's calibrated to a much longer real
+//    day length), so gestation is instead "a few hundred ticks" (matching this codebase's own
+//    established scale for a meaningful-but-not-punishing wait, see economy.js's
+//    TRADER_WINDOW_TICKS=400 for the same order of magnitude already used elsewhere).
+//  - "Locked to exactly one work category" -> jobs.js's WorkCategory enum, reused directly rather
+//    than inventing a parallel one.
+//  - "Capacity gated by a building, not a per-unit purchase" -> mirrors security.js's
+//    tickArmoryIssuance pattern exactly: count non-destroyed/non-underConstruction
+//    'fabrication_bay' structures, each unlocks DRONE_SLOTS_PER_BAY more total drone capacity,
+//    hard-capped so a maxed-out bay farm can't scale forever.
+//
+// Deliberately NOT supported: WorkCategory.Animal. A mechanical unit taming a wild animal reads
+// as a thematic mismatch (RimWorld's own mechs can't do Animals work either -- it's gated off
+// their WorkTypeDefs same as this), so drones offer the other five categories only. This module
+// is placed after jobs.js in build.py's ORDER (needed for the flat-bundle top-level-reference
+// rule every other file here already follows) so it can import jobs.js's WorkCategory/rate
+// constants directly instead of duplicating them.
+
+
+
+const DRONE_COST = 30; // "~50 Steel + minor component" scaled onto this project's economy tier (see economy.js's BUILD_COST comment)
+// "~1800 work-amount / ~2 in-game days" is RimWorld's own day-length-calibrated number -- NOT
+// reused literally (see header comment). 420 ticks is ~1/5.7 of a DAY_NIGHT_CYCLE_TICKS=2400 day,
+// squarely "a few hundred ticks" per the task brief -- a real, felt wait without being punishing.
+const DRONE_GESTATION_TICKS = 420;
+const DRONE_SLOTS_PER_BAY = 2; // one Fabrication Bay unlocks 2 drone slots, same "a building unlocks capacity" shape as tickArmoryIssuance
+const DRONE_SLOT_HARD_CAP = 12; // caps how far bay-stacking can push total capacity, same spirit as WEAPON_TIER_ORDER's own finite ladder in security.js
+const DRONE_SPEED = JOB_SPEED; // no stated reason a drone should out-walk a citizen -- same travel speed, tireless just means no needs-seeking detours
+
+// Categories a mechanical labor drone can be locked to at creation -- see the header comment for
+// why Animal is excluded. Order matches jobs.js's WORK_CATEGORY_ORDER minus Animal.
+const DRONE_CATEGORIES = [
+  WorkCategory.Construction, WorkCategory.Processing, WorkCategory.Hauling,
+  WorkCategory.Harvesting, WorkCategory.Cleaning,
+];
+
+let _nextDroneId = 1;
+// Drone ids are strings ('drone_N'), deliberately never colliding in type with citizen ids
+// (plain numbers, see citizens.js's _nextId) -- any code that compares a claim's owner against
+// idOf(i) (a number) for citizens naturally never matches a drone's string id, so drones and
+// citizens can safely contend for the same blueprint/workshop/vehicle claim pool with zero extra
+// bookkeeping.
+function _nextDroneIdStr() { return `drone_${_nextDroneId++}`; }
+
+/** Called once from world.js's deserialize() after restoring saved drones -- bumps the id
+ *  counter past whatever the highest restored id was, so a freshly-fabricated drone after a
+ *  load can never reuse an id a restored (still-alive) drone already holds a blueprint/vehicle/
+ *  workshop claim under. */
+function bumpDroneIdCounter(drones) {
+  for (const d of drones) {
+    const n = parseInt(String(d.id).replace('drone_', ''), 10);
+    if (Number.isFinite(n) && n >= _nextDroneId) _nextDroneId = n + 1;
+  }
+}
+
+class Drone {
+  constructor(id, category, x, y) {
+    this.id = id;
+    this.category = category; // one WorkCategory, fixed for this drone's whole lifetime
+    this.x = x; this.y = y;
+    this.targetX = x; this.targetY = y;
+    this.state = 'idle'; // idle -> seeking -> working|driving -> idle
+    this.jobRef = null; // blueprint | vehicle | resourceNode | room | workshop structure, depending on category
+    this._workshopTimer = 0; // Processing category's own work-in-progress timer, mirrors jobs.js station._workTimer
+  }
+}
+
+/** Total drone capacity unlocked by built (not destroyed/under-construction) Fabrication Bays,
+ *  hard-capped -- exact mirror of security.js's tickArmoryIssuance armoryCount pattern. */
+function droneCapacity(structures) {
+  let bays = 0;
+  for (const s of structures) {
+    if (s.kind === 'fabrication_bay' && !s.destroyed && !s.underConstruction) bays++;
+  }
+  return Math.min(DRONE_SLOT_HARD_CAP, bays * DRONE_SLOTS_PER_BAY);
+}
+
+/** How many drone slots are currently spoken for -- live drones plus anything still gestating in
+ *  the fabrication queue, so the player can't queue past capacity by spamming orders faster than
+ *  gestation completes. */
+function droneSlotsUsed(world) {
+  return (world.drones?.length || 0) + (world.droneFabricationQueue?.length || 0);
+}
+
+/** Attempts to queue one drone of `category` at the nearest built Fabrication Bay. Spends scrap
+ *  immediately (same "pay up front, the thing itself arrives later" convention as a blueprint's
+ *  citizen-construction time) -- returns a reason string on failure, null on success, so input.js/
+ *  main.js can surface exactly why a queue attempt didn't go through. */
+function queueDroneFabrication(world, category) {
+  if (!DRONE_CATEGORIES.includes(category)) return 'Invalid work category for a drone';
+  const bay = world.structures.find(s => s.kind === 'fabrication_bay' && !s.destroyed && !s.underConstruction);
+  if (!bay) return 'Build a Fabrication Bay first';
+  if (droneSlotsUsed(world) >= droneCapacity(world.structures)) return 'No free drone capacity -- build another Fabrication Bay';
+  if (world.scrap < DRONE_COST) return 'Not enough scrap';
+  world.scrap -= DRONE_COST;
+  if (world.finance) world.finance.buildSpend += DRONE_COST;
+  world.droneFabricationQueue.push({ category, ticksRemaining: DRONE_GESTATION_TICKS, bayX: bay.x, bayY: bay.y });
+  return null;
+}
+
+/** Advances the fabrication queue -- ticked every world tick like everything else in world.js's
+ *  tick(). A completed order spawns a live Drone at its bay's position. If capacity has since
+ *  shrunk (a bay was destroyed mid-gestation), the finished drone still spawns -- droneSlotsUsed
+ *  already reserved its slot at queue time, and refunding/discarding a nearly-finished order over
+ *  a since-lost bay would be a worse player experience than just letting it land. */
+function tickDroneFabrication(world) {
+  if (!world.droneFabricationQueue.length) return;
+  for (const order of world.droneFabricationQueue) order.ticksRemaining--;
+  const done = world.droneFabricationQueue.filter(o => o.ticksRemaining <= 0);
+  if (!done.length) return;
+  world.droneFabricationQueue = world.droneFabricationQueue.filter(o => o.ticksRemaining > 0);
+  for (const order of done) {
+    world.drones.push(new Drone(_nextDroneIdStr(), order.category, order.bayX, order.bayY));
+    const label = WORK_CATEGORY_LABELS[order.category];
+    world.milestoneLog.push({ tick: world.currentTick, text: `A ${label} drone rolls off the Fabrication Bay line` });
+    if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  }
+}
+
+// ---- per-category claim helpers, drone-side mirrors of jobs.js's tryClaim* functions above.
+// Deliberately separate (not reused directly) -- jobs.js's versions operate on CitizenStore's SoA
+// arrays (store.x[i]/store.jobState[i]/etc), drones are a small plain-object array like
+// world.vehicles/world.dogs, so the call shape doesn't line up. Each one is a direct behavioral
+// mirror of its jobs.js counterpart minus anything needs/skill-related (drones have neither).
+
+function _claimBlueprint(drone, structures) {
+  let best = null, bestDist = Infinity;
+  for (const s of structures) {
+    if (!s.underConstruction || s.destroyed || s.claimedBy != null) continue;
+    const d = Math.hypot(s.x - drone.x, s.y - drone.y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  if (!best) return false;
+  best.claimedBy = drone.id;
+  drone.jobRef = best; drone.targetX = best.x; drone.targetY = best.y; drone.state = 'seeking';
+  return true;
+}
+
+function _claimHauling(drone, world) {
+  const vehicle = findUndrivenVehicle(world.vehicles, drone.x, drone.y);
+  if (!vehicle) return false;
+  drone.jobRef = vehicle; drone.targetX = vehicle.x; drone.targetY = vehicle.y; drone.state = 'seeking';
+  return true;
+}
+
+function _claimHarvesting(drone, resourceNodes) {
+  let best = null, bestDist = Infinity;
+  for (const n of resourceNodes) {
+    if (n.depleted) continue;
+    const d = Math.hypot(n.x - drone.x, n.y - drone.y);
+    if (d < bestDist) { bestDist = d; best = n; }
+  }
+  if (!best) return false;
+  drone.jobRef = best; drone.targetX = best.x; drone.targetY = best.y; drone.state = 'seeking';
+  return true;
+}
+
+function _claimCleaning(drone, world) {
+  let best = null, bestDist = Infinity, bestCentroid = null;
+  for (const room of world.rooms) {
+    if ((room.mess || 0) < MESS_CLEAN_THRESHOLD) continue;
+    const c = roomCentroid(room, world.grid);
+    const d = Math.hypot(c.x - drone.x, c.y - drone.y);
+    if (d < bestDist) { bestDist = d; best = room; bestCentroid = c; }
+  }
+  if (!best) return false;
+  drone.jobRef = best; drone.targetX = bestCentroid.x; drone.targetY = bestCentroid.y; drone.state = 'seeking';
+  return true;
+}
+
+function _claimProcessing(drone, structures, world) {
+  if (world.scrap < WORKSHOP_RAW_PER_UNIT) return false;
+  let best = null, bestDist = Infinity;
+  for (const s of structures) {
+    if (s.kind !== 'workshop' || s.destroyed || s.underConstruction || s.workerId != null) continue;
+    const d = Math.hypot(s.x - drone.x, s.y - drone.y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  if (!best) return false;
+  best.workerId = drone.id;
+  drone.jobRef = best; drone.targetX = best.x; drone.targetY = best.y; drone.state = 'seeking';
+  return true;
+}
+
+const _CLAIM_BY_CATEGORY = {
+  [WorkCategory.Construction]: (drone, structures, resourceNodes, world) => _claimBlueprint(drone, structures),
+  [WorkCategory.Processing]: (drone, structures, resourceNodes, world) => _claimProcessing(drone, structures, world),
+  [WorkCategory.Hauling]: (drone, structures, resourceNodes, world) => _claimHauling(drone, world),
+  [WorkCategory.Harvesting]: (drone, structures, resourceNodes, world) => _claimHarvesting(drone, resourceNodes),
+  [WorkCategory.Cleaning]: (drone, structures, resourceNodes, world) => _claimCleaning(drone, world),
+};
+
+/** Full per-drone tick: idle -> claim -> travel -> work -> idle, no needs/mood anywhere in the
+ *  loop (that's the entire point -- see the header comment). Called once per world tick from
+ *  world.js, same call shape as jobs.js's tickJobs. */
+function tickDrones(world) {
+  for (const drone of world.drones) {
+    if (drone.state === 'idle') {
+      const claim = _CLAIM_BY_CATEGORY[drone.category];
+      claim?.(drone, world.structures, world.resourceNodes, world);
+      continue;
+    }
+
+    if (drone.state === 'seeking') {
+      const arriveDist = drone.category === WorkCategory.Cleaning ? CLEAN_ARRIVE_DIST : ARRIVE_DIST;
+      const dx = drone.targetX - drone.x, dy = drone.targetY - drone.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < arriveDist) {
+        if (drone.category === WorkCategory.Hauling) {
+          const vehicle = drone.jobRef;
+          if (vehicle.driverId != null) { drone.jobRef = null; drone.state = 'idle'; continue; } // beaten to it
+          boardVehicle(world, vehicle, drone.id);
+          drone.state = 'driving';
+          continue;
+        }
+        if (drone.category === WorkCategory.Processing) {
+          const station = drone.jobRef;
+          if (station.workerId !== drone.id) { drone.jobRef = null; drone.state = 'idle'; continue; } // beaten to it
+        }
+        drone.state = 'working';
+      } else {
+        drone.x += (dx / dist) * DRONE_SPEED;
+        drone.y += (dy / dist) * DRONE_SPEED;
+      }
+      continue;
+    }
+
+    if (drone.state === 'driving') {
+      const vehicle = drone.jobRef;
+      if (!vehicle || vehicle.driverId !== drone.id) {
+        // vehicles.js clears driverId itself once the haul completes and it's back home -- same
+        // "that's the release signal" convention jobs.js's own Driving state uses.
+        drone.state = 'idle'; drone.jobRef = null;
+        if (vehicle) { drone.x = vehicle.garageX; drone.y = vehicle.garageY; }
+        continue;
+      }
+      drone.x = vehicle.x; drone.y = vehicle.y; // riding along, hidden -- render.js skips a driving drone same as a driving citizen
+      continue;
+    }
+
+    if (drone.state === 'working') {
+      if (drone.category === WorkCategory.Construction) {
+        const bp = drone.jobRef;
+        if (!bp || bp.destroyed || !bp.underConstruction) { drone.state = 'idle'; drone.jobRef = null; continue; }
+        bp.buildProgress = Math.min(1, (bp.buildProgress || 0) + BUILD_RATE / (bp.buildWorkMult || 1));
+        if (bp.buildProgress >= 1) {
+          bp.underConstruction = false;
+          bp.claimedBy = null;
+          drone.state = 'idle'; drone.jobRef = null;
+          if (world) world.onBuildComplete?.(bp);
+        }
+        continue;
+      }
+      if (drone.category === WorkCategory.Harvesting) {
+        const node = drone.jobRef;
+        if (!node || node.depleted) { drone.state = 'idle'; drone.jobRef = null; continue; }
+        const take = Math.min(HARVEST_RATE, node.amount);
+        node.amount -= take;
+        world.addScrap(take, 'harvest');
+        if (node.amount <= 0) node.depleted = true;
+        if (node.depleted) { drone.state = 'idle'; drone.jobRef = null; }
+        continue;
+      }
+      if (drone.category === WorkCategory.Cleaning) {
+        const room = drone.jobRef;
+        if (!room || !world.rooms.includes(room)) { drone.state = 'idle'; drone.jobRef = null; continue; }
+        room.mess = Math.max(0, (room.mess || 0) - CLEAN_RATE);
+        if (room.mess <= 0) { drone.state = 'idle'; drone.jobRef = null; }
+        continue;
+      }
+      if (drone.category === WorkCategory.Processing) {
+        const station = drone.jobRef;
+        if (!station || station.destroyed || station.underConstruction || station.workerId !== drone.id) {
+          drone.state = 'idle'; drone.jobRef = null; continue;
+        }
+        if (drone._workshopTimer <= 0) {
+          if (world.scrap < WORKSHOP_RAW_PER_UNIT) { station.workerId = null; drone.state = 'idle'; drone.jobRef = null; continue; }
+          world.addScrap(-WORKSHOP_RAW_PER_UNIT, 'processing');
+          drone._workshopTimer = WORKSHOP_PROCESS_TICKS;
+        }
+        drone._workshopTimer -= 1;
+        if (drone._workshopTimer <= 0) {
+          world.addScrap(WORKSHOP_PROCESSED_PER_UNIT, 'processing');
+        }
+        continue;
+      }
+    }
+  }
+}
+
+
+// ---- forcejob.js ----
+// ============================================================================================
+// forcejob.js -- RimWorld-style "Prioritize" one-shot job override.
+//
+// RimWorld lets the player right-click an UNDRAFTED colonist and "Prioritize" a specific job --
+// forcing them to do THIS blueprint/haul/etc next, jumping the autonomous priority queue, without
+// drafting them out of the AI entirely (drafting is draft.js's separate, much bigger hammer: full
+// manual control, no autonomy at all until undrafted). Force Job is much smaller: "do this one
+// thing next, then resume normal autonomous priority" -- a single pending override consumed the
+// next time jobs.js's tickJobs evaluates that citizen's Idle branch, then cleared either way.
+//
+// PUBLIC INTERFACE:
+//   ForceJobKind: { Blueprint, Node, Room, Workshop }
+//   forceJob(world, citizenId, targetKind, targetRef) -> bool
+//   clearForcedJob(store, i) -> void
+//   tryClaimForcedJob(store, i, world, idOf) -> bool   (called from jobs.js's Idle branch)
+//   pickClosestUndraftedCitizen(world, citizenIds, targetX, targetY) -> id|null  (multi-select
+//     "same target, only the closest one" rule, see input.js's wiring for why)
+//
+// DESIGN NOTES for whoever builds on this next:
+//   - Storage lives on citizens.js's CitizenStore: forcedJobKind[i] (a ForceJobKind string or
+//     null) + _forcedJobRef (a plain object map, index -> target object, same non-typed-array
+//     precedent as jobState's own _jobRef) -- NOT draft.js's orderKind/orderTargetX/Y/
+//     orderAttackIndex, a genuinely different concept: an order is executed by draft.js's own
+//     tickDrafted every single tick for as long as it's active; a forced job is consumed ONCE by
+//     jobs.js's normal tickJobs/claim machinery and then behaves exactly like any other
+//     autonomously-claimed job from that point on (travels, works, completes, releases its claim
+//     the same way findNearestBlueprint/findNearestNode/etc.-claimed jobs always have) -- no
+//     separate execution loop needed here, it rides the existing SeekingX/X state pairs.
+//   - One-shot, always consumed: tryClaimForcedJob clears forcedJobKind/_forcedJobRef the moment
+//     it's called, whether or not the claim actually succeeds (the target may have vanished, been
+//     claimed by someone else, or a room may have stopped being messy since the order was given)
+//     -- there is no "retry next tick" loop, matching RimWorld's own Prioritize, which silently
+//     drops the order if the job can no longer be done rather than nagging forever.
+//   - Interrupts in-progress work immediately: forceJob calls jobs.js's releaseCurrentJobClaim if
+//     the citizen isn't already Idle, exactly like draft.js's draftCitizen does when drafting a
+//     citizen mid-task -- so the override genuinely jumps the queue THIS tick instead of waiting
+//     for whatever they were doing to wrap up naturally.
+//   - Refuses a drafted citizen outright (returns false) -- a drafted citizen never reaches
+//     jobs.js's tickJobs Idle branch at all (see that function's isDraftedAt skip), so a forced
+//     job on one would just sit unconsumed forever. input.js's own gesture-routing already only
+//     offers Force Job when nothing in the current selection is drafted, but forceJob defends this
+//     invariant itself too, rather than trusting every future caller to pre-filter correctly.
+// ============================================================================================
+
+
+const ForceJobKind = Object.freeze({
+  Blueprint: 'blueprint',
+  Node: 'node',
+  Room: 'room',
+  Workshop: 'workshop',
+});
+
+function _forceJobFindCitizenIndexById(citizens, id) {
+  for (let i = 0; i < citizens.count; i++) if (citizens.id[i] === id) return i;
+  return -1;
+}
+
+function clearForcedJob(store, i) {
+  store.forcedJobKind[i] = null;
+  store._forcedJobRef[i] = null;
+}
+
+// Marks targetRef as citizen citizenId's next forced job -- see file header for the full
+// interrupt/one-shot semantics. Returns false (no-op) if citizenId doesn't resolve to a living,
+// currently-undrafted citizen, or targetKind isn't one of ForceJobKind's values.
+function forceJob(world, citizenId, targetKind, targetRef) {
+  if (!Object.values(ForceJobKind).includes(targetKind) || !targetRef) return false;
+  const store = world.citizens;
+  const i = _forceJobFindCitizenIndexById(store, citizenId);
+  if (i < 0 || !store.isAliveAt(i) || store.isDraftedAt(i)) return false;
+  // Interrupt whatever this citizen is doing right now -- same "instant, not next-natural-break"
+  // release draft.js's draftCitizen uses when drafting a citizen mid-task. A forced job that only
+  // took effect once the citizen happened to go Idle on their own wouldn't be jumping the queue.
+  if (store.jobState[i] !== JobState.Idle) {
+    releaseCurrentJobClaim(store, i, (idx) => world.idOf(idx));
+  }
+  store.forcedJobKind[i] = targetKind;
+  store._forcedJobRef[i] = targetRef;
+  return true;
+}
+
+// Called from jobs.js's Idle branch, right after the critical-hunger override check and before
+// every other need/program/work-priority check below it -- a pending forced job jumps the entire
+// autonomous ladder (Construction/Processing/Hauling/Harvesting/Animal/Cleaning, and a citizen's
+// own Work Priorities override if they have one) but NOT a genuine starvation emergency, same
+// "real crisis still wins" precedent CRITICAL_HUNGER_OVERRIDE already sets for everything else in
+// that branch. Always consumes the pending job (clearForcedJob runs regardless of outcome) so a
+// stale target can't sit there re-attempting forever.
+function tryClaimForcedJob(store, i, world, idOf) {
+  const kind = store.forcedJobKind[i];
+  if (!kind) return false;
+  const target = store._forcedJobRef[i];
+  clearForcedJob(store, i);
+
+  if (kind === ForceJobKind.Blueprint) {
+    if (!target || target.destroyed || !target.underConstruction) return false;
+    if (target.claimedBy != null && target.claimedBy !== idOf(i)) return false; // beaten to it
+    target.claimedBy = idOf(i);
+    store.jobState[i] = JobState.SeekingBuild;
+    store.targetX[i] = target.x; store.targetY[i] = target.y;
+    store._jobRef[i] = target;
+    return true;
+  }
+  if (kind === ForceJobKind.Node) {
+    if (!target || target.depleted) return false;
+    store.jobState[i] = JobState.SeekingScrap;
+    store.targetX[i] = target.x; store.targetY[i] = target.y;
+    store._jobRef[i] = target;
+    return true;
+  }
+  if (kind === ForceJobKind.Room) {
+    if (!target || !world.rooms.includes(target)) return false;
+    const centroid = roomCentroid(target, world.grid);
+    store.jobState[i] = JobState.SeekingClean;
+    store.targetX[i] = centroid.x; store.targetY[i] = centroid.y;
+    store._jobRef[i] = target;
+    return true;
+  }
+  if (kind === ForceJobKind.Workshop) {
+    if (!target || target.destroyed || target.underConstruction || target.workerId != null) return false;
+    target.workerId = idOf(i);
+    store.jobState[i] = JobState.SeekingWorkshop;
+    store.targetX[i] = target.x; store.targetY[i] = target.y;
+    store._jobRef[i] = target;
+    return true;
+  }
+  return false;
+}
+
+// Multi-citizen rule (input.js's right-click wiring, see that file's header comment on why): when
+// several undrafted citizens are selected and the player right-clicks a single job target, only
+// the CLOSEST one should get the forced job -- forcing the same blueprint/room/station onto
+// multiple citizens at once doesn't make sense given jobs.js's own single-claim `claimedBy`/
+// `workerId` pattern (a resource node has no claim field, but "several citizens all forced onto
+// the same node" is still a wasted order, not a useful one, same reasoning). Returns the closest
+// living, undrafted citizen's id, or null if citizenIds is empty or none currently qualify.
+function pickClosestUndraftedCitizen(world, citizenIds, targetX, targetY) {
+  const store = world.citizens;
+  let bestId = null, bestDist = Infinity;
+  for (const id of citizenIds) {
+    const i = _forceJobFindCitizenIndexById(store, id);
+    if (i < 0 || !store.isAliveAt(i) || store.isDraftedAt(i)) continue;
+    const d = Math.hypot(store.x[i] - targetX, store.y[i] - targetY);
+    if (d < bestDist) { bestDist = d; bestId = id; }
+  }
+  return bestId;
+}
+
+
+// ---- draft.js ----
+// ============================================================================================
+// draft.js -- RimWorld-style Draft/Undraft manual-control command system.
+//
+// PUBLIC INTERFACE (import these from other modules -- this is the whole surface later agents
+// should build against; everything else in this file is a private implementation detail):
+//   isDrafted(world, citizenId) -> bool
+//   draftCitizen(world, citizenId) -> bool        (false if citizenId doesn't resolve to a living citizen)
+//   undraftCitizen(world, citizenId) -> bool       (same)
+//   issueMoveOrder(world, citizenIds, x, y) -> void        (citizenIds: array of citizen ids; ids
+//                                                            that aren't drafted are silently skipped)
+//   issueAttackOrder(world, citizenIds, targetAttackerIndex) -> void  (same skip rule; see the
+//                                                            AttackerStore-index caveat below)
+//   cancelOrder(world, citizenId) -> void          (drop the current order, citizen holds position)
+//   tickDrafted(world) -> void                     (call once per tick from world.js's tick();
+//                                                    owns ALL movement/combat for drafted citizens)
+//
+// DESIGN NOTES for whoever builds on this next:
+//   - A drafted citizen is flagged via citizens.js's CitizenFlags.Drafted (store.isDraftedAt(i)).
+//     jobs.js's tickJobs, security.js's tickStaffDuty/tickStaffOffDuty, siege.js's tickStaffCombat,
+//     and world.js's tickWander skipIf callback ALL check this flag and skip a drafted citizen
+//     entirely -- that is the "removed from autonomy" half of the system, already wired at each of
+//     those call sites, nothing else to do there. This file owns the OTHER half: what a drafted
+//     citizen actually does each tick (stand still by default, or execute whichever order -- Move
+//     or Attack -- is currently active).
+//   - Per-citizen order state (orderKind/orderTargetX/orderTargetY/orderAttackIndex) lives on
+//     CitizenStore itself (citizens.js), as plain SoA fields -- same shape/precedent as jobState/
+//     _jobRef. orderKind: 0 = none ("stand and hold"), 1 = Move, 2 = Attack.
+//   - Attack orders target an INDEX into world.attackers (siege.js's AttackerStore), not a stable
+//     id -- AttackerStore has no id field (nothing else in this codebase needed one; every existing
+//     combat call site -- tickTurrets, tickStaffCombat, tickAttackers -- just uses the live index
+//     the same tick it's found). This is a real, documented limitation: AttackerStore.spawn()
+//     recycles a dead slot once the store is at its 1024 capacity, so in the extreme case a stored
+//     orderAttackIndex could, a tick later, refer to a freshly-spawned unrelated attacker rather
+//     than the original target. That requires 1024 simultaneously-live attackers, which no wave in
+//     this game's balance ever approaches -- an accepted edge case, not something worth an
+//     AttackerStore schema change to close for this pass. A future pass wanting a bulletproof fix:
+//     give AttackerStore its own `id` Uint32Array (mirroring CitizenStore.id) and switch
+//     orderAttackIndex to an orderAttackId + a linear resolve, same pattern citizens already use.
+//   - Movement reuses the exact same straight-line-toward-target approach every other travel state
+//     in this game already uses (jobs.js's Seeking* states, citizens.js's tickWander) -- this
+//     project has no pathfinding/grid-routing at all (grid.js's SettlementGrid only tracks tile
+//     passability for placement/wall-blocking purposes, see its isBlocked/inBounds), so "reuse
+//     whatever pathing this project already has" means direct-line movement, same as everywhere
+//     else a citizen or attacker moves in this codebase.
+//   - Combat reuses siege.js's real damage pipeline (damageAttacker/rollsHit/DamageType) and the
+//     same GUARD_*/SNIPER_* baseline stats tickStaffCombat uses for on-duty guards/snipers --
+//     draft.js does not invent a second combat-numbers table. A drafted Guard/Sniper fights with
+//     their real armory-issued weapon tier (security.js's WEAPON_TIERS, same as tickStaffCombat);
+//     any other drafted citizen fights with the unarmed-civilian baseline (GUARD_RANGE/DAMAGE/
+//     COOLDOWN/PENETRATION) -- RimWorld itself lets you draft and fight with any colonist, armed or
+//     not, so this mirrors that rather than restricting attack orders to staff only.
+// ============================================================================================
+
+
+
+
+
+
+
+const OrderKind = Object.freeze({ None: 0, Move: 1, Attack: 2 });
+
+// Group move-order formation spacing (world units, same scale as ARRIVE_DIST/the 0.8-unit citizen-
+// pick radius in input.js) -- when 2+ drafted citizens are ordered to the same point, they'd
+// otherwise all path to and stack on the exact same tile (colliding/blocking each other visually,
+// even though this project has no real collision physics to get stuck on). A simple ring formation
+// spreads them out instead: citizen 0 gets the exact clicked point, then each further citizen fans
+// out onto a ring of `ring*6` evenly-spaced slots at `ring*FORMATION_SPACING` radius. Not meant to
+// be a sophisticated RimWorld-style facing formation, just enough that a group order visibly reads
+// as "the squad converges near here" rather than "everyone teleports onto one pixel".
+const FORMATION_SPACING = 0.55;
+function _formationOffset(index, total) {
+  if (total <= 1 || index === 0) return [0, 0];
+  let ring = 1, ringCapacity = 6;
+  let idx = index;
+  while (idx > ringCapacity) {
+    idx -= ringCapacity;
+    ring++;
+    ringCapacity = ring * 6;
+  }
+  const angle = ((idx - 1) / ringCapacity) * Math.PI * 2;
+  const radius = ring * FORMATION_SPACING;
+  return [Math.cos(angle) * radius, Math.sin(angle) * radius];
+}
+
+function _draftFindCitizenIndexById(citizens, id) {
+  for (let i = 0; i < citizens.count; i++) if (citizens.id[i] === id) return i;
+  return -1;
+}
+
+// ---------------------------------------------------------------- public interface
+
+function isDrafted(world, citizenId) {
+  const i = _draftFindCitizenIndexById(world.citizens, citizenId);
+  return i >= 0 && world.citizens.isDraftedAt(i);
+}
+
+// Drafts citizen `citizenId`: flips the Drafted flag and immediately releases whatever
+// autonomous job (blueprint claim, workshop staffing, program attendance, etc.) they were mid-way
+// through -- this is what makes the stop genuinely instant/mid-task rather than waiting for the
+// next natural break point (releaseCurrentJobClaim, shared with jobs.js's own Duty-Roster sleep
+// interrupt for exactly this reason -- see that function's doc comment in jobs.js).
+// Returns false (no-op) if citizenId doesn't resolve to a currently-living citizen.
+function draftCitizen(world, citizenId) {
+  const i = _draftFindCitizenIndexById(world.citizens, citizenId);
+  if (i < 0 || !world.citizens.isAliveAt(i)) return false;
+  const store = world.citizens;
+  if (store.isDraftedAt(i)) return true; // already drafted, nothing to do
+  releaseCurrentJobClaim(store, i, (idx) => world.idOf(idx));
+  // Drop any pending Force Job too (forcejob.js) -- a drafted citizen never reaches jobs.js's
+  // Idle branch (see that file's isDraftedAt skip), so a stale forced-job order would otherwise
+  // sit unconsumed forever, and its render.js indicator would keep showing on a citizen the
+  // player just took manual control of.
+  clearForcedJob(store, i);
+  store.flags[i] |= CitizenFlags.Drafted;
+  store.orderKind[i] = OrderKind.None;
+  store.orderAttackIndex[i] = -1;
+  store.targetX[i] = store.x[i]; store.targetY[i] = store.y[i]; // hold position, no residual wander target
+  return true;
+}
+
+// Undrafts citizen `citizenId`: clears the flag and any active order, handing them straight back
+// to jobs.js's normal Idle branch next tick -- no special "resuming" state needed, Idle already
+// re-evaluates needs/work from scratch every tick.
+function undraftCitizen(world, citizenId) {
+  const i = _draftFindCitizenIndexById(world.citizens, citizenId);
+  if (i < 0) return false;
+  const store = world.citizens;
+  store.flags[i] &= ~CitizenFlags.Drafted;
+  store.orderKind[i] = OrderKind.None;
+  store.orderAttackIndex[i] = -1;
+  return true;
+}
+
+// Issues a move order to every drafted citizen in `citizenIds` (a plain array of citizen ids,
+// e.g. from input.js's selectedCitizens/selectedCitizen mapped through world.idOf). Ids that
+// don't resolve to a currently-drafted living citizen are silently skipped -- this is meant to be
+// called directly off a multi-select without the caller having to pre-filter.
+// When 2+ citizens actually receive the order, each gets a slightly different target point (see
+// _formationOffset above) instead of the literal (x, y) so a group order reads as a coordinated
+// move rather than everyone stacking on one tile. Resolved against the REAL post-filter headcount
+// (not citizenIds.length), so a mixed selection with only one drafted citizen in it still gets the
+// exact clicked point, not an off-center formation slot for a "group" of one.
+function issueMoveOrder(world, citizenIds, x, y) {
+  const store = world.citizens;
+  const targets = [];
+  for (const id of citizenIds) {
+    const i = _draftFindCitizenIndexById(store, id);
+    if (i < 0 || !store.isAliveAt(i) || !store.isDraftedAt(i)) continue;
+    targets.push(i);
+  }
+  for (let k = 0; k < targets.length; k++) {
+    const i = targets[k];
+    const [ox, oy] = _formationOffset(k, targets.length);
+    store.orderKind[i] = OrderKind.Move;
+    store.orderTargetX[i] = x + ox; store.orderTargetY[i] = y + oy;
+    store.orderAttackIndex[i] = -1;
+  }
+}
+
+// Issues an attack order to every drafted citizen in `citizenIds` against `targetAttackerIndex`
+// (an index into world.attackers -- see the AttackerStore-index caveat in this file's header
+// comment). Ids that don't resolve to a currently-drafted living citizen are silently skipped.
+function issueAttackOrder(world, citizenIds, targetAttackerIndex) {
+  if (targetAttackerIndex == null || targetAttackerIndex < 0 || !world.attackers.isAliveAt(targetAttackerIndex)) return;
+  const store = world.citizens;
+  for (const id of citizenIds) {
+    const i = _draftFindCitizenIndexById(store, id);
+    if (i < 0 || !store.isAliveAt(i) || !store.isDraftedAt(i)) continue;
+    store.orderKind[i] = OrderKind.Attack;
+    store.orderAttackIndex[i] = targetAttackerIndex;
+  }
+}
+
+// Drops the current order for one drafted citizen -- they hold position exactly where they are
+// (RimWorld's "drafted, no order" stance) rather than resuming autonomy; undraftCitizen is the
+// separate call for that.
+function cancelOrder(world, citizenId) {
+  const i = _draftFindCitizenIndexById(world.citizens, citizenId);
+  if (i < 0) return;
+  const store = world.citizens;
+  store.orderKind[i] = OrderKind.None;
+  store.orderAttackIndex[i] = -1;
+  store.targetX[i] = store.x[i]; store.targetY[i] = store.y[i];
+}
+
+// ---------------------------------------------------------------- per-tick simulation
+
+// Called once per tick from world.js's tick(), after tickJobs/tickStaffDuty/tickStaffCombat (all
+// of which already skip drafted citizens themselves, see this file's header comment) -- this is
+// the only place a drafted citizen's position or the world's attacker health actually changes as
+// a direct result of drafted state. A drafted citizen with no active order (orderKind === None)
+// simply doesn't move and doesn't fight, matching RimWorld's own "drafted, standing at attention"
+// baseline.
+function tickDrafted(world) {
+  const store = world.citizens;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i)) continue;
+    if (!store.isDraftedAt(i)) continue;
+    if (store.isDownedAt(i)) continue; // downed, can't act on an order until recovered, same as every other combat/job system
+
+    if (store.orderKind[i] === OrderKind.Move) {
+      _tickMoveOrder(store, i);
+    } else if (store.orderKind[i] === OrderKind.Attack) {
+      _tickAttackOrder(world, i);
+    }
+    // OrderKind.None: stand and hold, nothing to do.
+  }
+}
+
+function _tickMoveOrder(store, i) {
+  const dx = store.orderTargetX[i] - store.x[i];
+  const dy = store.orderTargetY[i] - store.y[i];
+  const dist = Math.hypot(dx, dy);
+  if (dist < ARRIVE_DIST) {
+    store.orderKind[i] = OrderKind.None; // arrived -- order complete, awaiting the next one
+    return;
+  }
+  // Same straight-line travel speed jobs.js's Seeking* states use (JOB_SPEED), scaled by the same
+  // per-citizen speed trait every other travel state already respects -- a drafted citizen isn't
+  // exempt from their own trait's speedMult just because they're under manual control.
+  const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1);
+  store.x[i] += (dx / dist) * speed;
+  store.y[i] += (dy / dist) * speed;
+}
+
+function _tickAttackOrder(world, i) {
+  const store = world.citizens;
+  const attackers = world.attackers;
+  const targetI = store.orderAttackIndex[i];
+
+  // Target already dead (killed by this citizen, a turret, another drafted citizen, etc.) --
+  // order complete, same "arrived/done" resolution as a finished move order.
+  if (targetI < 0 || !attackers.isAliveAt(targetI)) {
+    store.orderKind[i] = OrderKind.None;
+    store.orderAttackIndex[i] = -1;
+    return;
+  }
+
+  // Weapon stats: a drafted Guard/Sniper fights with their real armory-issued tier (same source
+  // tickStaffCombat in siege.js reads), any other drafted citizen fights unarmed-civilian
+  // baseline -- see this file's header comment for why that's the deliberate choice, not a gap.
+  const kind = world.roster.kindOf(world.idOf(i));
+  const isSniper = kind === 'Sniper';
+  const tier = (kind === 'Guard' || kind === 'Sniper')
+    ? (WEAPON_TIERS[world.roster.weaponOf(world.idOf(i))] || WEAPON_TIERS.Sidearm)
+    : WEAPON_TIERS.Sidearm;
+  const range = (isSniper ? SNIPER_RANGE : GUARD_RANGE) * tier.rangeMult;
+  const damage = (isSniper ? SNIPER_DAMAGE : GUARD_DAMAGE) * tier.damageMult;
+  const cooldown = Math.round((isSniper ? SNIPER_COOLDOWN : GUARD_COOLDOWN) * tier.cooldownMult);
+  const dtype = isSniper ? DamageType.Energy : DamageType.Kinetic;
+  // Mirrors tickStaffCombat's weapon-tier penetration bonus (security.js WEAPON_TIERS) -- see
+  // that function's comment in siege.js.
+  const penetration = (isSniper ? SNIPER_PENETRATION : GUARD_PENETRATION) + (tier.penetrationBonus || 0);
+
+  const dx = attackers.x[targetI] - store.x[i];
+  const dy = attackers.y[targetI] - store.y[i];
+  const dist = Math.hypot(dx, dy);
+
+  if (dist > range) {
+    // Not in range yet -- close the distance, same travel speed/trait handling as a move order.
+    const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1);
+    store.x[i] += (dx / dist) * speed;
+    store.y[i] += (dy / dist) * speed;
+    return;
+  }
+
+  // In range: fight, same cooldown/hit-roll/damage pipeline tickStaffCombat uses.
+  if (store._staffCooldown[i] > 0) { store._staffCooldown[i]--; return; }
+  store._staffCooldown[i] = cooldown;
+  if (rollsHit(world.rng, 1) && damageAttacker(attackers, targetI, damage, dtype, penetration, world.rng)) {
+    store.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[store.passionCombat[i]];
+    world.addScrap?.(SCRAP_PER_KILL, 'kill'); // same reward every other kill source pays out
+    world.onKill?.();
+    store.orderKind[i] = OrderKind.None; // target down -- order complete
+    store.orderAttackIndex[i] = -1;
   }
 }
 
@@ -5922,6 +8579,38 @@ const CONTROL_BASE = 0.006;
 // This is the "settlements giving each other resources" half of the ask.
 const TRICKLE_PER_OWNED_REGION = 0.02;
 
+// --- Odyssey-anchored expansion tuning (real gravship numbers, scaled to this game's economy) ---
+//
+// RimWorld Odyssey gravships require a real chemfuel reserve banked before they'll launch at all
+// (no fuel, no launch, full stop) -- EXPANSION_FUEL_COST mirrors that as a flat scrap toll charged
+// against the settlement you're LEAVING, deducted in setActive() before the move is allowed to
+// happen at all. 15 sits deliberately mid-table against this file's existing constants: cheaper
+// than a garage (economy.js: 35-45) since expansion is a strategic-layer action not a building,
+// but a real bite out of the ~50 scrap a fresh settlement starts with (world.js) so it's a
+// genuine choice, not a rounding error.
+const EXPANSION_FUEL_COST = 15;
+
+// Every real gravship launch risks a LandingOutcomeDef mishap (crashed pods, fuel leak, hull
+// damage) -- not guaranteed, but frequent enough that a career of launches WILL eventually eat one.
+// 17.5% (mid-point of the requested 15-20%) reproduces that "rare per-trip, inevitable over a
+// campaign" feel without punishing a single expansion hard: about 1 in 4-6 launches. Toned down
+// from RimWorld's real crash-landing stakes (ship damage, pawns downed/killed) to fit this game's
+// much lower-stakes single-scrap-resource economy -- a minor scrap loss or a short work-speed
+// debuff, never a citizen casualty.
+const MISHAP_CHANCE = 0.175;
+const MISHAP_SCRAP_LOSS = 8;       // flat scrap lost from the freshly-arrived settlement
+const MISHAP_DEBUFF_TICKS = 500;   // ~50s at 10Hz -- "shaken crew," not a lasting injury
+
+// Multi-hop travel range, gated behind a persistent scrap-paid upgrade -- mirrors Odyssey's real
+// per-ship thruster/fuel-tank upgrade slots, which are a small, hard-capped number, not an
+// unbounded tech tree. travelRange starts at 1 (today's adjacency-only behavior, unchanged for a
+// player who never upgrades) and can be raised up to MAX_TRAVEL_RANGE (1 base + 4 upgrades,
+// mirroring the "capped small" ask). Cost escalates per upgrade, same shape as a real thruster
+// refit getting pricier each additional slot.
+const MAX_TRAVEL_RANGE = 5;
+const RANGE_UPGRADE_BASE_COST = 25;
+const RANGE_UPGRADE_COST_STEP = 20;
+
 class Region {
   constructor(id, name, col, row) {
     this.id = id;
@@ -5960,6 +8649,12 @@ class WorldMap {
     this.activeId = 5;
     this.regions[this.activeId].visited = true;
     this.expansionCount = 0;
+    // Odyssey-anchored additions (see the constants block above for the real-numbers rationale):
+    this.travelRange = 1;      // hop range for isExpandable -- 1 == original adjacency-only behavior
+    this.pendingMishap = null; // set by setActive() when a launch mishap rolls; consumed by the
+                                // caller once the fresh SimWorld exists (worldmap.js never
+                                // imports world.js, so it can't apply the effect itself -- see
+                                // setActive()'s own comment).
   }
 
   get active() { return this.regions[this.activeId] ?? null; }
@@ -5967,12 +8662,37 @@ class WorldMap {
 
   ownedCount() { return this.regions.reduce((n, r) => n + (r.owned ? 1 : 0), 0); }
 
-  /** Regions you may expand into: not the active one, not already owned, adjacent to a region
-   *  you hold (owned) or are currently standing in. */
+  /** Shortest hop count from {activeId} ∪ {every owned region} to `id`, over the 4-directional
+   *  adjacency graph, capped at travelRange+1 hops of search (cheap: 16 regions total). Returns
+   *  Infinity if unreachable within that bound. At travelRange === 1 this reproduces the original
+   *  "neighbor of active OR neighbor of an owned region" rule exactly. */
+  _hopDistance(id) {
+    const start = [this.activeId, ...this.regions.filter(r => r.owned).map(r => r.id)];
+    const dist = new Map();
+    let frontier = [];
+    for (const s of start) { if (!dist.has(s)) { dist.set(s, 0); frontier.push(s); } }
+    for (let hop = 0; hop < this.travelRange && frontier.length; hop++) {
+      const next = [];
+      for (const nid of frontier) {
+        for (const adj of this.regions[nid].neighbors) {
+          if (dist.has(adj)) continue;
+          dist.set(adj, hop + 1);
+          next.push(adj);
+        }
+      }
+      frontier = next;
+    }
+    return dist.has(id) ? dist.get(id) : Infinity;
+  }
+
+  /** Regions you may expand into: not the active one, not already owned, reachable within
+   *  travelRange hops of a region you hold (owned) or are currently standing in. travelRange
+   *  starts at 1 (direct adjacency only, the original behavior) and can be raised via
+   *  upgradeTravelRange(). */
   isExpandable(id) {
     const r = this.byId(id);
     if (!r || r.owned || id === this.activeId) return false;
-    return r.neighbors.some(nid => nid === this.activeId || this.regions[nid].owned);
+    return this._hopDistance(id) <= this.travelRange;
   }
 
   expandableIds() { return this.regions.filter(r => this.isExpandable(r.id)).map(r => r.id); }
@@ -5986,19 +8706,51 @@ class WorldMap {
 
   /** Move the operation. Caller is responsible for constructing the fresh SimWorld -- this
    *  module deliberately doesn't import world.js (would be a circular import, and world.js
-   *  imports this). */
-  setActive(id) {
+   *  imports this).
+   *
+   *  `world` is the settlement you're LEAVING (still alive at call time, discarded right after).
+   *  Mirrors a real gravship launch: EXPANSION_FUEL_COST must already be banked there, and it's
+   *  spent whether or not it carries forward into the new settlement (it doesn't -- every fresh
+   *  SimWorld starts at a fixed 50 scrap, see world.js) -- the toll is a real gate on the decision,
+   *  same as RimWorld requiring chemfuel already loaded before a gravship will lift off at all.
+   *  Refuses (returns false, no state changed) if either the destination isn't reachable or the
+   *  fuel isn't there.
+   *
+   *  On a successful launch, rolls the LandingOutcomeDef-style arrival mishap and stashes the
+   *  result on `this.pendingMishap` for the caller to apply once the new SimWorld for `id` exists
+   *  (worldmap.js can't apply it directly -- no world.js import, see above). */
+  setActive(id, world) {
     if (!this.isExpandable(id)) return false;
+    if (!world || world.scrap < EXPANSION_FUEL_COST) return false;
+    world.scrap -= EXPANSION_FUEL_COST;
     this.activeId = id;
     this.regions[id].visited = true;
     this.expansionCount++;
+    this.pendingMishap = rollArrivalMishap();
+    return true;
+  }
+
+  /** Scrap cost of the NEXT travel-range upgrade (escalates per level, same shape as a real
+   *  thruster refit getting pricier each additional slot). */
+  rangeUpgradeCost() {
+    return RANGE_UPGRADE_BASE_COST + (this.travelRange - 1) * RANGE_UPGRADE_COST_STEP;
+  }
+
+  /** Spend scrap from `world` to raise travelRange by 1, capped at MAX_TRAVEL_RANGE. Refuses
+   *  (returns false, no state changed) if already at the cap or scrap is short. */
+  upgradeTravelRange(world) {
+    if (this.travelRange >= MAX_TRAVEL_RANGE) return false;
+    const cost = this.rangeUpgradeCost();
+    if (!world || world.scrap < cost) return false;
+    world.scrap -= cost;
+    this.travelRange++;
     return true;
   }
 
   serialize() {
     return {
       cols: this.cols, rows: this.rows, activeId: this.activeId,
-      expansionCount: this.expansionCount,
+      expansionCount: this.expansionCount, travelRange: this.travelRange,
       regions: this.regions.map(r => ({
         id: r.id, control: r.control, owned: r.owned, visited: r.visited, snapshot: r.snapshot,
       })),
@@ -6009,6 +8761,7 @@ class WorldMap {
     if (!json || !Array.isArray(json.regions)) return;
     this.activeId = json.activeId ?? this.activeId;
     this.expansionCount = json.expansionCount ?? 0;
+    this.travelRange = json.travelRange ?? 1;
     for (const rec of json.regions) {
       const r = this.byId(rec.id);
       if (!r) continue;
@@ -6018,6 +8771,17 @@ class WorldMap {
       r.snapshot = rec.snapshot ?? null;
     }
   }
+}
+
+/** LandingOutcomeDef-style roll: MISHAP_CHANCE of anything firing at all, then a 50/50 split
+ *  between the two toned-down outcomes described in the constants block above. Uses Math.random()
+ *  rather than a SimWorld's deterministic rng -- this fires at a menu-driven decision point (the
+ *  old world is about to be discarded, the new one doesn't exist yet), the same non-deterministic
+ *  spot main.js's expandTo() already picks the new settlement's random seed from. */
+function rollArrivalMishap() {
+  if (Math.random() >= MISHAP_CHANCE) return null;
+  if (Math.random() < 0.5) return { kind: 'scrapLoss', amount: MISHAP_SCRAP_LOSS };
+  return { kind: 'debuff', ticks: MISHAP_DEBUFF_TICKS };
 }
 
 function summarize(world) {
@@ -6223,6 +8987,7 @@ function tickFire(structures, rng, spreadMult = 1) {
 // world.milestoneLog (existing event log, see world.js) and fire world.onRandomEvent (the same
 // optional-callback pattern as onBuildComplete/onWaveIncoming) so main.js can also surface them
 // as a toast.
+
 
 
 
@@ -6454,12 +9219,21 @@ function tickThunderstorm(world) {
 // pass -- it would need a new attacker-adjacent entity type wired through siege.js/render.js,
 // which is a much bigger surface than a numeric-knob event, and this pass prioritized doing a
 // solid job on the other two over a half-built third. Left as a natural follow-up.
+//
+// Trader caravan (real RimWorld TraderCaravanArrival/VisitorGroup IncidentDefs, baseChance 4 --
+// see FEATURE_RESEARCH.md) added as this event system's first genuinely POSITIVE economic entry;
+// wanderer-joins is a population boost but not an economy one, and blight is purely negative --
+// there was previously zero "good news" economic event. Same numeric-knob shape as
+// tryBlightEvent (inverted: grant instead of destroy), no new entity/sprite/pathing needed. The
+// actual discount math lives in economy.js (buildCost/spend) since that's the real point of sale.
 
 const EVENT_CHECK_INTERVAL = 500; // ticks between event rolls
 const EVENT_CHANCE = 0.06; // odds per check that *some* event fires -- rare, not spammy
 const EVENT_WEIGHTS = [
   ['wanderer', 1],
   ['blight', 1],
+  ['trader', 1],
+  ['massfire', 0.3], // deliberately the rarest -- see tryMassFireEvent below, a genuine catastrophe tier
 ];
 
 function tickRandomEvents(world) {
@@ -6475,7 +9249,9 @@ function tickRandomEvents(world) {
   }
 
   if (kind === 'wanderer') tryWandererEvent(world);
-  else tryBlightEvent(world);
+  else if (kind === 'blight') tryBlightEvent(world);
+  else if (kind === 'massfire') tryMassFireEvent(world);
+  else tryTraderEvent(world);
 }
 
 /** Spawns a new citizen near the settlement center using an unused name from the shared name
@@ -6535,6 +9311,216 @@ function tryBlightEvent(world) {
   if (world.milestoneLog.length > 20) world.milestoneLog.shift();
   world.onRandomEvent?.(text);
   return true;
+}
+
+/** Grants a temporary discounted-build voucher (economy.js's buildCost/spend actually apply the
+ *  discount at point-of-sale): the next TRADER_VOUCHER_USES buildable purchases within
+ *  TRADER_WINDOW_TICKS cost TRADER_DISCOUNT_PCT less scrap. Re-rolling this event while one is
+ *  already active just refreshes both the use-count and the window (no stacking discount %) --
+ *  same "replace, don't stack" shape as re-rolling weather itself. Always succeeds (no
+ *  candidate-availability gate like wanderer/blight have), matching real RimWorld's caravan
+ *  events not requiring any colony precondition. */
+function tryTraderEvent(world) {
+  world._traderVoucherUses = TRADER_VOUCHER_USES;
+  world._traderVoucherExpireTick = world.currentTick + TRADER_WINDOW_TICKS;
+
+  const text = `A trader caravan arrives -- next ${TRADER_VOUCHER_USES} buildables are ` +
+    `${Math.round(TRADER_DISCOUNT_PCT * 100)}% off for a limited time`;
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+  return true;
+}
+
+// ---------------------------------------------------------------- mass-fire calamity
+// Real Prison Architect calamity: a scripted MASS fire event -- an instant, multi-source
+// outbreak (several simultaneous ignitions clustered around a few points), demanding an
+// emergency response, distinct from fire.js's existing gradual model (tickFireIgnition rolls one
+// spark off a generator; tickFire then spreads it slowly, one neighbor at a time, on a 30-tick
+// check interval). This event bypasses both of those and ignites a whole cluster at once via the
+// SAME igniteStructure/FLAMMABLE_KINDS primitives fire.js already exposes -- no parallel fire
+// system, just a different, rarer, more severe trigger path into the one that already exists
+// (once lit, these structures burn down and can still spread further through tickFire exactly
+// like any other fire -- this event only owns the initial catastrophic outbreak, not the
+// aftermath). Wired into the existing weighted event-roll (tickRandomEvents above) rather than a
+// bespoke timer, same "one event system, more entries" shape as wanderer/blight/trader.
+const MASS_FIRE_MIN_TARGETS = 2;    // below this there isn't enough kindling to read as "catastrophic" -- fizzles
+const MASS_FIRE_MAX_TARGETS = 5;    // "up to several simultaneous ignitions", per the real calamity's scripted burst
+const MASS_FIRE_CLUSTER_RADIUS = 6; // grid cells -- deliberately much wider than fire.js's own SPREAD_RADIUS=1.6
+                                     // single-neighbor reach, so this reads as "a cluster catching at once", not
+                                     // just a fast-forwarded version of the ordinary spread roll
+
+/** Ignites up to MASS_FIRE_MAX_TARGETS flammable structures at once, clustered around a random
+ *  anchor point, rather than fire.js's usual single-spark-then-slow-spread. Returns true if the
+ *  event actually caught (false if there wasn't enough flammable kindling on the map right now to
+ *  form a real cluster -- same fail-open shape as tryBlightEvent/tryWandererEvent above, so a
+ *  colony with little flammable furniture just skips this roll rather than firing a degenerate
+ *  one-structure "mass" fire). */
+function tryMassFireEvent(world) {
+  const candidates = world.structures.filter(
+    (s) => isFlammable(s.kind) && !s.destroyed && !s.underConstruction && !s.onFire
+  );
+  if (candidates.length < MASS_FIRE_MIN_TARGETS) return false;
+
+  const anchor = candidates[Math.floor(world.rng() * candidates.length)];
+  const byDistance = candidates
+    .map((s) => ({ s, d: Math.hypot(s.x - anchor.x, s.y - anchor.y) }))
+    .filter(({ s, d }) => s === anchor || d <= MASS_FIRE_CLUSTER_RADIUS)
+    .sort((a, b) => a.d - b.d);
+  if (byDistance.length < MASS_FIRE_MIN_TARGETS) return false;
+
+  const targetCount = Math.min(MASS_FIRE_MAX_TARGETS, byDistance.length);
+  for (let k = 0; k < targetCount; k++) igniteStructure(byDistance[k].s);
+
+  const text = `A catastrophic fire breaks out -- ${targetCount} structures are ablaze at once, emergency response needed`;
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+  return true;
+}
+
+// ---------------------------------------------------------------- lightning storm calamity
+// Real Prison Architect calamity_settings.txt "Lightning Storm" -- a genuinely different mechanic
+// from RimWorld's thunderstorm weather above (tickThunderstorm), which only rolls ONE interval-
+// based strike that can ignite a single flammable structure. The real PA calamity instead keeps
+// rolling independent strike chances against three real target tiers for as long as the storm
+// lasts: citizens caught outdoors, power-network structures, and bare ground -- tiered roughly
+// 1/4/8% per the task brief. A Lightning Rod buildable (economy.js's BUILD_COST.lightning_rod,
+// drawn in render.js) is the real PA-style mitigation item: 85% effective at deflecting a strike
+// for any target within its protection radius. That same radius also halves this calamity's own
+// movement-speed penalty ("gritted" = inside a rod's radius) -- one footprint serving both jobs,
+// not two separate area concepts to track.
+//
+// Rides the same ThunderstormDry/ThunderstormRainy weather states tickThunderstorm already gates
+// on (both are real "lightning storm" weather in the source data this project ports from) rather
+// than adding a third, parallel weather kind -- but everything below is its own distinct system,
+// called separately from world.js, with its own numbers and its own consequences.
+const LIGHTNING_ROD_RADIUS = 4; // grid cells -- same order of magnitude as FLOODLIGHT_RANGE (siege.js)
+const LIGHTNING_ROD_MITIGATION = 0.85; // real PA-scale mitigation: 85% reduction to strike chance
+const LIGHTNING_STRIKE_CHANCE_CITIZEN = 0.01;   // 1% -- citizens are the rarest, most protected target
+const LIGHTNING_STRIKE_CHANCE_STRUCTURE = 0.04; // 4% -- power-network structures (generator/wire/battery/...)
+const LIGHTNING_STRIKE_CHANCE_GROUND = 0.08;    // 8% -- bare ground, harmless but the most frequent roll
+const LIGHTNING_STRIKE_INTERVAL_TICKS = 20; // rolled every ~2s at 10Hz, not every single tick -- an ongoing
+                                             // hazard for as long as the storm lasts, not instant chaos on start
+const LIGHTNING_CITIZEN_DAMAGE = 0.35; // real, substantial (comparable to a couple of stacked combat hits --
+                                        // see siege.js's per-shot damage constants) but not a guaranteed kill
+const LIGHTNING_STRUCTURE_DAMAGE = 0.5; // half health off a hit power structure -- can chain to destroy on a second strike
+const LIGHTNING_STORM_MOVE_PENALTY = 0.3; // 30% slower while a storm is active, ungritted
+const LIGHTNING_STORM_MOVE_PENALTY_GRITTED = LIGHTNING_STORM_MOVE_PENALTY / 2; // halved near a Lightning Rod
+
+function isPowerStructureKind(kind) {
+  return kind === 'wire' || kind === 'battery' || kind === 'power_switch' || kind.startsWith('generator');
+}
+
+function liveLightningRods(world) {
+  return world.structures.filter(s => s.kind === 'lightning_rod' && !s.destroyed && !s.underConstruction);
+}
+
+function nearestLightningRodDist(rods, x, y) {
+  let best = Infinity;
+  for (const r of rods) {
+    const d = Math.hypot(r.x - x, r.y - y);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function pushLightningMilestone(world, text) {
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+}
+
+/** True while ThunderstormDry/Rainy is active -- the same weather gate tickThunderstorm above
+ *  uses, so the Lightning Storm calamity is understood as riding that same real-world weather
+ *  state, just with its own distinct per-tick strike/movement mechanics layered on top. */
+function isLightningStormActive(world) {
+  return world.weather === WeatherKind.ThunderstormDry || world.weather === WeatherKind.ThunderstormRainy;
+}
+
+/** True if (x,y) is within a completed Lightning Rod's protection radius -- "gritted", per the
+ *  file header, for both strike mitigation and the halved movement penalty. */
+function isGrittedAt(world, x, y) {
+  const rods = liveLightningRods(world);
+  if (rods.length === 0) return false;
+  return nearestLightningRodDist(rods, x, y) <= LIGHTNING_ROD_RADIUS;
+}
+
+/** Per-citizen movement-speed multiplier during an active lightning storm -- 1 (no effect) if no
+ *  storm is active, otherwise the real penalty above, halved for a gritted citizen. Same
+ *  per-citizen-callback shape as isHeatwaveSlowdownActive's use in world.js's tickWander call
+ *  (positional, not a flat map-wide scalar like Rain's WEATHER_MOVE_SPEED). */
+function lightningStormMoveMult(world, x, y) {
+  if (!isLightningStormActive(world)) return 1;
+  const penalty = isGrittedAt(world, x, y) ? LIGHTNING_STORM_MOVE_PENALTY_GRITTED : LIGHTNING_STORM_MOVE_PENALTY;
+  return 1 - penalty;
+}
+
+/** Rolls the three real per-interval strike tiers (citizen/power-structure/ground) while a
+ *  lightning storm is active. Call once per tick from SimWorld.tick(), alongside tickThunderstorm
+ *  -- deliberately a separate function/system (see file header) since PA's real Lightning Storm
+ *  calamity and RimWorld's thunderstorm weather are two distinct source mechanics being ported
+ *  side by side rather than merged into one. */
+function tickLightningStorm(world) {
+  if (!isLightningStormActive(world)) return;
+  if (world.currentTick % LIGHTNING_STRIKE_INTERVAL_TICKS !== 0) return;
+
+  const rods = liveLightningRods(world);
+
+  // Citizen tier: only outdoor, alive, not-downed citizens are eligible -- a roof is real shelter,
+  // same "indoors matters" logic as Cold/Heatwave's tickWeatherCitizenEffects above.
+  if (world.rng() < LIGHTNING_STRIKE_CHANCE_CITIZEN) {
+    const store = world.citizens;
+    const candidates = [];
+    for (let i = 0; i < store.count; i++) {
+      if (!store.isAliveAt(i) || store.isDownedAt(i)) continue;
+      if (roomContaining(world.rooms, world.grid, store.x[i], store.y[i])) continue; // sheltered indoors
+      candidates.push(i);
+    }
+    if (candidates.length > 0) {
+      const i = candidates[Math.floor(world.rng() * candidates.length)];
+      const mitigated = rods.length > 0
+        && nearestLightningRodDist(rods, store.x[i], store.y[i]) <= LIGHTNING_ROD_RADIUS
+        && world.rng() < LIGHTNING_ROD_MITIGATION;
+      if (!mitigated) {
+        const healthMult = store.trait[i]?.healthMult ?? 1;
+        store.health[i] = Math.max(0, store.health[i] - LIGHTNING_CITIZEN_DAMAGE / healthMult);
+        if (store.health[i] <= 0.05) store.flags[i] |= CitizenFlags.Downed;
+        pushLightningMilestone(world, `Lightning strikes ${store.name[i]}`);
+      } else {
+        pushLightningMilestone(world, `Lightning strikes near ${store.name[i]} -- a Lightning Rod draws it off harmlessly`);
+      }
+    }
+  }
+
+  // Power-structure tier: any live generator/wire/battery/power_switch (power.js's own
+  // conductor/source set, mirrored here via isPowerStructureKind) -- excludes lightning_rod
+  // itself, which is a passive mitigation item, not a "power-network" structure.
+  if (world.rng() < LIGHTNING_STRIKE_CHANCE_STRUCTURE) {
+    const candidates = world.structures.filter(s =>
+      isPowerStructureKind(s.kind) && !s.destroyed && !s.underConstruction);
+    if (candidates.length > 0) {
+      const s = candidates[Math.floor(world.rng() * candidates.length)];
+      const mitigated = rods.length > 0
+        && nearestLightningRodDist(rods, s.x, s.y) <= LIGHTNING_ROD_RADIUS
+        && world.rng() < LIGHTNING_ROD_MITIGATION;
+      if (!mitigated) {
+        s.health = Math.max(0, s.health - LIGHTNING_STRUCTURE_DAMAGE);
+        if (s.health <= 0) s.destroyed = true;
+        const label = s.kind.replace(/_/g, ' ');
+        pushLightningMilestone(world, s.destroyed ? `Lightning destroys a ${label}` : `Lightning strikes a ${label}`);
+      } else {
+        pushLightningMilestone(world, 'Lightning strikes near the power grid -- a Lightning Rod draws it off harmlessly');
+      }
+    }
+  }
+
+  // Ground tier: real PA ground strikes are the highest-chance, lowest-consequence tier --
+  // logged flavor only, nothing damaged. No Lightning Rod check needed since there's no
+  // consequence to mitigate.
+  if (world.rng() < LIGHTNING_STRIKE_CHANCE_GROUND) {
+    pushLightningMilestone(world, 'Lightning strikes open ground');
+  }
 }
 
 
@@ -6797,6 +9783,219 @@ function tickRats(world) {
 
   // Drop caught rats out of the live list -- cheap, at most RAT_MAX_CONCURRENT entries.
   if (world.rats.some(r => !r.alive)) world.rats = world.rats.filter(r => r.alive);
+}
+
+
+// ---- anomaly.js ----
+// Anomaly pressure: a colony-wide 0->1 float representing an unexplained, escalating instability
+// building up around the settlement -- NOT framed as horror/monster content (explicit project
+// non-goal, see SESSION_HANDOFF.md), just an emergent hazard the player has to manage, same as
+// pollution/unrest already are. Directly follows round 9's Anomaly-DLC research recommendation
+// (see SESSION_HANDOFF.md's ROUND 9 section): "an 'anomalous activity' meter exactly shaped like
+// rats.js's existing pattern (periodic roll, tiered thresholds, one-off burst event)" -- explicitly
+// NOT the fleshbeast entity roster (that's flagged there as a much bigger surface, a possible
+// future "5th AttackerKind" if ever greenlit, not this pass). This file is deliberately as
+// lightweight as rats.js: no new entity/pathing AI, no siege.js hookup, just a meter + periodic
+// small-percentage-chance rolls with bounded consequences scaled by tier.
+//
+// Real-number anchor (real RimWorld Anomaly DLC): the Nociosphere's Activity meter climbs ~5% of
+// its range per in-game day when conditions allow. Reused verbatim here as the growth *rate*
+// (0.05/day), rescaled from RimWorld's day length to this project's own DAY_NIGHT_CYCLE_TICKS
+// (schedule.js) rather than copying RimWorld's tick rate.
+
+
+
+
+const AnomalyTier = Object.freeze({ Low: 'Low', Medium: 'Medium', High: 'High' });
+
+// Tier thresholds on the 0..1 scale, deliberately proportioned the same way rats.js's real-PA
+// 10/50-out-of-100 tier split is (Medium at 10%, High at 50%) -- same shape, different meter.
+const ANOMALY_TIER_MEDIUM = 0.10;
+const ANOMALY_TIER_HIGH = 0.50;
+
+function anomalyTier(level) {
+  if (level >= ANOMALY_TIER_HIGH) return AnomalyTier.High;
+  if (level >= ANOMALY_TIER_MEDIUM) return AnomalyTier.Medium;
+  return AnomalyTier.Low;
+}
+
+// ---------------------------------------------------------------- growth/decay
+const ANOMALY_GROWTH_PER_DAY = 0.05; // real RimWorld Nociosphere Activity rate, see header comment
+const ANOMALY_GROWTH_PER_TICK = ANOMALY_GROWTH_PER_DAY / DAY_NIGHT_CYCLE_TICKS;
+// Pressure only grows once the colony has "enough going on" to attract it -- reuses
+// director.js's colonyStrength() directly (the same hazard-scaling signal that already drives
+// wave difficulty) as the gate, rather than a second parallel strength metric. Gate value chosen
+// well below the strengthTerm/120 normalization director.js uses internally, so a colony crosses
+// this gate early (a handful of built structures + starting population), not only once heavily
+// fortified -- this is meant to be a genuine ambient pressure, not an end-game-only mechanic.
+const ANOMALY_STRENGTH_GATE = 40;
+// Pollution boosts growth on top of the gate, using the exact same clamp/divisor shape as
+// director.js's own pollutionTerm (`1 + Math.min(1.2, pollution / 200)`) -- reused for
+// consistency, not reinvented, per the task's "reuse director.js's hazard-scaling pattern" brief.
+const ANOMALY_POLLUTION_DIVISOR = 200;
+const ANOMALY_POLLUTION_CAP = 1.2;
+// Below the strength gate, pressure recedes -- same "grows under bad conditions, recedes under
+// good ones" trend shape rats.js's own infestation level already uses. Decay is slower than
+// growth (this is ambient background instability, not something that should vanish the instant a
+// colony has a rough tick), but a Stabilizer Beacon (see below) adds real additional decay on
+// top of this baseline.
+const ANOMALY_DECAY_PER_TICK = ANOMALY_GROWTH_PER_TICK * 1.5;
+// Stabilizer Beacon (this pass's new cheap buildable, see economy.js/input.js): the "real
+// in-game response" the task asked for. Each undestroyed, fully-built beacon adds this much extra
+// decay per tick, stacking up to STABILIZER_MAX_STACKS so building a second one genuinely helps
+// but the player can't trivially zero the meter with a wall of them.
+const STABILIZER_DECAY_PER_TICK = ANOMALY_GROWTH_PER_TICK * 3;
+const STABILIZER_MAX_STACKS = 3;
+
+/** Call once from SimWorld's constructor to seed initial state. */
+function initAnomaly(world) {
+  world.anomalyPressure = 0;
+  world._lastAnomalyTier = AnomalyTier.Low;
+  world._anomalyBurstUntil = 0; // >0 while a High-tier burst incident's short flavor window is live
+  world._anomalyBurstStructureId = null; // index into world.structures the current/last burst hit, for render pulsing
+}
+
+function countActiveStabilizers(structures) {
+  let n = 0;
+  for (const s of structures) {
+    if (s.kind === 'stabilizer' && !s.destroyed && !s.underConstruction) n++;
+    if (n >= STABILIZER_MAX_STACKS) break;
+  }
+  return n;
+}
+
+/** Meter growth/decay + tier-crossing milestone log. Call once per tick from SimWorld.tick(). */
+function tickAnomalyPressure(world) {
+  if (world.anomalyPressure == null) initAnomaly(world);
+
+  const strength = colonyStrength(world);
+  const gated = strength >= ANOMALY_STRENGTH_GATE;
+  const stabilizers = countActiveStabilizers(world.structures);
+
+  if (gated) {
+    const pollutionBoost = 1 + Math.min(ANOMALY_POLLUTION_CAP, (world.pollution || 0) / ANOMALY_POLLUTION_DIVISOR);
+    const growth = ANOMALY_GROWTH_PER_TICK * pollutionBoost;
+    const decay = stabilizers * STABILIZER_DECAY_PER_TICK; // beacons still help even while gated-in
+    world.anomalyPressure = Math.max(0, Math.min(1, world.anomalyPressure + growth - decay));
+  } else {
+    const decay = ANOMALY_DECAY_PER_TICK + stabilizers * STABILIZER_DECAY_PER_TICK;
+    world.anomalyPressure = Math.max(0, world.anomalyPressure - decay);
+  }
+
+  const tier = anomalyTier(world.anomalyPressure);
+  if (tier !== world._lastAnomalyTier) {
+    world._lastAnomalyTier = tier;
+    const text = tier === AnomalyTier.Low
+      ? 'The anomaly pressure around the settlement has settled'
+      : `Anomaly pressure has reached ${tier} levels`;
+    world.milestoneLog.push({ tick: world.currentTick, text });
+    if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    world.onRandomEvent?.(text);
+  }
+
+  if (world._anomalyBurstUntil > 0 && world.currentTick >= world._anomalyBurstUntil) {
+    world._anomalyBurstUntil = 0;
+    world._anomalyBurstStructureId = null;
+    const text = 'The instability burst has passed';
+    world.milestoneLog.push({ tick: world.currentTick, text });
+    if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    world.onRandomEvent?.(text);
+  }
+}
+
+// ---------------------------------------------------------------- periodic tier-scaled rolls
+const ANOMALY_CHECK_INTERVAL = 40; // ~4s at 10Hz, same cadence family as rats.js's RAT_CHECK_INTERVAL
+
+// Low tier: purely cosmetic -- feeds rooms.js's existing mess/cleanliness axis, same hookup
+// rats.js's own droppings use, no new tracked resource.
+const LOW_MESS_CHANCE = 0.05;
+const LOW_MESS_AMOUNT = 0.03;
+
+// Medium tier: a small real economic or mood cost, picked randomly between the two each time it
+// fires so neither one alone defines the tier.
+const MEDIUM_EVENT_CHANCE = 0.05;
+const MEDIUM_SCRAP_DRAIN_MIN = 2, MEDIUM_SCRAP_DRAIN_MAX = 8;
+const MEDIUM_MOOD_MAGNITUDE = -0.04;
+const MEDIUM_MOOD_DURATION_TICKS = 1200;
+
+// High tier: a short, bounded burst incident -- fixed chance, fixed short duration, a one-off
+// scrap/structure-damage penalty, done. No new entity spawns, no continuing per-tick drain beyond
+// the flavor window itself (the window is just how long the milestone/render pulse stays visible,
+// the actual penalty is applied once at trigger).
+const HIGH_BURST_CHANCE = 0.06;
+const HIGH_BURST_DURATION_TICKS = 150; // ~15s at 10Hz -- "short duration" per the task brief
+const HIGH_BURST_SCRAP_MIN = 8, HIGH_BURST_SCRAP_MAX = 25;
+const HIGH_BURST_STRUCTURE_DAMAGE_FRAC = 0.35; // fraction of the target's CURRENT health
+// After a burst resolves, some of the built-up pressure vents off with it -- a real, if passive,
+// release valve distinct from the Stabilizer Beacon's active decay.
+const HIGH_BURST_VENT_AMOUNT = 0.12;
+
+function pickRandomLiveStructure(structures, rng) {
+  const live = structures.filter(s => !s.destroyed && !s.underConstruction && s.kind !== 'wire' && s.kind !== 'pipe');
+  if (live.length === 0) return null;
+  return live[Math.floor(rng() * live.length)];
+}
+
+/** Per-tier periodic small-percentage-chance consequence rolls, throttled to ANOMALY_CHECK_INTERVAL
+ *  (never every tick -- same cadence discipline rats.js/weather.js already use). Call once per
+ *  tick from SimWorld.tick(), after tickAnomalyPressure so it reads this tick's freshly-updated
+ *  tier. */
+function tickAnomalyEvents(world) {
+  if (world.anomalyPressure == null) initAnomaly(world);
+  if (world.currentTick % ANOMALY_CHECK_INTERVAL !== 0) return;
+
+  const tier = anomalyTier(world.anomalyPressure);
+
+  if (tier === AnomalyTier.Low) {
+    if (world.rng() >= LOW_MESS_CHANCE) return;
+    if (!world.rooms || world.rooms.length === 0) return;
+    const room = world.rooms[Math.floor(world.rng() * world.rooms.length)];
+    room.mess = Math.min(1, (room.mess || 0) + LOW_MESS_AMOUNT);
+    return;
+  }
+
+  if (tier === AnomalyTier.Medium) {
+    if (world.rng() >= MEDIUM_EVENT_CHANCE) return;
+    if (world.rng() < 0.5 && world.scrap > 0) {
+      const amount = MEDIUM_SCRAP_DRAIN_MIN + Math.floor(world.rng() * (MEDIUM_SCRAP_DRAIN_MAX - MEDIUM_SCRAP_DRAIN_MIN + 1));
+      world.scrap = Math.max(0, world.scrap - amount);
+      const text = 'An unexplained fault drains some banked scrap';
+      world.milestoneLog.push({ tick: world.currentTick, text });
+      if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+      world.onRandomEvent?.(text);
+    } else {
+      const alive = [];
+      for (let i = 0; i < world.citizens.count; i++) if (world.citizens.isAliveAt(i)) alive.push(i);
+      if (alive.length === 0) return;
+      const i = alive[Math.floor(world.rng() * alive.length)];
+      addMoodEvent(world.citizens, i, world.currentTick, {
+        magnitude: MEDIUM_MOOD_MAGNITUDE, durationTicks: MEDIUM_MOOD_DURATION_TICKS, stackKey: 'anomalyUnease',
+      });
+    }
+    return;
+  }
+
+  // High tier: only roll a fresh burst if one isn't already in its flavor window.
+  if (world._anomalyBurstUntil > world.currentTick) return;
+  if (world.rng() >= HIGH_BURST_CHANCE) return;
+
+  const target = pickRandomLiveStructure(world.structures, world.rng);
+  const scrapHit = HIGH_BURST_SCRAP_MIN + Math.floor(world.rng() * (HIGH_BURST_SCRAP_MAX - HIGH_BURST_SCRAP_MIN + 1));
+  world.scrap = Math.max(0, world.scrap - scrapHit);
+  let structureText = '';
+  if (target) {
+    target.health -= target.health * HIGH_BURST_STRUCTURE_DAMAGE_FRAC;
+    if (target.health <= 0) { target.health = 0; target.destroyed = true; }
+    structureText = ` and damages a ${target.kind.replace(/_/g, ' ')}`;
+  }
+  world._anomalyBurstUntil = world.currentTick + HIGH_BURST_DURATION_TICKS;
+  world._anomalyBurstStructureId = world.structures.indexOf(target);
+  world.anomalyPressure = Math.max(0, world.anomalyPressure - HIGH_BURST_VENT_AMOUNT);
+
+  const text = `Instability bursts, draining ${scrapHit} scrap${structureText}`;
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
 }
 
 
@@ -7077,7 +10276,7 @@ function noiseBurst({ duration = 0.15, filterFreq = 1200, filterType = 'lowpass'
 // turrets/tesla chains/guards all resolving at once) -- without a cap that's a wall of noise, not
 // a sound effect. A simple "don't replay within N ms" gate per cue is enough since ticks run at
 // 10Hz (100ms apart) already.
-const lastPlayed = { fire: 0, kill: 0, downed: 0 };
+const lastPlayed = { fire: 0, kill: 0, downed: 0, onBreak: 0, programComplete: 0, ratTier: 0 };
 function throttled(key, minGapMs, fn) {
   const now = performance.now();
   if (now - lastPlayed[key] < minGapMs) return;
@@ -7120,6 +10319,119 @@ function playCitizenDowned() {
   throttled('downed', 120, () => {
     tone({ freq: 420, freqEnd: 160, duration: 0.32, type: 'sine', peakGain: 0.18 });
   });
+}
+
+// ---------------------------------------------------------------- PA-catalog cues (7 new systems)
+// All 7 below are wired from main.js's single `onRandomEvent` hook (world.js/factions.js/rats.js/
+// security.js/weather.js already funnel their milestone text through that one callback -- see
+// playRandomEventCue's text-discrimination dispatcher at the bottom of this file) except mood-break,
+// which gets its own dedicated `world.onCitizenOnBreak` hook since citizens.js's per-tick mood pass
+// never had an event-log text line to discriminate on in the first place.
+
+// Unrest tier 1 (world.js: 'Unrest is spreading through the settlement') -- a mild rising minor
+// second, the smallest dissonance step of the three tiers.
+function playUnrestTier1() {
+  tone({ freq: 220, duration: 0.16, type: 'triangle', peakGain: 0.16 });
+  tone({ freq: 233, duration: 0.22, type: 'triangle', peakGain: 0.18, start: 0.1 });
+}
+
+// Unrest tier 2 ('Unrest is escalating...') -- a harsher rising tritone, sawtooth for more edge.
+function playUnrestTier2() {
+  tone({ freq: 196, duration: 0.14, type: 'sawtooth', peakGain: 0.18 });
+  tone({ freq: 277, duration: 0.24, type: 'sawtooth', peakGain: 0.2, start: 0.1 });
+}
+
+// Unrest tier 3 ('Unrest has reached a breaking point...') -- three harsh rising square-wave
+// stabs, the most severe of the three tiers.
+function playUnrestTier3() {
+  tone({ freq: 175, duration: 0.1, type: 'square', peakGain: 0.18 });
+  tone({ freq: 220, duration: 0.1, type: 'square', peakGain: 0.2, start: 0.09 });
+  tone({ freq: 311, duration: 0.28, type: 'square', peakGain: 0.22, start: 0.18 });
+}
+
+// Unrest fully resolved ('The settlement has calmed') -- warm consonant descending-then-settling
+// chime, deliberately the emotional opposite of the three escalation stingers above.
+function playUnrestResolve() {
+  tone({ freq: 523, duration: 0.16, type: 'sine', peakGain: 0.16 });
+  tone({ freq: 392, duration: 0.3, type: 'sine', peakGain: 0.18, start: 0.12 });
+}
+
+// Citizen mood break onset (CitizenFlags.OnBreak, citizens.js) -- a short low "strain" tone, not a
+// full alarm since this is a routine, frequent-ish per-citizen event, not a colony-wide crisis.
+// Throttled since a bad tick of stacking mood events can tip several citizens at once.
+function playMoodBreak() {
+  throttled('onBreak', 150, () => {
+    tone({ freq: 130, freqEnd: 100, duration: 0.2, type: 'triangle', peakGain: 0.14 });
+  });
+}
+
+// Program completion (programs.js's Skills Workshop/Wellness Counseling/Community Circle) --
+// bright ascending three-note chime, the "graduation" feel. Throttled since multiple citizens can
+// finish a session on the same tick.
+function playProgramComplete() {
+  throttled('programComplete', 150, () => {
+    tone({ freq: 523, duration: 0.09, type: 'sine', peakGain: 0.16 });
+    tone({ freq: 659, duration: 0.09, type: 'sine', peakGain: 0.18, start: 0.08 });
+    tone({ freq: 880, duration: 0.18, type: 'sine', peakGain: 0.2, start: 0.16 });
+  });
+}
+
+// Clique demand satisfied (factions.js) -- a bright quick "cha-ching", two fast high square blips.
+function playFactionSatisfied() {
+  tone({ freq: 784, duration: 0.06, type: 'square', peakGain: 0.16 });
+  tone({ freq: 1047, duration: 0.12, type: 'square', peakGain: 0.18, start: 0.06 });
+}
+
+// Clique demand unmet (factions.js) -- a low unresolved "trouble" tone, sawtooth descending.
+function playFactionUnmet() {
+  tone({ freq: 220, freqEnd: 140, duration: 0.26, type: 'sawtooth', peakGain: 0.18 });
+}
+
+// Corrupt staff discovered (security.js) -- a distinct sharp alert/reveal stinger: a quick
+// upward flick then a held note, deliberately not shaped like any combat/build cue above so it
+// reads as "look at this" rather than "something got hit".
+function playCorruptDiscovered() {
+  tone({ freq: 500, freqEnd: 900, duration: 0.08, type: 'square', peakGain: 0.16 });
+  tone({ freq: 700, duration: 0.22, type: 'square', peakGain: 0.2, start: 0.08 });
+}
+
+// Rat infestation tier change (rats.js, both up and down transitions) -- skittering/scratchy
+// noise burst, reusing noiseBurst() with a highpass filter for a thin, scratchy texture distinct
+// from the turret/kill noise bursts' lowpass "thud" character. Throttled since escalating and
+// de-escalating tiers can't both fire the same tick but keeps this consistent with the other
+// per-system events above.
+function playRatTierChange() {
+  throttled('ratTier', 150, () => {
+    noiseBurst({ duration: 0.18, filterFreq: 3500, filterType: 'highpass', peakGain: 0.14 });
+  });
+}
+
+// Severe weather onset (weather.js's Heatwave/Cold, onset only -- not every transition) -- a
+// subtle wind/rain-like noise swell: longer duration, gentle lowpass, lower peak gain than the
+// combat noise bursts so it reads as ambient rather than an alert.
+function playSevereWeatherOnset() {
+  noiseBurst({ duration: 0.6, filterFreq: 500, filterType: 'lowpass', peakGain: 0.1 });
+}
+
+// ---------------------------------------------------------------- onRandomEvent text dispatcher
+// main.js's world.onRandomEvent hook receives free-text milestone strings from several unrelated
+// systems (world.js/factions.js/rats.js/security.js/weather.js/jobs.js) -- this matches on the
+// exact/substring text each system is known to emit (verified against each source file) rather
+// than adding a dedicated onXxx callback per system, since that text already reaches one place.
+// Falls through silently (no cue) for every other random-event text this project already had
+// before this pass (weather changes to non-severe states, wanderer/blight/trader events, etc).
+function playRandomEventCue(text) {
+  if (typeof text !== 'string') return;
+  if (text === 'Unrest is spreading through the settlement') playUnrestTier1();
+  else if (text.startsWith('Unrest is escalating')) playUnrestTier2();
+  else if (text.startsWith('Unrest has reached a breaking point')) playUnrestTier3();
+  else if (text === 'The settlement has calmed') playUnrestResolve();
+  else if (text.includes(' completes ')) playProgramComplete();
+  else if (text.includes('demand satisfied')) playFactionSatisfied();
+  else if (text.includes('demand went unmet')) playFactionUnmet();
+  else if (text.includes('was caught quietly diverting supplies')) playCorruptDiscovered();
+  else if (text.startsWith('Rat infestation has reached') || text === 'The rat infestation has died down') playRatTierChange();
+  else if (text === 'Weather turns to Heatwave' || text === 'Weather turns to Cold') playSevereWeatherOnset();
 }
 
 
@@ -7357,9 +10669,337 @@ function recordGameAbandoned(world) {
 }
 
 
+// ---- grants.js ----
+// Outpost Charter Contracts (grants.js) -- non-carceral port of Prison Architect's real
+// grants.lua mechanic (SESSION_HANDOFF.md: already researched, findings summarized there before
+// this file existed). Real PA shape being ported: a parent objective carries the actual reward
+// and stays hidden until its prerequisites are met (Objective.SetPreRequisite); its child
+// objectives are a free checklist with no reward of their own; a scaling grant ladder is unlocked
+// strictly in sequence; and a separate time-locked investment instrument lets the player pay in
+// now and collect more later. Reskinned as contracts issued by whatever regional authority
+// oversees a civil settlement -- no prison, inmate, warden, or corrections language anywhere, per
+// this project's explicit non-carceral rule.
+//
+// Real numbers this was scaled from (task doc, anchored to economy.js's own comment that this
+// project's scrap economy runs roughly 1/40th of Prison Architect's dollar scale):
+//  - Bootstrap contract: PA's real starter grant pays 10,000-20,000 for a handful of basic
+//    conditions met at zero upfront cost -- here, 250-500 (this file pays the midpoint, 375) for
+//    7 basic conditions, still zero cost to the player.
+//  - Capacity-tier ladder: PA's real population-scaling grant chain runs 50->100->200->500
+//    people. This project's population can't climb anywhere near that far above its starting
+//    size (weather.js's wanderer-joins event is capped at ~1.15x the starting roster, and the
+//    separate Refugee Wagon in world.js only replenishes combat losses back toward ~0.9x of
+//    starting size -- see both files' own comments) -- so rather than literally scaling PA's
+//    50/100/200/500 by a constant factor (which would put the top rungs permanently unreachable
+//    for a normal 24-40-citizen run), the ladder here targets peak-alive-citizen counts that are
+//    actually reachable at that colony size, while keeping the same "each rung roughly doubles
+//    the difficulty of the last" shape PA's own 50->100->200->500 progression has.
+//  - Investment instrument: PA's real Deposit Box pays in $5,000, waits 4,320 or 10,080 real
+//    minutes (3 or 7 days), pays out $16,000. Here: pay in 125 scrap (5,000/40), wait 1,080 ticks
+//    short-term or 2,520 ticks long-term (the task's own tick figures, in the same ballpark as
+//    schedule.js's DAY_NIGHT_CYCLE_TICKS=2400-per-day so the two terms read as "under a day" vs
+//    "about a day"), long-term pays out 400 (16,000/40, the literal scaled figure) -- short-term
+//    pays a genuinely smaller multiple (220) since real investment instruments pay less for
+//    tying up capital for less time, not the same reward on a shorter clock.
+//  - Emergency bailout: PA's real gate is cash<=500, cashflow<=0, debt>=10000, population>=30.
+//    This project has no debt field, so "debt" is reskinned as a sustained scrap deficit read
+//    straight off world.finance.history (world.js's existing budget-report snapshots) rather than
+//    inventing a parallel resource. The genuine "rescue with strings attached" part of PA's own
+//    version survives the port: this grant does NOT pay out the moment the crisis gate opens --
+//    it sits pending until the settlement's own finances demonstrably recover, so it rewards
+//    successful crisis management rather than just handing over free scrap the instant things
+//    look bad.
+
+const CHARTER_REWARD_BOOTSTRAP = 375; // midpoint of the task's 250-500 range, see header comment
+
+// Capacity-tier population thresholds -- deliberately RELATIVE to world.startingCitizenCount
+// rather than fixed absolute numbers. This engine hard-caps how far the living population can
+// grow above wherever it started: weather.js's wanderer-joins event refuses once
+// world.citizens.count >= startingCitizenCount * 1.15 (WANDERER_POPULATION_CAP_MULT), and the
+// separate Refugee Wagon (world.js) only ever replenishes COMBAT LOSSES back toward ~90% of
+// starting size, it never grows a colony past its start. A fixed ladder like PA's literal
+// 50/100/200/500 (or even a naively-scaled-down flat version of it) would either be trivially
+// true at tick 0 for a colony that started large, or permanently unreachable for one that started
+// small -- neither is a real milestone. These factors instead target genuine growth above
+// whatever this run actually started with, topping out just under the real 1.15x ceiling so the
+// last rung is genuinely hard (mirrors PA's own top grant tier being the one real settlements
+// rarely reach) without being mathematically impossible for any of New Game's 12-32 starting-
+// citizen range.
+const TIER_POPULATION_FACTORS = [1.04, 1.08, 1.12, 1.15];
+const TIER_REWARDS = [70, 110, 170, 260]; // roughly doubling per rung, same shape as PA's own ladder
+
+/** The peakAliveCitizens threshold for ladder rung `idx`, relative to this run's own starting
+ *  size -- see TIER_POPULATION_FACTORS' doc comment above for why this can't be a flat constant. */
+function tierPopulationThreshold(world, idx) {
+  const start = world.startingCitizenCount || 24;
+  // Math.max with start+idx+1 guarantees strictly-increasing, strictly-above-start thresholds
+  // even at the smallest 12-citizen starting size, where the multiplicative factors alone would
+  // round several rungs down to the exact same integer.
+  return Math.max(start + idx + 1, Math.round(start * TIER_POPULATION_FACTORS[idx]));
+}
+const INVEST_COST = 125;
+const INVEST_SHORT_TICKS = 1080;
+const INVEST_LONG_TICKS = 2520;
+const INVEST_SHORT_PAYOUT = 220;
+const INVEST_LONG_PAYOUT = 400;
+
+// Bailout crisis gate (see header comment for the debt->deficit reskin). world.finance.history
+// (world.js) snapshots every FINANCE_SNAPSHOT_INTERVAL=300 ticks -- summing the last 3 entries'
+// net looks back ~900 ticks, a genuinely sustained downturn rather than one bad snapshot, mirroring
+// how UNREST_SUSTAIN_TICKS elsewhere in world.js requires a crisis to hold before it counts.
+const BAILOUT_SCRAP_CEILING = 15; // "critically low" -- starting scrap is 50, cheapest real defense costs more than this
+const BAILOUT_MIN_POPULATION = 18; // "decent-sized" -- flat floor (not relative to starting size like the tier ladder above), a colony worth saving regardless of how it started
+const BAILOUT_DEFICIT_WINDOW = 3; // finance.history entries looked back for the sustained-deficit check
+const BAILOUT_DEFICIT_FLOOR = -30; // summed net over that window must be at least this negative
+const BAILOUT_REWARD = 300;
+// Recovery bar the settlement has to clear on its own before the pending bailout actually pays --
+// this is the "strings attached" half: unlocking is a crisis, completing requires genuine recovery.
+const BAILOUT_RECOVERY_SCRAP = 60; // comfortably above the ceiling that triggered the crisis
+const BAILOUT_RECOVERY_NET_FLOOR = 0; // summed recent net must be non-negative, i.e. no longer bleeding
+
+const CharterKind = Object.freeze({
+  Bootstrap: 'bootstrap',
+  TierOutpost: 'tier_outpost',
+  TierWaystation: 'tier_waystation',
+  TierDistrict: 'tier_district',
+  TierRegion: 'tier_region',
+  Bailout: 'bailout',
+});
+
+const TIER_ORDER = [CharterKind.TierOutpost, CharterKind.TierWaystation, CharterKind.TierDistrict, CharterKind.TierRegion];
+
+function completedCountOf(world, kind) {
+  let n = 0;
+  for (const s of world.structures) if (s.kind === kind && !s.underConstruction && !s.destroyed) n++;
+  return n;
+}
+
+// Completed walls are a special case: grid.js/fire.js bake a finished wall Structure straight
+// into the grid's permanent wallThingId terrain the tick after construction completes (see
+// fire.js's own doc comment: "walls... fold into permanent grid terrain... and can't hold fire
+// state") -- so a completed wall almost never actually shows up in world.structures by the time
+// anything checks for it. Count real wall coverage off the grid directly instead of
+// completedCountOf, which only ever sees a wall Structure during its brief post-completion,
+// pre-fold window.
+function wallTileCount(world) {
+  let n = 0;
+  const arr = world.grid.wallThingId;
+  for (let i = 0; i < arr.length; i++) if (arr[i] !== 0) n++;
+  return n;
+}
+
+function zoneTileCount(world, zoneKind) {
+  let n = 0;
+  const arr = world.zones.kind;
+  for (let i = 0; i < arr.length; i++) if (arr[i] === zoneKind) n++;
+  return n;
+}
+
+function aliveCitizenCount(world) {
+  let n = 0;
+  for (let i = 0; i < world.citizens.count; i++) if (world.citizens.isAliveAt(i)) n++;
+  return n;
+}
+
+// Bootstrap's 7-item checklist -- a free child objective per item, matching PA's real
+// parent-objective-carries-the-reward/children-are-free shape (see header comment). Each entry is
+// { label, check(world) } so the UI panel can render a live per-item tick/cross without the panel
+// needing to know anything about what each condition actually means.
+const BOOTSTRAP_CHECKLIST = [
+  { label: 'At least one wall section built', check: w => wallTileCount(w) >= 1 },
+  { label: 'At least one turret built', check: w => completedCountOf(w, 'turret') >= 1 },
+  { label: 'At least one bed built', check: w => completedCountOf(w, 'bed') >= 1 },
+  { label: 'A Food zone painted', check: w => zoneTileCount(w, 2 /* ZoneKind.Food */) >= 1 },
+  { label: 'A Bedroom zone painted', check: w => zoneTileCount(w, 1 /* ZoneKind.Bedroom */) >= 1 },
+  { label: 'At least 6 citizens alive', check: w => aliveCitizenCount(w) >= 6 },
+  { label: 'Survived the first wave', check: w => w.waveSpawner.waveNumber >= 1 },
+];
+
+function bailoutGateMet(world) {
+  if (world.scrap > BAILOUT_SCRAP_CEILING) return false;
+  if (aliveCitizenCount(world) < BAILOUT_MIN_POPULATION) return false;
+  const h = world.finance && world.finance.history ? world.finance.history : [];
+  if (h.length < BAILOUT_DEFICIT_WINDOW) return false;
+  const recentNet = h.slice(-BAILOUT_DEFICIT_WINDOW).reduce((sum, e) => sum + e.net, 0);
+  return recentNet <= BAILOUT_DEFICIT_FLOOR;
+}
+
+function bailoutRecoveryMet(world) {
+  if (world.scrap < BAILOUT_RECOVERY_SCRAP) return false;
+  const h = world.finance && world.finance.history ? world.finance.history : [];
+  if (h.length < BAILOUT_DEFICIT_WINDOW) return false;
+  const recentNet = h.slice(-BAILOUT_DEFICIT_WINDOW).reduce((sum, e) => sum + e.net, 0);
+  return recentNet >= BAILOUT_RECOVERY_NET_FLOOR;
+}
+
+// GRANT_DEFS: id -> definition. `unlockCheck` gates visibility/eligibility (PA's real
+// SetPreRequisite hide-until-ready behavior); `completeCheck` gates the actual payout, which is
+// the same moment as unlockCheck for every charter EXCEPT the bailout (see its own doc comment
+// above) -- the two are deliberately kept as separate hooks rather than collapsed into one so
+// that distinction is structural, not a special case bolted on somewhere else.
+const GRANT_DEFS = Object.freeze({
+  [CharterKind.Bootstrap]: Object.freeze({
+    label: 'Bootstrap Charter',
+    desc: 'A no-cost founding contract from the regional authority -- clear the checklist below and the settlement is recognized as a going concern.',
+    reward: CHARTER_REWARD_BOOTSTRAP,
+    checklist: BOOTSTRAP_CHECKLIST,
+    unlockCheck: () => true, // always visible from tick 0, same as PA's real starter grant
+    completeCheck: world => BOOTSTRAP_CHECKLIST.every(item => item.check(world)),
+    requires: null,
+  }),
+  ...Object.fromEntries(TIER_ORDER.map((kind, idx) => [kind, Object.freeze({
+    label: ['Outpost Recognition', 'Waystation Charter', 'District Charter', 'Regional Charter'][idx],
+    // desc/checklist label are functions, not plain strings: the actual population target is
+    // relative to THIS run's own starting size (tierPopulationThreshold), so it can't be baked in
+    // at module-load time the way every other charter's fixed-number text can be. See
+    // renderGrants() in main.js for where these get called with the live world.
+    desc: world => `Issued once the settlement has sustained at least ${tierPopulationThreshold(world, idx)} residents at once.`,
+    reward: TIER_REWARDS[idx],
+    checklist: [{
+      label: world => `Peak population reached ${tierPopulationThreshold(world, idx)}`,
+      check: w => w.peakAliveCitizens >= tierPopulationThreshold(w, idx),
+    }],
+    // Sequential unlock: each rung's checklist item only becomes checkable once the PRIOR rung in
+    // the ladder is already completed -- mirrors PA's real scaling-grant chain, where a later
+    // grant's own prerequisite is the earlier grant already being awarded, not just a bigger
+    // number on its own. idx 0 (TierOutpost) requires Bootstrap.
+    unlockCheck: (world, state) => idx === 0 ? isCompleted(state, CharterKind.Bootstrap) : isCompleted(state, TIER_ORDER[idx - 1]),
+    completeCheck: world => world.peakAliveCitizens >= tierPopulationThreshold(world, idx),
+    requires: idx === 0 ? CharterKind.Bootstrap : TIER_ORDER[idx - 1],
+  })])),
+  [CharterKind.Bailout]: Object.freeze({
+    label: 'Emergency Stabilization Charter',
+    desc: 'Only offered while the settlement is genuinely in financial trouble -- and only pays out once its own finances actually recover. Not free money.',
+    reward: BAILOUT_REWARD,
+    checklist: [
+      { label: `Scrap on hand recovers above ${BAILOUT_RECOVERY_SCRAP}`, check: bailoutRecoveryMet },
+      { label: 'Income trend turns non-negative again', check: bailoutRecoveryMet },
+    ],
+    unlockCheck: bailoutGateMet,
+    completeCheck: bailoutRecoveryMet,
+    requires: null,
+  }),
+});
+
+const GRANT_ORDER = [CharterKind.Bootstrap, ...TIER_ORDER, CharterKind.Bailout];
+
+// A def's `desc` and a checklist item's `label` are plain strings for most charters but functions
+// of `world` for the tier ladder (see its own doc comment above) -- this is the one place that
+// distinction has to be handled, so the UI panel (main.js) never needs to know which kind it got.
+function resolveText(value, world) {
+  return typeof value === 'function' ? value(world) : value;
+}
+
+function isCompleted(state, id) {
+  return !!(state.charters[id] && state.charters[id].completed);
+}
+
+function createGrantState() {
+  const charters = {};
+  for (const id of GRANT_ORDER) charters[id] = { unlocked: false, completed: false, unlockedAtTick: null, completedAtTick: null };
+  return { charters, investments: [] };
+}
+
+/** locked | available | completed, for the UI panel. */
+function charterStatus(world, id) {
+  const st = world.grants.charters[id];
+  if (st.completed) return 'completed';
+  const def = GRANT_DEFS[id];
+  if (id === CharterKind.Bailout) {
+    // The bailout's own "unlocked" flag only means the crisis gate has been SEEN at least once --
+    // it stays visible as pending even if scrap ticks back up above the ceiling before recovery
+    // fully lands, so the player isn't punished for a single good tick mid-crisis.
+    return st.unlocked ? 'available' : 'locked';
+  }
+  return def.unlockCheck(world, world.grants) ? 'available' : 'locked';
+}
+
+/** Per-tick update: unlock/complete charters, pay out matured investments. Called once per world
+ *  tick from world.js's tick(), same "own small state object, ticked from the composition root"
+ *  pattern as world.factions/world.roster/world.waveSpawner. */
+function tickGrants(world) {
+  if (!world.grants) world.grants = createGrantState();
+  const state = world.grants;
+
+  for (const id of GRANT_ORDER) {
+    const st = state.charters[id];
+    if (st.completed) continue;
+    const def = GRANT_DEFS[id];
+    if (!st.unlocked) {
+      if (!def.unlockCheck(world, state)) continue;
+      st.unlocked = true;
+      st.unlockedAtTick = world.currentTick;
+      world.milestoneLog.push({ tick: world.currentTick, text: `Charter available: ${def.label}` });
+      if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    }
+    if (def.completeCheck(world, state)) {
+      st.completed = true;
+      st.completedAtTick = world.currentTick;
+      world.addScrap(def.reward, 'grant');
+      world.milestoneLog.push({ tick: world.currentTick, text: `Charter fulfilled: ${def.label} (+${def.reward} scrap)` });
+      if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    }
+  }
+
+  // Investment maturities -- see startInvestment below for the payer side. Iterate a copy since
+  // completed entries are spliced out mid-loop.
+  for (let i = state.investments.length - 1; i >= 0; i--) {
+    const inv = state.investments[i];
+    if (world.currentTick < inv.matureTick) continue;
+    world.addScrap(inv.payout, 'grant');
+    world.milestoneLog.push({ tick: world.currentTick, text: `Investment matured: +${inv.payout} scrap (staked ${inv.cost})` });
+    if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    state.investments.splice(i, 1);
+  }
+}
+
+const InvestmentTerm = Object.freeze({ Short: 'short', Long: 'long' });
+
+/** Player-initiated: pay INVEST_COST now via the normal scrap pool (not economy.js's spend(),
+ *  since this isn't a construction cost -- it just debits world.scrap and books it against
+ *  finance.buildSpend so the budget report's net-lifetime math stays honest about where scrap
+ *  went), lock it for the chosen term, receive more than was paid in once it matures. Returns
+ *  { ok, reason }. */
+function startInvestment(world, term) {
+  if (!world.grants) world.grants = createGrantState();
+  if (world.scrap < INVEST_COST) return { ok: false, reason: `Needs ${INVEST_COST} scrap on hand` };
+  const short = term === InvestmentTerm.Short;
+  const ticks = short ? INVEST_SHORT_TICKS : INVEST_LONG_TICKS;
+  const payout = short ? INVEST_SHORT_PAYOUT : INVEST_LONG_PAYOUT;
+  world.scrap -= INVEST_COST;
+  if (world.finance) world.finance.buildSpend += INVEST_COST; // reuses the budget report's expense bucket, see comment above
+  world.grants.investments.push({ term, cost: INVEST_COST, payout, startTick: world.currentTick, matureTick: world.currentTick + ticks });
+  world.milestoneLog.push({ tick: world.currentTick, text: `Invested ${INVEST_COST} scrap (${short ? 'short-term' : 'long-term'}), matures in ${ticks} ticks` });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  return { ok: true };
+}
+
+function serializeGrants(state) {
+  return {
+    charters: Object.fromEntries(Object.entries(state.charters).map(([id, s]) => [id, { ...s }])),
+    investments: state.investments.map(inv => ({ ...inv })),
+  };
+}
+
+function deserializeGrants(json) {
+  const state = createGrantState();
+  if (!json) return state;
+  for (const id of GRANT_ORDER) if (json.charters && json.charters[id]) state.charters[id] = { ...state.charters[id], ...json.charters[id] };
+  state.investments = (json.investments || []).map(inv => ({ ...inv }));
+  return state;
+}
+
+{ INVEST_COST, INVEST_SHORT_TICKS, INVEST_LONG_TICKS, INVEST_SHORT_PAYOUT, INVEST_LONG_PAYOUT };
+
+
 // ---- world.js ----
 // Ported from SD.Headless/SimWorld.cs -- the composition root that owns every store/system
 // and advances them one fixed tick at a time (10 Hz, matching ARCHITECTURE.md section 2).
+
+
+
+
+
 
 
 
@@ -7401,6 +11041,12 @@ const STARTER_NAMES = [
 ];
 
 const RECYCLING_WATER_BONUS = 1.4; // see the pump/pipe check in the pollution tick below
+// Recycling Throughput research node (real PA anchor: RecyclingIncentive, cost 2500/time 720 --
+// see research.js's 'recycling_throughput' node): a real +40% multiplier on each Recycling
+// Center's per-tick processing capacity once researched, applied on top of (not instead of) the
+// existing water-grid bonus above -- both stack, same "provisioned beats unprovisioned, upgraded
+// beats stock" logic as the rest of this system.
+const RECYCLING_THROUGHPUT_RESEARCH_MULT = 1.4;
 // Mood-event trigger radius for "witnessed a nearby combat death" (citizens.js's addMoodEvent,
 // see the tickAttackerVsCitizens call below) -- generous enough that a citizen fleeing a raid
 // still counts as having witnessed it, without being map-wide.
@@ -7517,6 +11163,9 @@ class SimWorld {
     // colony can still wall up and put down turrets on tick 0.
     this.research = createResearchState();
     this._lastWaveLogged = 0;
+    // Coverage Plans (coverageplans.js): set of purchased plan kinds, one-time economy-sink
+    // buildable-discount + threshold-gated call-in bundles. Empty Set is the fresh-colony default.
+    this.coveragePlans = new Set();
 
     // Per-run counters feeding metaprogress.js's cross-run lifetime stats (see that module's
     // header comment) -- purely additive bookkeeping here, this world instance dies at
@@ -7542,7 +11191,9 @@ class SimWorld {
       recyclingScrap: 0,  // passive Recycling Center trickle (this file, tick())
       conquestScrap: 0,   // held-region supply lines trickling scrap in (worldmap.js)
       processingScrap: 0, // net of the 'workshop' Processing job's raw-in/Components-out chain (jobs.js)
+      farmScrap: 0,       // 'farm_plot' Farming job's per-cycle payout (jobs.js, research.js's Agronomy node)
       factionScrap: 0,    // rewards from satisfied clique demands (factions.js)
+      grantScrap: 0,      // Outpost Charter Contract payouts + matured investments (grants.js)
       otherScrap: 0,      // catch-all for any future/uncategorized income source
       buildSpend: 0,      // total scrap spent on construction (economy.js spend())
       history: [],        // rolling snapshots of net scrap change, one per FINANCE_SNAPSHOT_INTERVAL
@@ -7574,6 +11225,13 @@ class SimWorld {
     this._unrestCrisisMinWellbeing = Infinity;
     this.unrestResolutionBuffTicks = 0;
 
+    // worldmap.js's arrival-mishap system (Odyssey LandingOutcomeDef-style, toned down): a fresh
+    // settlement can land with a short work-speed debuff instead of/alongside a minor scrap loss.
+    // main.js's expandTo() sets this to the mishap's duration right after constructing the new
+    // SimWorld; tick() below counts it down. jobs.js's arrivalMishapRateMultFor() reads it the
+    // same way unrestRateMultFor() reads unrestActive/unrestResolutionBuffTicks above.
+    this.arrivalMishapTicks = 0;
+
     // Citizen cliques + faction demands (factions.js, reskinned Prison Architect gang-demand
     // system -- see that file's header comment for the real numbers this was ported from). Owns
     // its own state object (same "own store, ticked from here" pattern as this.roster/
@@ -7589,6 +11247,12 @@ class SimWorld {
     this.heldCitizenEvent = { active: false, citizenId: null, beat: 0, beatCount: 0, beatEndTick: 0, pauseUntilTick: null };
     this._heldCitizenCooldownUntil = 0;
 
+    // Outpost Charter Contracts + time-locked investments (grants.js, reskinned Prison Architect
+    // grants.lua): own small state object, same pattern as this.factions/this.heldCitizenEvent
+    // above -- see grants.js's header comment for the full mechanic and the real numbers it was
+    // scaled from.
+    this.grants = createGrantState();
+
     // Presentation-layer audio hooks (see audio.js) -- optional callbacks the host app (main.js)
     // can assign after construction. Left null by default so world.js/siege.js never need to
     // know audio.js exists; called via optional chaining everywhere below.
@@ -7598,6 +11262,7 @@ class SimWorld {
     this.onKill = null;          // () => void, fires whenever an attacker is killed
     this.onCitizenDowned = null; // () => void, fires when a citizen goes down or dies to an attacker
     this.onRandomEvent = null;   // (text) => void, fires on a weather change or a one-off random event (weather.js)
+    this.onCitizenOnBreak = null; // () => void, fires the instant a citizen newly enters CitizenFlags.OnBreak (citizens.js)
 
     initWeather(this); // sets this.weather / this._weatherTimer, see weather.js
 
@@ -7647,10 +11312,17 @@ class SimWorld {
     for (let x = 22; x <= 25; x++) for (let y = 22; y <= 23; y++) this.zones.set(x, y, ZoneKind.Training);
 
     initRats(this); // rats.js -- infestation level/rat pool, see that file's header comment
+    initAnomaly(this); // anomaly.js -- colony-wide anomaly pressure meter, see that file's header comment
 
     this.resourceNodes = scatterNodes(this.grid, this.rng, 16, 14, this.width / 2, this.height / 2);
     this.vehicles = [];
     this._nextVehicleTick = 200;
+
+    // Labor drones (drones.js -- RimWorld Biotech's mech-companion analog): live drones and their
+    // fabrication queue, same "own small array, ticked from here" shape as this.vehicles/this.dogs
+    // above. Empty until the player builds a Fabrication Bay -- no drones exist on tick 0.
+    this.drones = [];
+    this.droneFabricationQueue = [];
 
     computeGrading(this); // real scores from tick 0, not the placeholder defaults set above
   }
@@ -7689,10 +11361,49 @@ class SimWorld {
       else if (kind === 'recycling') this.finance.recyclingScrap += amount;
       else if (kind === 'conquest') this.finance.conquestScrap += amount;
       else if (kind === 'processing') this.finance.processingScrap += amount;
+      else if (kind === 'farm') this.finance.farmScrap += amount;
       else if (kind === 'faction') this.finance.factionScrap += amount;
+      else if (kind === 'grant') this.finance.grantScrap += amount;
       else this.finance.otherScrap += amount;
       this.scrapEarnedThisRun += amount; // metaprogress.js's lifetime scrap-earned stat, see recordGameEnd()
     }
+  }
+
+  // Vest purchase (economy.js BUILD_COST.vest, citizens.js's hasVest flag, siege.js's
+  // CITIZEN_VEST_ARMOR_RATING/resolveCitizenArmorRoll) -- the per-citizen counterpart to
+  // security.js's armory-issued weapon tiers: no per-unit inventory here either, this is a
+  // straightforward "spend scrap, flip this citizen's flag on" purchase, one Vest per citizen,
+  // idempotent (buying a second Vest for an already-vested citizen is a no-op refusal, not a
+  // wasted spend). Returns { ok: true } or { ok: false, reason }.
+  buyVest(citizenId) {
+    let idx = -1;
+    for (let i = 0; i < this.citizens.count; i++) {
+      if (this.citizens.id[i] === citizenId) { idx = i; break; }
+    }
+    if (idx < 0 || !this.citizens.isAliveAt(idx)) return { ok: false, reason: 'invalid' };
+    if (this.citizens.isVestedAt(idx)) return { ok: false, reason: 'already' };
+    if (!canAfford(this, 'vest')) return { ok: false, reason: 'cost' };
+    spend(this, 'vest');
+    this.citizens.hasVest[idx] = 1;
+    const text = `${this.citizens.name[idx]} was equipped with a Vest`;
+    this.milestoneLog.push({ tick: this.currentTick, text });
+    if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    return { ok: true };
+  }
+
+  // Upgraded K9 tier (security.js's K9_UPGRADE_*/upgradeDog -- real PA RobotDog anchor). Looks up
+  // the dog owned by citizenId (a K9Handler's assigned dog, security.js's assignDogHandler)
+  // rather than taking a dog object directly, matching buyVest's citizenId-based call convention
+  // above and keeping main.js's inspector button call site simple. Returns { ok, reason }.
+  upgradeDog(citizenId) {
+    const dog = this.dogs.find(d => d.ownerId === citizenId);
+    if (!dog) return { ok: false, reason: 'invalid' };
+    // Bare reference to the module-level upgradeDog import (security.js) -- a class method body
+    // has no implicit binding to its own name (unlike a named function expression), so this
+    // resolves to the free function, not a recursive self-call. Verified in the bundled build too
+    // (build.py strips the import line but leaves security.js's `function upgradeDog(...)`
+    // declaration as a global, which this same bare reference reaches identically).
+    return upgradeDog(this, dog);
   }
 
   build(kind, x, y) {
@@ -7926,6 +11637,11 @@ class SimWorld {
     // the threshold this tick immediately falls into jobs.js's normal Idle/SeekingFood/SeekingBed
     // handling below, rather than waiting a tick -- see security.js's tickStaffOffDuty doc comment.
     tickStaffOffDuty(this.citizens, this.roster, (i) => this.idOf(i), this.zones);
+    // Staff training-program dispatch (programs.js's ProgramKind.GuardResponseTraining, see
+    // security.js's tickStaffTraining doc comment): must run after tickStaffOffDuty (so it never
+    // fights over the off-duty flag with a genuine food/rest dispatch this same tick) and before
+    // tickJobs (so a freshly-set SeekingProgram state actually gets walked/processed this tick).
+    tickStaffTraining(this, (i) => this.idOf(i));
     tickJobs(this.citizens, this.zones, (i) => this.isStaffOnDutyAt(i), this.structures, this.resourceNodes,
       (i) => this.idOf(i), (amt) => this.addScrap(amt, 'harvest'), this);
     // Citizen cliques + faction demands (factions.js): reads this tick's freshly-updated jobState
@@ -7952,12 +11668,28 @@ class SimWorld {
     // other build passes through already, just weather-scaled. Heatwave's real penalty is
     // per-citizen (outdoors-only, see isHeatwaveSlowdownActive's doc comment), so it's supplied as
     // the extra perCitizenMult callback rather than folded into the flat `speed` scalar like Rain.
+    // Lightning Storm's own movement penalty (weather.js's lightningStormMoveMult, "gritted" =
+    // near a Lightning Rod) is also positional, same reasoning -- both stack multiplicatively into
+    // one combined per-citizen callback below rather than needing two separate callback params.
     const heatwaveSlowdown = isHeatwaveSlowdownActive(this);
     tickWander(this.citizens, this.grid, this.rng, 0.04 * weatherWanderSpeedMult(this.weather),
-      (i) => this.isStaffAt(i) || isOnJob(this.citizens, i),
-      heatwaveSlowdown
-        ? (i) => (roomContaining(this.rooms, this.grid, this.citizens.x[i], this.citizens.y[i]) ? 1 : HEATWAVE_WANDER_SPEED_MULT)
-        : null);
+      // Drafted citizens (draft.js) never idle-wander -- they stand and hold or execute a direct
+      // order, see draft.js's tickDrafted (called below) for the only movement a drafted citizen
+      // gets.
+      (i) => this.isStaffAt(i) || isOnJob(this.citizens, i) || this.citizens.isDraftedAt(i),
+      (i) => {
+        const heat = heatwaveSlowdown
+          ? (roomContaining(this.rooms, this.grid, this.citizens.x[i], this.citizens.y[i]) ? 1 : HEATWAVE_WANDER_SPEED_MULT)
+          : 1;
+        const lightning = lightningStormMoveMult(this, this.citizens.x[i], this.citizens.y[i]);
+        return heat * lightning;
+      },
+      // Allowed Area restriction (citizens.js's isInAllowedArea) -- an idle citizen's random
+      // wander target has to be gated the same as every jobs.js-driven target, or a restricted
+      // citizen with nothing to do would still drift out of their painted area. hasAllowedArea
+      // short-circuits before touching the mask for the overwhelming majority of citizens who
+      // have no restriction at all.
+      (i, x, y) => !this.citizens.hasAllowedArea(i) || this.citizens.isInAllowedArea(i, this.grid.width, x, y));
     tickDogs(this.dogs, this.citizens, this.roster, this.attackers, (amt) => this.addScrap(amt, 'kill'), this.rng);
     // Taming/breeding (RimWorld animals, see FEATURE_RESEARCH.md and security.js): wild animals
     // wander and occasionally spawn like resource nodes below; jobs.js's Taming job moves a tamed
@@ -7976,6 +11708,12 @@ class SimWorld {
     // Thunderstorm lightning-ignition + rain-dousing (weather.js): runs before tickFireIgnition/
     // tickFire below so a strike this tick is visible to this same tick's fire damage/spread pass.
     tickThunderstorm(this);
+    // Lightning Storm calamity (weather.js's tickLightningStorm, real Prison Architect
+    // calamity_settings.txt Lightning Storm -- distinct system from the RimWorld-ported
+    // thunderstorm-ignition mechanic just above, see that file's header comment): direct strike
+    // rolls against citizens/power-structures/ground. Runs right after tickThunderstorm since both
+    // read the same weather gate and this tick's just-updated weather state.
+    tickLightningStorm(this);
     // Cold-weather pipe freezing (water.js): runs right after tickWeather so it reads this tick's
     // freshly-updated weather/_weatherStreakTicks, same ordering reasoning as tickThunderstorm above.
     tickPipeFreezing(this);
@@ -7988,15 +11726,35 @@ class SimWorld {
     tickRatInfestation(this);
     tickRats(this);
 
+    // Sickness (sickness.js -- real RimWorld Flu day-rates, rescaled): staggered per-citizen
+    // onset roll + progression, same "cheap periodic-roll system" grouping as rats just above.
+    tickSickness(this);
+
+    // Anomaly pressure (anomaly.js -- see that file's header comment): a colony-wide 0->1 meter,
+    // gated on colonyStrength/pollution (director.js's existing hazard-scaling pattern, reused as
+    // the gate rather than a second parallel one), with periodic tier-scaled consequence rolls.
+    // Runs right after rats for the same "cheap periodic-roll system" grouping, after
+    // computeRoomStats/tickWeather so a Low-tier mess roll this tick sees this tick's real room
+    // list, same ordering reasoning as tickRatInfestation above.
+    tickAnomalyPressure(this);
+    tickAnomalyEvents(this);
+
     maybeSpawnNode(this.resourceNodes, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
     maybeSpawnWildAnimal(this.wildAnimals, this.grid, this.rng, this.currentTick, this.width / 2, this.height / 2);
     this._maybeSpawnRefugeeWagon(); // population-growth-via-arrivals, see the method's doc comment above
     tickVehicles(this);
+    // Labor drones (drones.js): fabrication queue advances first so a drone that finishes
+    // gestating this tick is immediately available to tickDrones' own idle-claim pass the same
+    // tick, rather than sitting idle-and-uncounted for one extra tick.
+    tickDroneFabrication(this);
+    tickDrones(this);
     if (this.ethanolPenaltyTimer > 0) this.ethanolPenaltyTimer--; // see vehicles.js FUEL_TYPES.ethanol
     // Crisis-resolution reward countdown (see UNREST_REWARD_* above) -- counts down independently
     // of unrestTier so it keeps applying for its full duration even if a fresh crisis starts again
     // shortly after resolving well.
     if (this.unrestResolutionBuffTicks > 0) this.unrestResolutionBuffTicks--;
+    // worldmap.js arrival-mishap debuff countdown -- see this field's own doc comment above.
+    if (this.arrivalMishapTicks > 0) this.arrivalMishapTicks--;
 
     // Pollution: generators produce power at the cost of waste (SEA:R's core tradeoff, see
     // FEATURE_RESEARCH.md); it decays slowly on its own but climbs faster than that decay once
@@ -8028,7 +11786,11 @@ class SimWorld {
         // pollution faster -- water pressure washing down the sorting line, same "provisioned
         // beats unprovisioned" logic as the Food/Recreation refill bonus in jobs.js, applied to
         // this consumer instead since it has no refill rate of its own to boost.
-        recyclingCapacity += isWateredAt(this.structures, s.x, s.y) ? 0.4 * RECYCLING_WATER_BONUS : 0.4;
+        {
+          let cap = isWateredAt(this.structures, s.x, s.y) ? 0.4 * RECYCLING_WATER_BONUS : 0.4;
+          if (isNodeUnlocked(this.research, 'recycling_throughput')) cap *= RECYCLING_THROUGHPUT_RESEARCH_MULT;
+          recyclingCapacity += cap;
+        }
       }
       else if (s.kind === 'generator_nuclear' && !isNuclearContained(this.structures, s)) activeUncontainedNuclear++;
     }
@@ -8122,6 +11884,11 @@ class SimWorld {
       (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.(), combatMoveSpeed, this.rng);
     tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt, 'kill'), (s) => this.onTurretFire?.(s), () => this.onKill?.(), this.rng, combatAccuracy);
     tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.(), this.rng, combatAccuracy);
+    // Drafted citizens (draft.js -- RimWorld-style manual control): owns ALL movement/combat for
+    // any citizen currently flagged Drafted (citizens.js's CitizenFlags.Drafted). Placed right
+    // after tickStaffCombat so a drafted attack order resolves in the same "who fought this tick"
+    // phase as every autonomous combat system above it, using the same damage pipeline/rng.
+    tickDrafted(this);
     // Mood event trigger #1 (negative, see citizens.js's addMoodEvent/MOOD_EVENT_STACK_LIMITS):
     // a real death (not just a downing) inside WITNESS_DEATH_RADIUS gives every other living
     // citizen nearby a stacking, decaying morale hit -- RimWorld's real death-witnessed Thought,
@@ -8166,6 +11933,30 @@ class SimWorld {
       }
       return true;
     });
+
+    // Critical-structure watchdog (genuinely missing before this pass): a destroyed generator,
+    // water pump, or garage previously left the colony silently degraded (power outage, no more
+    // watered tiles, no more haul cycle) with zero player notification -- every OTHER real threat
+    // in this game (overload, nuclear hazard, lightning, riots) already logs a milestone/
+    // onRandomEvent, this one didn't. Runs once per tick, after every system above that can set
+    // `.destroyed = true` on a structure this same tick (nuclear hazard, fire, overload-fire,
+    // fence/trap combat), so it never misses a loss. `_criticalLossLogged` lives on the structure
+    // object itself (persisted below in serialize(), restored via deserialize()'s
+    // Object.assign(new Structure(...), s) pattern) so a save/load round-trip doesn't re-fire the
+    // same alert for an already-known loss.
+    for (const s of this.structures) {
+      if (!s.destroyed || s._criticalLossLogged) continue;
+      const isGenerator = s.kind.startsWith('generator');
+      const isPump = s.kind === 'pump';
+      const isGarage = parseGarageKind(s.kind) != null;
+      if (!isGenerator && !isPump && !isGarage) continue;
+      s._criticalLossLogged = true;
+      const label = isGenerator ? 'A generator' : isPump ? 'The water pump' : 'A garage';
+      const text = `${label} was destroyed -- the colony has lost a load-bearing structure`;
+      this.milestoneLog.push({ tick: this.currentTick, text });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+      this.onRandomEvent?.(text);
+    }
 
     let wallSum = 0;
     for (let i = 0; i < this.grid.wallThingId.length; i++) if (this.grid.wallThingId[i] !== 0) wallSum += i + 1;
@@ -8233,7 +12024,11 @@ class SimWorld {
     let warningWindow = watchtower ? (hasPoweredBonus(this.structures, watchtower.x, watchtower.y) ? 90 : 50) : 0;
     let warningSource = watchtower ? 'watchtower' : null;
     if (camera) {
-      const cameraWindow = monitorStaffed ? 70 : 30;
+      // CCTV Improvement research node (real PA anchor: CCTVImprovement, cost 1000/time 180 --
+      // see research.js's 'cctv_improvement' node): a real +35% early-warning window boost for
+      // both the unmanned camera and the staffed-monitor case, once researched.
+      const cctvMult = isNodeUnlocked(this.research, 'cctv_improvement') ? 1.35 : 1;
+      const cameraWindow = (monitorStaffed ? 70 : 30) * cctvMult;
       if (cameraWindow > warningWindow) { warningWindow = cameraWindow; warningSource = monitorStaffed ? 'monitor' : 'camera'; }
     }
 
@@ -8269,6 +12064,13 @@ class SimWorld {
       recordGameEnd(this);
     }
 
+    // Outpost Charter Contracts + investment maturities (grants.js): runs here, after
+    // peakAliveCitizens is updated just above, so the capacity-tier ladder's completeCheck reads
+    // THIS tick's freshly-updated peak rather than lagging a full tick behind a population change
+    // -- and before the finance snapshot just below, so a grant/investment payout this tick is
+    // reflected in that same snapshot rather than the next one.
+    tickGrants(this);
+
     // Finance history snapshot (budget report trend/sparkline, see the constructor's finance
     // comment): once per FINANCE_SNAPSHOT_INTERVAL ticks -- roughly one wave-cycle, matching the
     // 300-tick default wave spacing in siege.js's WaveSpawner -- record the net scrap change
@@ -8276,7 +12078,8 @@ class SimWorld {
     // entries so this can't grow unbounded over a long session.
     if (this.currentTick % FINANCE_SNAPSHOT_INTERVAL === 0) {
       const totalIncome = this.finance.killScrap + this.finance.harvestScrap + this.finance.haulScrap +
-        this.finance.recyclingScrap + this.finance.conquestScrap + this.finance.processingScrap + this.finance.otherScrap;
+        this.finance.recyclingScrap + this.finance.conquestScrap + this.finance.processingScrap +
+        this.finance.farmScrap + this.finance.grantScrap + this.finance.otherScrap;
       const totalExpense = this.finance.buildSpend;
       const net = (totalIncome - this._financeLastIncome) - (totalExpense - this._financeLastExpense);
       this.finance.history.push({ tick: this.currentTick, net, scrap: Math.round(this.scrap) });
@@ -8309,11 +12112,20 @@ class SimWorld {
       unrestTier3AboveTicks: this._unrestTier3AboveTicks,
       unrestCrisisMinWellbeing: Number.isFinite(this._unrestCrisisMinWellbeing) ? this._unrestCrisisMinWellbeing : null,
       unrestResolutionBuffTicks: this.unrestResolutionBuffTicks,
+      arrivalMishapTicks: this.arrivalMishapTicks,
       factions: serializeFactions(this.factions),
+      // Coverage Plans (coverageplans.js): just the set of purchased plan-kind strings -- the
+      // discount/call-in logic itself is all derived live from COVERAGE_PLAN_DEFS + real world
+      // state, nothing else to persist.
+      coveragePlans: Array.from(this.coveragePlans || []),
       heldCitizenEvent: this.heldCitizenEvent, heldCitizenCooldownUntil: this._heldCitizenCooldownUntil,
       peakAliveCitizens: this.peakAliveCitizens, attackersKilled: this.attackersKilled, scrapEarnedThisRun: this.scrapEarnedThisRun,
       research: serializeResearch(this.research),
+      grants: serializeGrants(this.grants),
       weather: this.weather, weatherTimer: this._weatherTimer,
+      // Trader-caravan voucher (weather.js's tryTraderEvent / economy.js's buildCost) -- persisted
+      // so a save/load round-trip mid-window doesn't silently lose an active discount.
+      traderVoucherUses: this._traderVoucherUses || 0, traderVoucherExpireTick: this._traderVoucherExpireTick ?? -1,
       waveNumber: this.waveSpawner.waveNumber, nextWaveTick: this.waveSpawner.nextWaveTick,
       citizens: {
         count: this.citizens.count,
@@ -8321,20 +12133,30 @@ class SimWorld {
         name: this.citizens.name.slice(0, this.citizens.count),
         x: Array.from(this.citizens.x.slice(0, this.citizens.count)),
         y: Array.from(this.citizens.y.slice(0, this.citizens.count)),
+        age: Array.from(this.citizens.age.slice(0, this.citizens.count)),
         hunger: Array.from(this.citizens.hunger.slice(0, this.citizens.count)),
         rest: Array.from(this.citizens.rest.slice(0, this.citizens.count)),
         social: Array.from(this.citizens.social.slice(0, this.citizens.count)),
         hydration: Array.from(this.citizens.hydration.slice(0, this.citizens.count)),
+        exercise: Array.from(this.citizens.exercise.slice(0, this.citizens.count)),
+        // Sickness (sickness.js) -- real, meaningful state (unlike _sickOffset, which is just
+        // stagger noise re-derivable on load), so it's worth persisting.
+        sickSeverity: Array.from(this.citizens.sickSeverity.slice(0, this.citizens.count)),
         mood: Array.from(this.citizens.mood.slice(0, this.citizens.count)),
         health: Array.from(this.citizens.health.slice(0, this.citizens.count)),
         alive: Array.from(this.citizens.alive.slice(0, this.citizens.count)),
         flags: Array.from(this.citizens.flags.slice(0, this.citizens.count)),
         skillCombat: Array.from(this.citizens.skillCombat.slice(0, this.citizens.count)),
         skillConstruction: Array.from(this.citizens.skillConstruction.slice(0, this.citizens.count)),
+        // Citizen Rank (ranks.js) -- plain tier index, same round-trip pattern as skillCombat above.
+        citizenRank: Array.from(this.citizens.citizenRank.slice(0, this.citizens.count)),
         trait: this.citizens.trait.slice(0, this.citizens.count).map(t => t?.name ?? null),
       },
       roster: Array.from(this.roster._roleById.entries()).map(([id, kind]) => ({
         id, kind, post: this.roster._postById.get(id) || null,
+        // Manual weapon-tier override (security.js) -- undefined for anyone the player hasn't
+        // touched, so deserialize below only needs to call setManualWeapon when present.
+        manualWeapon: this.roster._manualWeaponById.get(id) || null,
       })),
       // Corrupt/bribable staff (security.js's StaffRoster corruption state) -- persisted
       // separately from the roster array above so a save/load round-trip doesn't reset a staffer
@@ -8360,9 +12182,18 @@ class SimWorld {
         // Cold-weather pipe freeze state (water.js) -- picked back up generically by deserialize's
         // Object.assign, same pattern as storedEnergy/switchedOn above.
         frozen: s.frozen || false,
+        // Critical-structure watchdog (see the tick() loop above) -- persisted so a reload of an
+        // already-destroyed generator/pump/garage doesn't re-fire the "just destroyed" alert.
+        _criticalLossLogged: s._criticalLossLogged || false,
       })),
       zones: Array.from(this.zones.kind),
-      dogs: this.dogs.map(d => ({ ownerId: d.ownerId, x: d.x, y: d.y })),
+      // upgraded/healthMult (security.js's K9_UPGRADE_* -- see upgradeDog): omitted entirely for
+      // an unupgraded dog rather than written as false/undefined, so an old save round-trips
+      // through a byte-diff tool identically to before this field existed.
+      dogs: this.dogs.map(d => ({
+        ownerId: d.ownerId, x: d.x, y: d.y,
+        ...(d.upgraded ? { upgraded: true, healthMult: d.healthMult } : {}),
+      })),
       wildAnimals: this.wildAnimals.map(a => ({ x: a.x, y: a.y })),
       resourceNodes: this.resourceNodes.map(n => ({ x: n.x, y: n.y, amount: n.amount, maxAmount: n.maxAmount, depleted: n.depleted })),
       // Rat infestation (rats.js): rats themselves are cheap flavor entities (at most
@@ -8371,6 +12202,10 @@ class SimWorld {
       ratInfestation: this.ratInfestation || 0,
       ratsCaught: this.ratsCaught || 0,
       rats: (this.rats || []).map(r => ({ x: r.x, y: r.y })),
+      // Anomaly pressure (anomaly.js): a plain float + a tier label, no entity list to round-trip
+      // (unlike rats above) -- the burst-flavor-window fields are intentionally NOT persisted, same
+      // "resume as if just-passed" acceptance as the vehicle mid-haul note above.
+      anomalyPressure: this.anomalyPressure || 0,
       // targetNode isn't serialized (it's a live reference into resourceNodes) -- a vehicle
       // mid-haul on save resumes as if just-departed rather than mid-route. Acceptable: it's a
       // few seconds of game time, not a correctness bug like the duplicate-vehicle-on-load one
@@ -8379,6 +12214,12 @@ class SimWorld {
         kind: v.kind, fuelType: v.fuelType, garageX: v.garageX, garageY: v.garageY, x: v.x, y: v.y,
         driverId: v.driverId, phase: v.driverId == null ? 'parked' : 'inbound', workTimer: 0,
       })),
+      // Labor drones (drones.js) -- jobRef isn't serialized (a live reference into
+      // structures/vehicles/resourceNodes/rooms, same "resume as if just-departed" acceptance as
+      // a vehicle's targetNode above); every drone loads back to idle and reclaims its own work
+      // the next tick via tickDrones' normal idle-claim pass.
+      drones: this.drones.map(d => ({ id: d.id, category: d.category, x: d.x, y: d.y })),
+      droneFabricationQueue: this.droneFabricationQueue.map(o => ({ ...o })),
     };
   }
 
@@ -8396,7 +12237,8 @@ class SimWorld {
     if (json.finance) {
       w.finance = { ...w.finance, ...json.finance };
       const totalIncome = w.finance.killScrap + w.finance.harvestScrap + w.finance.haulScrap +
-        w.finance.recyclingScrap + w.finance.conquestScrap + w.finance.processingScrap + w.finance.otherScrap;
+        w.finance.recyclingScrap + w.finance.conquestScrap + w.finance.processingScrap +
+        w.finance.farmScrap + w.finance.grantScrap + w.finance.otherScrap;
       w._financeLastIncome = totalIncome;
       w._financeLastExpense = w.finance.buildSpend;
     }
@@ -8410,11 +12252,16 @@ class SimWorld {
     w._unrestTier3AboveTicks = json.unrestTier3AboveTicks || 0;
     w._unrestCrisisMinWellbeing = json.unrestCrisisMinWellbeing != null ? json.unrestCrisisMinWellbeing : Infinity;
     w.unrestResolutionBuffTicks = json.unrestResolutionBuffTicks || 0;
+    w.arrivalMishapTicks = json.arrivalMishapTicks || 0;
     w._unrestAboveTicks = json.unrestAboveTicks || 0;
     // Pre-factions saves have no `factions` key -- deserializeFactions falls back to a fresh,
     // unformed state (same "old save loads with the new system just not-yet-active" convention as
     // research/other systems added later in this project), rather than throwing.
     w.factions = deserializeFactions(json.factions);
+    // Coverage Plans (coverageplans.js) -- pre-existing saves have no `coveragePlans` key, so this
+    // falls back to the constructor's already-set empty Set, same convention as every other
+    // system added later in this project.
+    if (json.coveragePlans) w.coveragePlans = new Set(json.coveragePlans);
     // Held-citizen crisis (siege.js) -- pre-existing saves have no `heldCitizenEvent` key, so this
     // falls back to the same inactive default the constructor already sets, same convention as
     // every other system added later in this project.
@@ -8428,9 +12275,14 @@ class SimWorld {
     // state, so an old save loads with the survival core unlocked and 0 points rather than
     // throwing or silently locking everything.
     w.research = deserializeResearch(json.research);
+    // Pre-grants saves have no `grants` key -- deserializeGrants falls back to a fresh state
+    // (nothing unlocked/completed, no pending investments), same fallback pattern as research above.
+    w.grants = deserializeGrants(json.grants);
     w.timeOfDay = json.timeOfDay != null ? json.timeOfDay : 0.3;
     w.weather = json.weather || 'Clear';
     w._weatherTimer = json.weatherTimer != null ? json.weatherTimer : w._weatherTimer;
+    w._traderVoucherUses = json.traderVoucherUses || 0;
+    w._traderVoucherExpireTick = json.traderVoucherExpireTick ?? -1;
     w.waveSpawner.waveNumber = json.waveNumber || 0;
     w.waveSpawner.nextWaveTick = json.nextWaveTick || 300;
     const c = json.citizens;
@@ -8440,18 +12292,43 @@ class SimWorld {
       w.citizens.name[i] = c.name[i];
       w.citizens.x[i] = c.x[i]; w.citizens.y[i] = c.y[i];
       w.citizens.targetX[i] = c.x[i]; w.citizens.targetY[i] = c.y[i];
+      // c.age is undefined for a save written before this feature existed -- fall back to a
+      // mid-Young-band default (10000) rather than 0, so an old save doesn't suddenly load an
+      // entire colony of newborns with no age variance at all.
+      w.citizens.age[i] = c.age ? c.age[i] : 10000;
       w.citizens.hunger[i] = c.hunger[i]; w.citizens.rest[i] = c.rest[i]; w.citizens.social[i] = c.social[i];
       // Pre-hydration saves have no `hydration` key -- default to full rather than 0 so an old
       // save doesn't load every citizen already parched.
       w.citizens.hydration[i] = c.hydration ? c.hydration[i] : 1;
+      // Pre-exercise saves have no `exercise` key -- same "default to full" convention as
+      // hydration above, so an old save doesn't load every citizen already needing the gym.
+      w.citizens.exercise[i] = c.exercise ? c.exercise[i] : 1;
+      // Pre-sickness saves have no `sickSeverity` key -- default to 0 (healthy), same convention
+      // as every other system added later in this project.
+      w.citizens.sickSeverity[i] = c.sickSeverity ? c.sickSeverity[i] : 0;
+      // _sickOffset isn't serialized (pure stagger noise, not real state, same convention as a
+      // reloaded vehicle's mid-route reset) -- deserialize's per-index loop bypasses spawn()'s
+      // own rng-based assignment, so re-derive a spread deterministically here rather than leaving
+      // every loaded citizen pinned at the array's zero-init default (which would re-sync every
+      // loaded citizen's onset-roll tick, defeating the point of staggering).
+      w.citizens._sickOffset[i] = i % 50;
       w.citizens.mood[i] = c.mood[i]; w.citizens.health[i] = c.health[i]; w.citizens.alive[i] = c.alive[i];
       w.citizens.flags[i] = c.flags ? c.flags[i] : 0;
       w.citizens.skillCombat[i] = c.skillCombat ? c.skillCombat[i] : 0;
       w.citizens.skillConstruction[i] = c.skillConstruction ? c.skillConstruction[i] : 0;
+      // Pre-rank saves have no `citizenRank` key -- default to tier 0 ('Settler'), same
+      // "old save loads with the new system just not-yet-active" convention as every other
+      // system added later in this project (see e.g. c.age/c.hydration fallbacks above).
+      w.citizens.citizenRank[i] = c.citizenRank ? c.citizenRank[i] : 0;
       w.citizens.trait[i] = c.trait && c.trait[i] ? TRAITS.find(t => t.name === c.trait[i]) : null;
     }
     w.roster = new (Object.getPrototypeOf(w.roster).constructor)();
-    for (const r of json.roster) w.roster.assign(r.id, r.kind, r.post);
+    for (const r of json.roster) {
+      w.roster.assign(r.id, r.kind, r.post);
+      // Pre-override saves have no `manualWeapon` key -- falls back to staying fully automatic,
+      // same convention as every other system added later in this project.
+      if (r.manualWeapon) w.roster.setManualWeapon(r.id, r.manualWeapon);
+    }
     // Corrupt/bribable staff (security.js) -- pre-existing saves have no `staffCorruption` key,
     // so every restored staffer just starts as un-evaluated (identical to a world where
     // tickStaffCorruption hasn't looked at them yet), rather than throwing.
@@ -8484,6 +12361,16 @@ class SimWorld {
         driverId: null, phase: 'parked', workTimer: 0, targetNode: null,
       }));
     }
+    // Labor drones (drones.js) -- pre-existing saves have no `drones`/`droneFabricationQueue`
+    // keys, so this falls back to the fresh-colony empty defaults the constructor already set,
+    // same convention as every other system added later in this project.
+    if (json.drones) {
+      w.drones = json.drones.map(d => new Drone(d.id, d.category, d.x, d.y));
+      bumpDroneIdCounter(w.drones);
+    }
+    if (json.droneFabricationQueue) {
+      w.droneFabricationQueue = json.droneFabricationQueue.map(o => ({ ...o }));
+    }
     if (json.resourceNodes) {
       w.resourceNodes = json.resourceNodes.map(n => Object.assign(new ResourceNode(n.x, n.y, n.maxAmount), n));
     }
@@ -8496,6 +12383,10 @@ class SimWorld {
     if (json.rats) {
       w.rats = json.rats.map((r, idx) => Object.assign(new Rat(r.x, r.y, idx % 30), { x: r.x, y: r.y }));
     }
+    // Anomaly pressure (anomaly.js) -- pre-existing saves have no `anomalyPressure` key, and
+    // initAnomaly() (already called inside the SimWorld constructor above) already left it at 0,
+    // same "old save loads with no problem yet" convention as rats above.
+    if (json.anomalyPressure != null) w.anomalyPressure = json.anomalyPressure;
     return w;
   }
 }
@@ -8516,32 +12407,58 @@ class SimWorld {
 
 
 
-// Shifts a #rrggbb color toward black (amt<0) or white (amt>0) by `amt` (-1..1) -- used to
-// derive gradient-stop colors (a shadowed underside, a lit highlight) from a single base hex so
-// callers only ever need to track one color per palette slot, not three.
+
+// Parses either '#rrggbb' or 'rgb(a)(...)' into an [r,g,b] triple -- shade()/desaturate() need to
+// compose (desaturate's rgb(...) output can be fed back into shade() for a highlight, e.g.
+// _drawHumanoid's onBreak citizens), and a hex-only parser would silently break on that input.
+function parseColor(str) {
+  if (str[0] === '#') {
+    const n = parseInt(str.slice(1), 16);
+    return [(n >> 16) & 0xff, (n >> 8) & 0xff, n & 0xff];
+  }
+  const m = str.match(/rgba?\(([^)]+)\)/);
+  if (m) {
+    const parts = m[1].split(',').map((s) => parseFloat(s));
+    return [parts[0] || 0, parts[1] || 0, parts[2] || 0];
+  }
+  return [0, 0, 0];
+}
+
+// Shifts a color toward black (amt<0) or white (amt>0) by `amt` (-1..1) -- used to derive a
+// single solid highlight (or, elsewhere, a state-dependent tint) from a base color so callers
+// only ever need to track one color per palette slot, not three.
 function shade(hex, amt) {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  const [r, g, b] = parseColor(hex);
   const mix = (c) => Math.max(0, Math.min(255, Math.round(c + (amt > 0 ? (255 - c) : c) * amt)));
   return `#${[mix(r), mix(g), mix(b)].map(v => v.toString(16).padStart(2, '0')).join('')}`;
 }
 
 const CELL = 24; // px per grid cell at zoom 1
-const OUTLINE = 'rgba(20,16,12,0.75)';
+// Bumped from the old rgba(20,16,12,0.75) toward near-opaque true near-black (style brief item 3)
+// -- crisper silhouette separation at small sprite size, kept neutral rather than warm-tinted.
+const OUTLINE = 'rgba(10,10,12,0.95)';
 
+// Style-brief item 1: baseline material colors desaturated ~15-25% off their original punchy
+// values (computed by hand from the pre-brief hex constants). Full saturation is reserved for
+// hazard/attention states (downed gray, onBreak desaturate(), the Boss's pulsing threat ring/
+// crown), not baseline per-role appearance.
 const ROLE_COLOR = {
-  [StaffRoleKind.Guard]: '#f2c026',
-  [StaffRoleKind.Sniper]: '#bf59d9',
-  [StaffRoleKind.K9Handler]: '#f2c026',
-  [StaffRoleKind.Monitor]: '#59a6d9',
+  [StaffRoleKind.Guard]: '#e1b93e',
+  [StaffRoleKind.Sniper]: '#ba68cf',
+  [StaffRoleKind.K9Handler]: '#e1b93e',
+  [StaffRoleKind.Monitor]: '#67a4cd',
   // Structured Group Program staff (programs.js) -- distinct from the security-role palette above
   // so a Foreman/Psychologist/Facilitator reads visually apart from Guard/Sniper/Monitor at a
   // glance, same "role tints the citizen dot" convention.
-  [StaffRoleKind.Foreman]: '#c87830',
-  [StaffRoleKind.Psychologist]: '#7ac0c0',
-  [StaffRoleKind.Facilitator]: '#c878c8',
+  [StaffRoleKind.Foreman]: '#b9793f',
+  [StaffRoleKind.Psychologist]: '#83bbbb',
+  [StaffRoleKind.Facilitator]: '#c383c3',
   [StaffRoleKind.None]: '#d3cdbf',
 };
+
+// Baseline citizen/attacker skin tone (warm), desaturated ~20% from the original #e8c9a0 per the
+// style brief's warm-vs-cool material split -- skin/hair stay warm, uniform/gear tints stay cool.
+const CITIZEN_SKIN = '#e1c8a8';
 
 const ZONE_BORDER = {
   [ZoneKind.Bedroom]: '#5a6fb0',
@@ -8559,11 +12476,22 @@ const FUEL_COLOR = {
   electric: '#3dd0d0',
 };
 
+// Labor drone "status eye" color per fixed WorkCategory (drones.js, see _drawDrones below) -- a
+// drone never changes category after fabrication, so this is a stable at-a-glance job read, same
+// spirit as FUEL_COLOR's stripe above. RGB triples (not CSS strings) so _drawDrones can inject a
+// live alpha for the idle-vs-working pulse without string-parsing a color back apart.
+const DRONE_EYE_COLOR = {
+  [WorkCategory.Construction]: [230, 176, 60],  // amber, matches the workshop/finishedBuild accent family
+  [WorkCategory.Processing]: [242, 201, 76],    // matches _drawStructureShape's workshop work-light
+  [WorkCategory.Hauling]: [61, 111, 168],       // matches FUEL_COLOR.gas, the "hauling" blue this file already uses
+  [WorkCategory.Harvesting]: [140, 128, 104],   // matches _drawResourceNodes' ore-deposit fill family
+  [WorkCategory.Cleaning]: [130, 200, 190],     // cool teal, distinct from every other category's warm/blue tones
+};
+
 // Blend a hex color toward gray -- used to give OnBreak citizens a visibly washed-out look
 // distinct from the flat gray used for Downed citizens (see _drawCitizens).
 function desaturate(hex, amount) {
-  const n = parseInt(hex.slice(1), 16);
-  const r = (n >> 16) & 0xff, g = (n >> 8) & 0xff, b = n & 0xff;
+  const [r, g, b] = parseColor(hex);
   const gray = (r + g + b) / 3;
   const mix = (c) => Math.round(c + (gray - c) * amount);
   return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
@@ -8722,6 +12650,7 @@ class Renderer {
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this._drawGround(world);
     this._drawZones(world);
+    this._drawAllowedArea(world, input);
     this._drawResourceNodes(world);
     this._drawNuclearHazards(world);
     this._drawStructures(world);
@@ -8732,6 +12661,7 @@ class Renderer {
     this._drawRats(world);
     this._drawAttackers(world);
     this._drawVehicles(world);
+    this._drawDrones(world);
     this._drawSmogHaze(world);
     if (input) {
       this._drawCursor(world, input);
@@ -8890,6 +12820,40 @@ class Renderer {
       }
     }
     ctx.setLineDash([]); // don't leak the dash pattern into unrelated strokes drawn after this
+  }
+
+  // Allowed Area restriction overlay (RimWorld Restrict-tab style, citizens.js's allowedAreaMask)
+  // -- shown for whichever single citizen is currently selected/inspected, not just while
+  // actively painting, so the player can see an already-painted restriction at a glance. A
+  // distinct amber tint (not any existing ZONE_COLOR hue) so it never reads as a fourth zone
+  // kind. Deliberately NOT gated on input.tool === 'restrict-area' -- selecting a restricted
+  // citizen should show their cage immediately, same as clicking one shows their needs bars.
+  _drawAllowedArea(world, input) {
+    if (!input) return;
+    const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+    if (sel < 0 || sel >= world.citizens.count || !world.citizens.hasAllowedArea(sel)) return;
+    const ctx = this.ctx;
+    const size = CELL * this.zoom;
+    const gw = world.grid.width;
+    const mask = world.citizens.allowedAreaMask[sel];
+    for (let y = 0; y < world.height; y++) {
+      for (let x = 0; x < world.width; x++) {
+        if (mask[y * gw + x] !== 1) continue;
+        const [px, py] = this.worldToScreen(x, y);
+        ctx.fillStyle = 'rgba(224,168,96,0.22)';
+        ctx.fillRect(px, py, size + 1, size + 1);
+        ctx.strokeStyle = 'rgba(224,168,96,0.75)';
+        ctx.lineWidth = Math.max(1, size * 0.05);
+        ctx.setLineDash(this.highContrast ? [size * 0.15, size * 0.1] : []);
+        ctx.beginPath();
+        if (y === 0 || mask[(y - 1) * gw + x] !== 1) { ctx.moveTo(px, py); ctx.lineTo(px + size, py); }
+        if (y === world.height - 1 || mask[(y + 1) * gw + x] !== 1) { ctx.moveTo(px, py + size); ctx.lineTo(px + size, py + size); }
+        if (x === 0 || mask[y * gw + x - 1] !== 1) { ctx.moveTo(px, py); ctx.lineTo(px, py + size); }
+        if (x === world.width - 1 || mask[y * gw + x + 1] !== 1) { ctx.moveTo(px + size, py); ctx.lineTo(px + size, py + size); }
+        ctx.stroke();
+      }
+    }
+    ctx.setLineDash([]);
   }
 
   _drawCursor(world, input) {
@@ -9057,9 +13021,13 @@ class Renderer {
     // invisible in practice since the palette space is small (a few role colors x downed/
     // onBreak states) and every combo gets cached forever after its first appearance.
     const hair = Renderer.HAIR_TONES[Math.floor(seed * 977) % Renderer.HAIR_TONES.length];
+    // Style brief item 2: flat base fill + one solid highlight shape (BODY_HI/HEAD_HI) instead of
+    // a full-surface gradient -- see assets.js's humanoid_torso template, which now clips a small
+    // highlight ellipse to the top ~20-30% of the torso/head silhouette rather than blending
+    // top-to-bottom.
     const drew = drawSprite(ctx, 'humanoid_torso', {
-      BODY: bodyColor, BODY_SHADOW: shade(bodyColor, -0.35),
-      HEAD: headColor, HEAD_HI: shade(headColor, 0.35),
+      BODY: bodyColor, BODY_HI: shade(bodyColor, 0.3),
+      HEAD: headColor, HEAD_HI: shade(headColor, 0.3),
       HAIR: hair, OUTLINE,
     }, sx, sy - s * 0.03, s * 0.85);
     if (!drew) {
@@ -9091,12 +13059,31 @@ class Renderer {
       const id = world.citizens.id[i];
       const downed = world.citizens.isDownedAt(i);
       const onBreak = !downed && world.citizens.isOnBreakAt(i);
+      // Sickness (sickness.js): piggybacks on this exact desaturate-tint pattern rather than a
+      // new visual language -- onBreak already claims the tint when both apply (a citizen can be
+      // sick AND on break at once), but the glyph below still shows independently either way.
+      const sick = !downed && world.citizens.isSickAt(i);
+      const drafted = world.citizens.isDraftedAt(i);
       const role = world.roster.isStaff(id) ? world.roster.kindOf(id) : StaffRoleKind.None;
       const baseColor = ROLE_COLOR[role] || ROLE_COLOR[StaffRoleKind.None];
-      const color = downed ? '#6b6b6b' : onBreak ? desaturate(baseColor, 0.6) : baseColor;
-      const headColor = downed ? '#8a8a8a' : onBreak ? desaturate('#e8c9a0', 0.6) : '#e8c9a0';
+      const color = downed ? '#6b6b6b' : onBreak ? desaturate(baseColor, 0.6) : sick ? desaturate(baseColor, 0.4) : baseColor;
+      // Skin tone (#e1c8a8) is the desaturated-~20% baseline per the style brief; downed/onBreak
+      // still branch off it exactly as before, just from the new muted base.
+      const headColor = downed ? '#8a8a8a' : onBreak ? desaturate(CITIZEN_SKIN, 0.6) : sick ? desaturate(CITIZEN_SKIN, 0.4) : CITIZEN_SKIN;
       const [sx, sy] = this.worldToScreen(world.citizens.x[i], world.citizens.y[i]);
       this._drawHumanoid(world.citizens.x[i], world.citizens.y[i], downed ? 0.5 : 0.7, color, headColor, world.citizens.health[i], false, world.currentTick, id);
+      if (sick) {
+        // Small sickly-green "+" tell centered above the head -- distinct position (dead center)
+        // and color (green, not onBreak's blue-gray "z" or forcejob's orange "!") from every other
+        // above-head glyph so a sick citizen reads clearly even while also on break/drafted/etc.
+        const s = CELL * this.zoom * 0.7;
+        this.ctx.save();
+        this.ctx.font = `bold ${Math.max(8, s * 0.34)}px sans-serif`;
+        this.ctx.fillStyle = 'rgba(120,190,110,0.9)';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('+', sx, sy - s * 0.68);
+        this.ctx.restore();
+      }
       if (onBreak) {
         // Small "zzz" tell above the head so low-mood citizens read clearly at a glance,
         // distinct from the flat-gray Downed silhouette.
@@ -9108,6 +13095,81 @@ class Renderer {
         this.ctx.fillText('z', sx + s * 0.32, sy - s * 0.62);
         this.ctx.restore();
       }
+      // Force Job pending (forcejob.js -- RimWorld-style "Prioritize" one-shot order): a small
+      // orange exclamation mark above the head, same "small glyph reads at a glance" convention
+      // as onBreak's zzz right above -- distinct color/shape/position (opposite side from onBreak's
+      // z) so the two can never be confused, even though in practice they can coexist (an
+      // onBreak citizen can still have a pending forced job waiting for them). Cleared the moment
+      // jobs.js's tickJobs actually claims (or fails to claim) the forced target, so this never
+      // lingers once the citizen is genuinely en route.
+      if (world.citizens.hasForcedJobAt(i)) {
+        const s = CELL * this.zoom * 0.7;
+        this.ctx.save();
+        this.ctx.font = `bold ${Math.max(9, s * 0.4)}px sans-serif`;
+        this.ctx.fillStyle = '#ffb020';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('!', sx - s * 0.32, sy - s * 0.62);
+        this.ctx.restore();
+      }
+      // First-aid tending (jobs.js's JobState.Tending / citizens.js's TEND_RECOVERY_RATE): a small
+      // green "+" above the head, same "small glyph reads at a glance" convention as onBreak's zzz
+      // and Force Job's orange "!" above -- centered and slightly higher than those two (which sit
+      // left/right at the same height) so all three can coexist without overlapping. Shown on the
+      // TENDER (jobState === Tending, whether or not the render happens to catch a variance-roll
+      // tick) and on the PATIENT (world.citizens.beingTended[i], set fresh by this same tick's
+      // tickJobs Tending handler) -- one glyph style, two roles, so "an active tend is happening
+      // right here" reads clearly from either citizen's position.
+      if (world.citizens.jobState[i] === JobState.Tending || (downed && world.citizens.beingTended[i] === 1)) {
+        const s = CELL * this.zoom * 0.7;
+        this.ctx.save();
+        this.ctx.font = `bold ${Math.max(9, s * 0.4)}px sans-serif`;
+        this.ctx.fillStyle = '#5ec97a';
+        this.ctx.textAlign = 'center';
+        this.ctx.fillText('+', sx, sy - s * 0.85);
+        this.ctx.restore();
+      }
+      // Drafted (draft.js -- RimWorld-style manual control): a small ring under the citizen's
+      // feet, same "state tint at a glance" convention as onBreak's zzz glyph and Downed's flat
+      // gray above, rather than a whole new visual language. High-contrast mode gets a dashed
+      // ring instead of solid, same accessibility pattern _drawZones uses for zone borders.
+      if (drafted) {
+        const s = CELL * this.zoom * 0.7;
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.strokeStyle = '#4fd1ff';
+        ctx.lineWidth = Math.max(1.5, s * 0.09);
+        if (this.highContrast) ctx.setLineDash([s * 0.12, s * 0.1]);
+        ctx.beginPath();
+        ctx.ellipse(sx, sy + s * 0.42, s * 0.42, s * 0.16, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+
+        // Active-order feedback (draft.js's orderKind -- 1 = Move, 2 = Attack): a thin line from
+        // the citizen to their current order target, so a move/attack order in progress is
+        // visibly distinct from a drafted-but-idle "standing at attention" citizen.
+        const orderKind = world.citizens.orderKind[i];
+        if (orderKind === OrderKind.Move) {
+          const [tx, ty] = this.worldToScreen(world.citizens.orderTargetX[i], world.citizens.orderTargetY[i]);
+          ctx.save();
+          ctx.strokeStyle = 'rgba(79,209,255,0.6)';
+          ctx.lineWidth = Math.max(1, s * 0.06);
+          ctx.setLineDash([s * 0.15, s * 0.12]);
+          ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
+          ctx.restore();
+        } else if (orderKind === OrderKind.Attack) {
+          const targetI = world.citizens.orderAttackIndex[i];
+          if (targetI >= 0 && world.attackers.isAliveAt(targetI)) {
+            const [tx, ty] = this.worldToScreen(world.attackers.x[targetI], world.attackers.y[targetI]);
+            ctx.save();
+            ctx.strokeStyle = 'rgba(255,90,60,0.7)';
+            ctx.lineWidth = Math.max(1, s * 0.06);
+            ctx.setLineDash([s * 0.08, s * 0.08]);
+            ctx.beginPath(); ctx.moveTo(sx, sy); ctx.lineTo(tx, ty); ctx.stroke();
+            ctx.restore();
+          }
+        }
+      }
     }
   }
 
@@ -9116,7 +13178,7 @@ class Renderer {
   // the same silhouette in a duller, uncollared coat so "this one isn't yours yet" reads clearly
   // at a glance without needing a whole separate sprite.
   _drawDogs(world) {
-    this._drawAnimal(world.dogs, '#7a5230', '#f2c026');
+    this._drawAnimal(world.dogs, '#745235', '#f2c026'); // coat desaturated ~15%; collar kept punchy on purpose, a small tamed-vs-wild accent
   }
 
   _drawWildAnimals(world) {
@@ -9180,11 +13242,14 @@ class Renderer {
   //   Brute      -- noticeably larger, heavy slate-plated
   //   Skirmisher -- smaller and lighter/oranger, reads as "fast and flimsy"
   //   Boss       -- much larger, violet, plus a pulsing threat ring and a spiked crown
+  // Body/head colors desaturated ~20% from the original punchy values per the style brief; the
+  // Boss's separate threat-ring/crown overlay (drawn below) is the deliberate full-saturation
+  // "attention" accent, so its own baseline body/head color is muted like every other archetype.
   static ATTACKER_STYLES = [
-    { scale: 0.6,  body: '#8a1f1f', head: '#c76b4a' }, // Grunt
-    { scale: 0.85, body: '#4a4438', head: '#8f7a5c' }, // Brute
-    { scale: 0.48, body: '#b0521f', head: '#e0a06a' }, // Skirmisher
-    { scale: 1.25, body: '#4a1f5e', head: '#c469e0' }, // Boss
+    { scale: 0.6,  body: '#7c2626', head: '#b96f55' }, // Grunt
+    { scale: 0.85, body: '#48443a', head: '#8a7961' }, // Brute
+    { scale: 0.48, body: '#a0552c', head: '#d4a175' }, // Skirmisher
+    { scale: 1.25, body: '#482658', head: '#c077d6' }, // Boss
   ];
 
   _drawAttackers(world) {
@@ -9241,6 +13306,8 @@ class Renderer {
   _drawStructures(world) {
     const ctx = this.ctx;
     this._structuresForPower = world.structures; // read back by the 'wire' shape for its lit/dark tint
+    this._currentWeather = world.weather; // read back by the 'lightning_rod' shape for its storm-active radius ring
+    this._droneQueueLength = world.droneFabricationQueue?.length || 0; // read back by the 'fabrication_bay' shape for its work-light pulse
     for (const s of world.structures) {
       if (s.destroyed && s.kind === 'trap') continue; // traps vanish once triggered
       const [sx, sy] = this.worldToScreen(s.x, s.y);
@@ -9305,8 +13372,11 @@ class Renderer {
     }
 
     if (s.kind === 'wall') {
-      const fill = '#413c34';
-      const drew = drawSprite(ctx, 'wall', { FILL: fill, FILL_HI: shade(fill, 0.25), OUTLINE }, sx, sy, size);
+      // Style-brief pass: slightly desaturated toward neutral gray (was a warmer brownish slab);
+      // shading is now flat fill + a single upper-left highlight wedge baked into the template
+      // (see assets.js's 'wall'), not a gradient.
+      const fill = '#403e3a';
+      const drew = drawSprite(ctx, 'wall', { FILL: fill, FILL_HI: shade(fill, 0.3), OUTLINE }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = fill;
         ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
@@ -9318,7 +13388,9 @@ class Renderer {
       // Left as an improved Canvas primitive, not an SVG sprite: fence renders as a continuous
       // line segment across the tile (not a centered icon), which doesn't fit drawSprite's
       // centered-silhouette model. Rounded caps + small post knobs are the "improvement" here.
-      const fenceColor = s.destroyed ? 'rgba(80,60,40,0.4)' : '#a8825a';
+      // Style-brief pass: desaturated ~20% from the old warm tan (rendering approach left alone
+      // per instructions -- this is a color-only retune).
+      const fenceColor = s.destroyed ? 'rgba(80,60,40,0.4)' : '#9c8062';
       ctx.strokeStyle = fenceColor;
       ctx.lineWidth = Math.max(2, size * 0.12);
       ctx.lineCap = 'round';
@@ -9344,21 +13416,28 @@ class Renderer {
       return;
     }
     if (s.kind === 'bed') {
-      const frame = '#5a6fb0';
-      const drew = drawSprite(ctx, 'bed',
-        { FRAME: frame, FRAME_HI: shade(frame, 0.2), PILLOW: '#8898cc', OUTLINE }, sx, sy, size);
+      // Style pass: was a saturated blue frame ('#5a6fb0') with no wood read at all -- moved to
+      // the wood-furniture family's desaturated warm ochre/tan per the style brief. Headboard is
+      // a darker flat band (was the same color as the gradient's own dark stop); FRAME_HI is now
+      // a small solid highlight wedge, not a full-surface gradient stop.
+      const frame = '#8a7355';
+      const drew = drawSprite(ctx, 'bed', {
+        FRAME: frame, HEADBOARD: shade(frame, -0.22), FRAME_HI: shade(frame, 0.32),
+        PILLOW: '#c2b490', OUTLINE,
+      }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = frame;
         ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
         ctx.strokeRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
-        ctx.fillStyle = '#8898cc';
+        ctx.fillStyle = '#c2b490';
         ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.18);
       }
       return;
     }
     if (s.kind === 'table') {
-      const fill = '#a87d4a';
-      const drew = drawSprite(ctx, 'table', { FILL: fill, FILL_HI: shade(fill, 0.2), OUTLINE }, sx, sy, size);
+      // Style pass: desaturated ~20% from the old saturated ochre toward a muted warm tan.
+      const fill = '#93794f';
+      const drew = drawSprite(ctx, 'table', { FILL: fill, FILL_HI: shade(fill, 0.3), OUTLINE }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = fill;
         ctx.fillRect(sx - size * 0.4, sy - size * 0.28, size * 0.8, size * 0.56);
@@ -9366,10 +13445,107 @@ class Renderer {
       }
       return;
     }
+    if (s.kind === 'shelf') {
+      // Storage room role (rooms.js RoomRole.Storage) -- left as a Canvas primitive, no new SVG
+      // template, matching the "no new mechanic" v1 scope. Same wood-furniture family as
+      // bed/table (desaturated warm tan) but drawn as stacked horizontal shelf boards rather than
+      // a single flat surface, so it reads distinctly from a table at a glance.
+      const fill = '#8a7355';
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.38, sy - size * 0.4, size * 0.76, size * 0.8);
+      ctx.strokeRect(sx - size * 0.38, sy - size * 0.4, size * 0.76, size * 0.8);
+      ctx.strokeStyle = shade(fill, -0.3);
+      ctx.lineWidth = Math.max(1, size * 0.045);
+      for (const frac of [-0.13, 0.13]) {
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.38, sy + size * frac);
+        ctx.lineTo(sx + size * 0.38, sy + size * frac);
+        ctx.stroke();
+      }
+      ctx.strokeStyle = OUTLINE;
+      return;
+    }
+    if (s.kind === 'medical_bed') {
+      // Infirmary room role (rooms.js RoomRole.Medical) -- same frame/headboard/pillow layout as
+      // the plain bed (bed's own visual family) but recolored clinical white/red-cross instead of
+      // warm wood tones, so a Medical Bed reads as distinct at a glance from a regular Bed.
+      const frame = '#d8d8d0';
+      ctx.fillStyle = frame;
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.6);
+      ctx.fillStyle = shade(frame, -0.25);
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.3, size * 0.8, size * 0.18);
+      // Small red-cross marker -- the one clear "medical" signal on an otherwise plain bed shape.
+      ctx.fillStyle = '#c23c3c';
+      ctx.fillRect(sx - size * 0.06, sy - size * 0.02, size * 0.12, size * 0.22);
+      ctx.fillRect(sx - size * 0.17, sy + size * 0.03, size * 0.34, size * 0.12);
+      return;
+    }
+    if (s.kind === 'fitness_station') {
+      // Gymnasium room role (rooms.js RoomRole.Gymnasium) -- left as a Canvas primitive, no new
+      // SVG template, same "no new mechanic beyond the buildable itself" v1 scope as shelf/
+      // medical_bed above. Drawn as a simple dumbbell (bar + two end weights) so it reads
+      // distinctly from every other furniture silhouette at a glance.
+      const fill = s.destroyed ? 'rgba(80,80,80,0.4)' : '#7a8a94';
+      ctx.strokeStyle = fill;
+      ctx.lineWidth = Math.max(2, size * 0.1);
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.28, sy);
+      ctx.lineTo(sx + size * 0.28, sy);
+      ctx.stroke();
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.36, sy - size * 0.22, size * 0.14, size * 0.44);
+      ctx.fillRect(sx + size * 0.22, sy - size * 0.22, size * 0.14, size * 0.44);
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = Math.max(1, size * 0.05);
+      ctx.strokeRect(sx - size * 0.36, sy - size * 0.22, size * 0.14, size * 0.44);
+      ctx.strokeRect(sx + size * 0.22, sy - size * 0.22, size * 0.14, size * 0.44);
+      return;
+    }
+    if (s.kind === 'farm_plot') {
+      // Farm Plot (research.js's Agronomy node, jobs.js's Farming job): left as a Canvas
+      // primitive, no new SVG template, same "no new mechanic beyond the buildable itself" v1
+      // scope as fitness_station/shelf/medical_bed above. Tilled-soil square (a few furrow lines)
+      // with a sprout that grows visibly taller as the current cycle's `_workTimer` approaches
+      // FARM_CYCLE_TICKS, dimmed and un-staffed-looking when no citizen is tending it (s.workerId)
+      // -- same "read the staffing state at a glance" idea as workshop/monitor_station.
+      const staffed = s.workerId != null;
+      const soil = s.destroyed ? 'rgba(80,70,50,0.4)' : staffed ? '#6b4f34' : '#4a3826';
+      ctx.fillStyle = soil;
+      ctx.fillRect(sx - size * 0.42, sy - size * 0.34, size * 0.84, size * 0.68);
+      ctx.strokeRect(sx - size * 0.42, sy - size * 0.34, size * 0.84, size * 0.68);
+      ctx.strokeStyle = shade(soil, -0.3);
+      ctx.lineWidth = Math.max(1, size * 0.03);
+      for (let fx = -0.28; fx <= 0.3; fx += 0.28) {
+        ctx.beginPath();
+        ctx.moveTo(sx + fx * size, sy - size * 0.34);
+        ctx.lineTo(sx + fx * size, sy + size * 0.34);
+        ctx.stroke();
+      }
+      if (!s.destroyed) {
+        const growth = Math.min(1, (s._workTimer || 0) / FARM_CYCLE_TICKS);
+        const sproutH = size * (0.1 + 0.3 * growth);
+        ctx.strokeStyle = staffed ? '#6fae4a' : '#3f5c32';
+        ctx.lineWidth = Math.max(2, size * 0.06);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy + size * 0.28);
+        ctx.lineTo(sx, sy + size * 0.28 - sproutH);
+        ctx.stroke();
+        if (staffed) {
+          ctx.fillStyle = '#7fc356';
+          ctx.beginPath();
+          ctx.arc(sx, sy + size * 0.28 - sproutH, size * 0.07, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      ctx.strokeStyle = OUTLINE;
+      return;
+    }
     if (s.kind === 'door') {
-      const panel = '#7a5a30';
+      // Style pass: desaturated ~20% toward a muted warm-brown wood tone, consistent with bed/table.
+      const panel = '#6f5c40';
       const drew = drawSprite(ctx, 'door', {
-        FRAME: shade(panel, -0.3), PANEL: panel, PANEL_HI: shade(panel, 0.2), HANDLE: '#d9c58a', OUTLINE,
+        FRAME: shade(panel, -0.3), PANEL: panel, PANEL_HI: shade(panel, 0.32), HANDLE: '#cbb87e', OUTLINE,
       }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = panel;
@@ -9384,11 +13560,22 @@ class Renderer {
       // a plain-primitive fallback (same pattern as fence/wire/pipe): a squat industrial box with
       // a stack, dimmed and un-lit when unstaffed (s.workerId) so the player can see at a glance
       // that it needs a worker, same "read the staffing state at a glance" idea as monitor_station.
+      // RESTYLE: material-based palette (metal/industrial processing gear trends cool gray-blue,
+      // desaturated ~20% off the old warm-amber tones) + a small upper-left highlight rect
+      // replacing the old flat-only fill, matching the highlight-facet convention used by the
+      // SVG-templated economy/vehicle sprites below.
       const staffed = s.workerId != null;
-      const fill = s.destroyed ? 'rgba(90,80,40,0.4)' : staffed ? '#8c6a2e' : '#5a4a28';
+      const fill = s.destroyed ? 'rgba(80,82,78,0.4)' : staffed ? '#6c7268' : '#4a4c46';
       ctx.fillStyle = fill;
       ctx.fillRect(sx - size * 0.42, sy - size * 0.38, size * 0.84, size * 0.76);
       ctx.strokeRect(sx - size * 0.42, sy - size * 0.38, size * 0.84, size * 0.76);
+      ctx.fillStyle = shade(fill, 0.22);
+      ctx.beginPath();
+      ctx.moveTo(sx - size * 0.42, sy - size * 0.38);
+      ctx.lineTo(sx - size * 0.06, sy - size * 0.38);
+      ctx.lineTo(sx - size * 0.42, sy - size * 0.06);
+      ctx.closePath();
+      ctx.fill(); // upper-left highlight facet
       ctx.fillStyle = shade(fill, -0.2);
       ctx.fillRect(sx + size * 0.1, sy - size * 0.62, size * 0.14, size * 0.28); // stack
       if (staffed && !s.destroyed) {
@@ -9401,7 +13588,11 @@ class Renderer {
       return;
     }
     if (s.kind === 'garage_recycling' || s.kind === 'garage_garbage') {
-      const fill = s.kind === 'garage_recycling' ? '#3a5a3f' : '#5a5030';
+      // RESTYLE: material-based palette split -- recycling handles metal/industrial sorting so
+      // its garage trends desaturated cool gray-blue-green; garbage handles general/organic waste
+      // so its garage trends desaturated warm ochre/tan. Both ~20% less saturated than the old
+      // pure green/olive tones, matching the game-wide desaturation pass.
+      const fill = s.kind === 'garage_recycling' ? '#3d564f' : '#5c5240';
       const drew = drawSprite(ctx, 'garage',
         { FILL: fill, FILL_HI: shade(fill, 0.25), DOOR: '#1a1a1a', OUTLINE }, sx, sy, size);
       if (!drew) {
@@ -9414,12 +13605,17 @@ class Renderer {
       return;
     }
     if (s.kind === 'watchtower') {
+      // Style-brief pass: watchtower is one of the named institutional/metal structures -- the
+      // platform (its metal component) is pushed cooler/grayer than before; the wood support post
+      // keeps its warmer tone (only desaturated slightly) since it isn't the "metal" part.
+      const post = '#564a3e';
+      const platform = '#7e8994';
       const drew = drawSprite(ctx, 'watchtower',
-        { POST: '#5a4a3a', PLATFORM: '#8c949e', OUTLINE }, sx, sy - size * 0.15, size * 1.15);
+        { POST: post, PLATFORM: platform, PLATFORM_HI: shade(platform, 0.3), OUTLINE }, sx, sy - size * 0.15, size * 1.15);
       if (!drew) {
-        ctx.fillStyle = '#5a4a3a';
+        ctx.fillStyle = post;
         ctx.fillRect(sx - size * 0.15, sy - size * 0.1, size * 0.3, size * 0.55); // support post
-        ctx.fillStyle = '#8c949e';
+        ctx.fillStyle = platform;
         ctx.fillRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35); // watch platform
         ctx.strokeRect(sx - size * 0.4, sy - size * 0.5, size * 0.8, size * 0.35);
       }
@@ -9428,16 +13624,22 @@ class Renderer {
     if (s.kind === 'camera') {
       // Cheap CCTV camera: a mounting post + a small angled lens housing with a "lit lens" dot,
       // deliberately smaller/plainer than the watchtower platform (cheaper, shorter-range).
-      const lens = s.destroyed ? '#5a1a1a' : '#59a6d9';
-      const drew = drawSprite(ctx, 'camera',
-        { POST: '#4a4a4a', HOUSING: '#2b2b2b', LENS: lens, OUTLINE }, sx, sy - size * 0.1, size * 1.1);
+      // Style pass: housing/post moved from neutral grey to a desaturated cool gray-blue
+      // (security-tech family); destroyed-lens tint preserved exactly (still a visually distinct
+      // dead-red vs live-blue), both desaturated ~20% to match.
+      const lens = s.destroyed ? '#6b3a3a' : '#5f8fac';
+      const housing = '#31363d';
+      const drew = drawSprite(ctx, 'camera', {
+        POST: '#4a5058', HOUSING: housing, HOUSING_HI: shade(housing, 0.35),
+        LENS: lens, LENS_HI: shade(lens, 0.4), OUTLINE,
+      }, sx, sy - size * 0.1, size * 1.1);
       if (!drew) {
-        ctx.fillStyle = '#4a4a4a';
+        ctx.fillStyle = '#4a5058';
         ctx.fillRect(sx - size * 0.06, sy - size * 0.05, size * 0.12, size * 0.4); // mounting post
         ctx.save();
         ctx.translate(sx, sy - size * 0.32);
         ctx.rotate(-0.4);
-        ctx.fillStyle = '#2b2b2b';
+        ctx.fillStyle = housing;
         ctx.fillRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
         ctx.strokeRect(-size * 0.28, -size * 0.14, size * 0.5, size * 0.24);
         ctx.fillStyle = lens;
@@ -9451,15 +13653,23 @@ class Renderer {
     if (s.kind === 'monitor_station') {
       // A desk with a bank of CCTV screens -- staffed/unstaffed reads via screen brightness so
       // the "manned monitor bonus" is visible on the map, not just in the milestone log.
-      const desk = '#5a4630';
-      const screen = s.destroyed ? '#3a3a3a' : (s._staffed ? '#7ad9a0' : '#3a5a6a');
-      const drew = drawSprite(ctx, 'monitor_station',
-        { DESK: desk, DESK_HI: shade(desk, 0.2), BANK: '#2b2b2b', SCREEN: screen, OUTLINE }, sx, sy, size);
+      // Style pass: desk desaturated toward a muted neutral-warm gray (was a saturated brown),
+      // monitor bank moved to the same cool gray-blue family as the camera housing above (both
+      // are "security tech"). The staffed/unstaffed/destroyed 3-way screen-color logic is
+      // preserved exactly -- only the three tones themselves were desaturated ~15-20%, keeping
+      // clear hue/lightness separation between all three states.
+      const desk = '#54493a';
+      const bank = '#31363d';
+      const screen = s.destroyed ? '#333333' : (s._staffed ? '#6bb98f' : '#3f5766');
+      const drew = drawSprite(ctx, 'monitor_station', {
+        DESK: desk, DESK_HI: shade(desk, 0.32), BANK: bank,
+        SCREEN: screen, SCREEN_HI: shade(screen, 0.4), OUTLINE,
+      }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = desk;
         ctx.fillRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4); // desk
         ctx.strokeRect(sx - size * 0.42, sy - size * 0.08, size * 0.84, size * 0.4);
-        ctx.fillStyle = '#2b2b2b';
+        ctx.fillStyle = bank;
         ctx.fillRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4); // monitor bank
         ctx.strokeRect(sx - size * 0.4, sy - size * 0.48, size * 0.84, size * 0.4);
         ctx.fillStyle = screen;
@@ -9507,7 +13717,11 @@ class Renderer {
     if (s.kind === 'battery') {
       // A squat rounded-rect cell with a raised terminal nub (real battery-icon silhouette) and a
       // fill bar showing storedEnergy/BATTERY_STORED_MAX -- reads at a glance whether it's empty,
-      // mid-charge, or full, the same way a fuel gauge would.
+      // mid-charge, or full, the same way a fuel gauge would. Style-brief pass: flat casing + a
+      // single upper-left highlight patch (matching the generator family's shading convention)
+      // instead of a flat block with no shading cue at all; the charge-fill itself keeps a real
+      // vertical gradient since it's the one deliberate "energy" glow accent on this structure,
+      // same reasoning as the nuclear core / generator core glows.
       const live = !s.destroyed && !s.underConstruction;
       const frac = Math.max(0, Math.min(1, (s.storedEnergy || 0) / BATTERY_STORED_MAX));
       const casing = live ? '#3a3f47' : 'rgba(58,63,71,0.6)';
@@ -9515,14 +13729,24 @@ class Renderer {
       const w = size * 0.6, h = size * 0.8;
       ctx.fillRect(sx - w / 2, sy - h / 2, w, h);
       ctx.strokeRect(sx - w / 2, sy - h / 2, w, h);
+      // upper-left highlight patch -- flat solid shape, not a gradient, per the style brief
+      if (live) {
+        ctx.fillStyle = shade(casing, 0.22);
+        ctx.fillRect(sx - w / 2 + size * 0.04, sy - h / 2 + size * 0.04, w * 0.4, size * 0.1);
+      }
       // terminal nub on top
       ctx.fillStyle = casing;
       ctx.fillRect(sx - size * 0.1, sy - h / 2 - size * 0.08, size * 0.2, size * 0.08);
-      // charge fill bar, bottom-up
+      // charge fill bar, bottom-up -- muted (desaturated ~20%) but still traffic-light coded;
+      // a real vertical gradient here since this is the deliberate glow/energy accent, kept from
+      // the earlier flat-fill pass rather than removed by the "flatten shading" brief.
       if (live && frac > 0) {
         const fillH = (h - size * 0.08) * frac;
-        const fillColor = frac > 0.6 ? '#7ad45a' : frac > 0.25 ? '#e0c336' : '#d95a3a';
-        ctx.fillStyle = fillColor;
+        const fillColor = frac > 0.6 ? '#6ba852' : frac > 0.25 ? '#c2a83f' : '#b8543a';
+        const grad = ctx.createLinearGradient(0, sy + h / 2 - fillH, 0, sy + h / 2);
+        grad.addColorStop(0, shade(fillColor, 0.25));
+        grad.addColorStop(1, fillColor);
+        ctx.fillStyle = grad;
         ctx.fillRect(sx - w / 2 + size * 0.05, sy + h / 2 - size * 0.04 - fillH, w - size * 0.1, fillH);
       }
       return;
@@ -9530,12 +13754,18 @@ class Renderer {
     if (s.kind === 'power_switch') {
       // Small pedestal with a lever -- up and lit green when switchedOn (the default), down and
       // dull red when the player has manually cut this exact tile out of the segment (power.js's
-      // isConductor). Reads immediately even at a glance, no need to open the inspector.
+      // isConductor). Reads immediately even at a glance, no need to open the inspector. Style-brief
+      // pass: pedestal gets a flat base + a small upper-left highlight edge instead of reading as a
+      // single flat block; indicator-light colors desaturated ~20% to match the battery gauge.
       const live = !s.destroyed && !s.underConstruction;
       const on = s.switchedOn !== false;
       ctx.fillStyle = live ? '#4a4a52' : 'rgba(74,74,82,0.6)';
       ctx.fillRect(sx - size * 0.22, sy - size * 0.1, size * 0.44, size * 0.32); // pedestal base
       ctx.strokeRect(sx - size * 0.22, sy - size * 0.1, size * 0.44, size * 0.32);
+      if (live) {
+        ctx.fillStyle = shade('#4a4a52', 0.22);
+        ctx.fillRect(sx - size * 0.2, sy - size * 0.08, size * 0.18, size * 0.07);
+      }
       ctx.strokeStyle = OUTLINE;
       ctx.lineWidth = Math.max(2, size * 0.12);
       ctx.lineCap = 'round';
@@ -9544,10 +13774,37 @@ class Renderer {
       if (on) ctx.lineTo(sx + size * 0.12, sy - size * 0.42);
       else ctx.lineTo(sx - size * 0.12, sy - size * 0.02);
       ctx.stroke();
-      ctx.fillStyle = live ? (on ? '#7ad45a' : '#d95a3a') : '#6a6a6a';
+      ctx.fillStyle = live ? (on ? '#6ba852' : '#b8543a') : '#6a6a6a';
       ctx.beginPath();
       ctx.arc(sx + (on ? size * 0.12 : -size * 0.12), sy + (on ? -size * 0.42 : -size * 0.02), size * 0.09, 0, Math.PI * 2);
       ctx.fill();
+      return;
+    }
+    if (s.kind === 'shrine') {
+      // Shrine (RimWorld Ideology DLC's real altar buildable, see assets.js's 'shrine' template /
+      // rooms.js's BEAUTY_BY_KIND.shrine) -- a beauty-only passive building, no functional state
+      // to reflect in color (unlike pump's running/dead or power_switch's on/off), so this is the
+      // simplest case in this function: one fixed warm-stone palette, matching the wood-furniture
+      // family's tone (bed/table/door above) since it reads as a deliberate furnishing, not
+      // industrial equipment.
+      const stone = '#8f8570';
+      const drew = drawSprite(ctx, 'shrine', {
+        STONE: stone, STONE_HI: shade(stone, 0.32),
+        GLOW: '#c9a24a', GLOW_HI: '#f2dfa0', OUTLINE,
+      }, sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = stone;
+        ctx.fillRect(sx - size * 0.4, sy - size * 0.1, size * 0.8, size * 0.5);
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.25, sy - size * 0.1);
+        ctx.lineTo(sx + size * 0.25, sy - size * 0.1);
+        ctx.lineTo(sx, sy - size * 0.45);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+        ctx.strokeRect(sx - size * 0.4, sy - size * 0.1, size * 0.8, size * 0.5);
+        ctx.fillStyle = '#e2c168';
+        ctx.beginPath(); ctx.arc(sx, sy - size * 0.15, size * 0.1, 0, Math.PI * 2); ctx.fill();
+      }
       return;
     }
     if (s.kind === 'pump') {
@@ -9556,18 +13813,18 @@ class Renderer {
       // so the two source buildings don't read as siblings. Falls back to the old primitive
       // drum+band+spout while a new color combo's sprite is still decoding.
       const running = !s.destroyed && !s.underConstruction;
-      const drum = running ? '#2e5266' : '#3a4750';
+      const drum = running ? '#33566a' : '#3a4750'; // desaturated ~15% from the earlier saturated teal
       const drew = drawSprite(ctx, 'pump', {
         DRUM: drum, DRUM_HI: shade(drum, 0.3),
-        WATER: running ? '#3ea0d9' : '#5a6a70',
+        WATER: running ? '#4f92b3' : '#5a6a70', // muted water-blue, still distinct from the drum body
         SPOUT: running ? '#8c949e' : '#787878', OUTLINE,
       }, sx, sy, size * 1.05, 0, running ? 1 : 0.75);
       if (!drew) {
-        ctx.fillStyle = running ? '#2e5266' : 'rgba(46,60,68,0.6)';
+        ctx.fillStyle = running ? '#33566a' : 'rgba(46,60,68,0.6)';
         ctx.beginPath();
         ctx.ellipse(sx, sy, size * 0.36, size * 0.4, 0, 0, Math.PI * 2);
         ctx.fill(); ctx.stroke();
-        ctx.fillStyle = running ? '#3ea0d9' : '#5a6a70'; // water-level band
+        ctx.fillStyle = running ? '#4f92b3' : '#5a6a70'; // water-level band
         ctx.beginPath();
         ctx.ellipse(sx, sy + size * 0.08, size * 0.28, size * 0.16, 0, 0, Math.PI * 2);
         ctx.fill();
@@ -9582,7 +13839,7 @@ class Renderer {
       // read as heavier/lighter/differently-shaped than.
       const running = !s.destroyed && !s.underConstruction;
       const housing = running ? '#4a4a52' : '#3c3c40';
-      const core = running ? '#e0a336' : '#6a6250'; // core light goes dark when it isn't running
+      const core = running ? '#c79552' : '#6a6250'; // muted amber (~20% desaturated) -- core light goes dark when it isn't running
       const drew = drawSprite(ctx, 'generator', {
         HOUSING: housing, HOUSING_HI: shade(housing, 0.25), HOUSING_SHADOW: shade(housing, -0.3),
         CORE: core, CORE_HI: shade(core, running ? 0.4 : 0.1), OUTLINE,
@@ -9605,11 +13862,11 @@ class Renderer {
       // as the hazard radius so the two visually associate.
       const running = !s.destroyed && !s.underConstruction;
       const housing = running ? '#2e3230' : '#282c2a';
-      const core = running ? '#c8e63c' : '#5a6650';
+      const core = running ? '#a9b94a' : '#5a6650'; // desaturated ~20% hazard-green (was a candy-bright yellow-green)
       const drew = drawSprite(ctx, 'generator_nuclear', {
         HOUSING: housing, HOUSING_HI: shade(housing, 0.2),
         WELL: running ? '#161816' : '#3a3e3c',
-        CORE: core, CORE_HI: running ? '#e8ffb0' : '#7a8570', OUTLINE,
+        CORE: core, CORE_HI: running ? '#d9edaa' : '#7a8570', OUTLINE,
       }, sx, sy, size, 0, running ? 1 : 0.75);
       if (!drew) {
         ctx.fillStyle = running ? '#2e3230' : 'rgba(40,44,42,0.6)';
@@ -9627,7 +13884,7 @@ class Renderer {
           ctx.closePath();
           ctx.fill();
         }
-        ctx.fillStyle = running ? '#e8ffb0' : '#7a8570';
+        ctx.fillStyle = running ? '#d9edaa' : '#7a8570';
         ctx.beginPath(); ctx.arc(sx, sy, size * 0.08, 0, Math.PI * 2); ctx.fill();
       }
       return;
@@ -9640,7 +13897,7 @@ class Renderer {
       const running = !s.destroyed && !s.underConstruction;
       const housing = running ? '#3a332c' : '#332e28';
       const coal = running ? '#1a1a1a' : '#3a3a3a';
-      const core = running ? '#c0492e' : '#5a4a44'; // dull red core, not the plain generator's amber
+      const core = running ? '#a85138' : '#5a4a44'; // desaturated ~15% dull brick-red, not the plain generator's amber
       const drew = drawSprite(ctx, 'generator_coal', {
         HOUSING: housing, HOUSING_HI: shade(housing, 0.2),
         COAL: coal, COAL_HI: shade(coal, 0.25), CORE: core, OUTLINE,
@@ -9672,9 +13929,12 @@ class Renderer {
       // map, not just in a tooltip.
       const running = !s.destroyed && !s.underConstruction;
       const sited = s._windSited !== false;
-      const blade = running ? (sited ? '#bfe6f5' : '#c76b4a') : '#6a6a6a';
+      // Muted ~15-20%: sited reads white/gray (not saturated sky-blue), crowded reads dusty rust
+      // rather than a bright warning-orange.
+      const blade = running ? (sited ? '#c7d3d6' : '#b8735a') : '#6a6a6a';
+      const mast = running ? '#5a5a5a' : '#464646';
       const drew = drawSprite(ctx, 'generator_wind', {
-        MAST: running ? '#5a5a5a' : '#464646', BLADE: blade,
+        MAST: mast, MAST_HI: shade(mast, 0.3), BLADE: blade,
         HUB: running ? '#3a3a3a' : '#5a5a5a', OUTLINE,
       }, sx, sy, size, 0, running ? 1 : 0.75);
       if (!drew) {
@@ -9706,7 +13966,7 @@ class Renderer {
       const running = !s.destroyed && !s.underConstruction;
       const openSky = s._openSky !== false;
       const panel = running ? '#2a3038' : '#2d3238';
-      const grid = running ? (openSky ? '#5aa0d9' : '#6a6e72') : '#5a5f64';
+      const grid = running ? (openSky ? '#5487ad' : '#6a6e72') : '#5a5f64'; // muted panel-blue (~15% desaturated)
       const drew = drawSprite(ctx, 'generator_solar', {
         PANEL: panel, PANEL_HI: shade(panel, 0.2), GRID: grid, OUTLINE,
       }, sx, sy, size, 0, running ? 1 : 0.7);
@@ -9741,7 +14001,10 @@ class Renderer {
       // Hazard-striped drum cluster so it reads as "the thing that fixes the green zone" at a
       // glance, distinct from the recycling center's green arrow icon (that's a different
       // resource loop -- pollution, not nuclear waste).
-      const fill = s.destroyed ? 'rgba(70,64,30,0.5)' : '#4a4626';
+      // RESTYLE: the housing shell is metal/industrial so it's desaturated ~20% and cooled toward
+      // gray-blue (was a warm olive). The hazard stripe (cap/stripeDark, both still full
+      // saturation) is the deliberate exception the style brief calls out -- left untouched.
+      const fill = s.destroyed ? 'rgba(70,72,66,0.5)' : '#454940';
       const cap = s.destroyed ? 'rgba(160,150,40,0.4)' : '#d9c93a';
       const stripeDark = s.destroyed ? 'rgba(40,36,18,0.5)' : '#2b2812';
       const drew = drawSprite(ctx, 'waste_storage', {
@@ -9765,8 +14028,11 @@ class Renderer {
     if (s.kind === 'recycling_center') {
       // Keeps the recognizable green chasing-arrows recycling motif, now baked into the sprite
       // (see assets.js's 'recycling_center' template) instead of drawn as a single Canvas diamond.
+      // RESTYLE: housing desaturated ~20% and cooled toward gray-blue-teal (metal/industrial
+      // material trend); the arrow glyph is desaturated a touch too but kept legible/vivid since
+      // it's the functional "recycling happens here" icon, not a hazard-stripe exception.
       const drew = drawSprite(ctx, 'recycling_center',
-        { FILL: '#2e5a4a', FILL_HI: shade('#2e5a4a', 0.25), ARROW: '#7ad9a0', OUTLINE }, sx, sy, size);
+        { FILL: '#37524a', FILL_HI: shade('#37524a', 0.25), ARROW: '#6cbf8f', OUTLINE }, sx, sy, size);
       if (!drew) {
         ctx.fillStyle = '#2e5a4a';
         ctx.fillRect(sx - size * 0.45, sy - size * 0.42, size * 0.9, size * 0.84);
@@ -9785,10 +14051,13 @@ class Renderer {
         ctx.beginPath(); ctx.arc(sx, sy, size * 1.4, 0, Math.PI * 2); ctx.fill();
       }
       const lamp = s.destroyed ? '#5a5540' : '#f2eec0';
+      // Style-brief pass: post/housing metal desaturated ~15% from the old khaki; LAMP is the
+      // light source itself (not institutional metal), left untouched.
+      const housing = '#847a63';
       const drew = drawSprite(ctx, 'floodlight',
-        { POST: '#8c8060', HOUSING: '#8c8060', LAMP: lamp, OUTLINE }, sx, sy + size * 0.1, size * 1.1);
+        { POST: housing, HOUSING: housing, HOUSING_HI: shade(housing, 0.3), LAMP: lamp, OUTLINE }, sx, sy + size * 0.1, size * 1.1);
       if (!drew) {
-        ctx.fillStyle = '#8c8060';
+        ctx.fillStyle = housing;
         ctx.fillRect(sx - size * 0.08, sy - size * 0.1, size * 0.16, size * 0.5);
         ctx.fillStyle = lamp;
         ctx.beginPath(); ctx.arc(sx, sy - size * 0.22, size * 0.22, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
@@ -9796,10 +14065,14 @@ class Renderer {
       return;
     }
     if (s.kind === 'tesla') {
-      const base = s.destroyed ? 'rgba(60,60,60,0.6)' : '#4a5a8c';
+      // Style-brief pass: base housing desaturated toward a cooler, less-saturated blue-gray;
+      // ARC/spark stroke is the charge-glow hazard exception and stays at full saturation
+      // (untouched) as the deliberate contrast against the calmer housing color.
+      const teslaBase = '#4e5a78';
+      const base = s.destroyed ? 'rgba(60,60,60,0.6)' : teslaBase;
       const arc = s.destroyed ? 'rgba(120,140,220,0.3)' : '#a0c0ff';
       const drew = drawSprite(ctx, 'tesla',
-        { FILL: base, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade('#4a5a8c', 0.3), ARC: arc, OUTLINE },
+        { FILL: base, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade(teslaBase, 0.3), ARC: arc, OUTLINE },
         sx, sy, size);
       if (!drew) {
         ctx.fillStyle = base;
@@ -9811,12 +14084,18 @@ class Renderer {
       return;
     }
     if (s.kind === 'armory') {
-      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : '#5a4a38';
-      const glyph = s.destroyed ? 'rgba(150,150,150,0.4)' : '#d8cba0';
+      // Style-brief pass: armory is one of the named institutional/metal structures -- base
+      // shifted from a warm brown to a cool slate gray-blue. The crossed-rifles glyph and a new
+      // small ammo-crate accent are the deliberate full-saturation hazard-color exception (ammo
+      // red), same idea as tesla's charge glow -- visible against the now-calmer base.
+      const armoryBase = '#565c66';
+      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : armoryBase;
+      const glyph = s.destroyed ? 'rgba(150,150,150,0.4)' : '#d7dde2';
+      const ammo = s.destroyed ? 'rgba(120,50,40,0.4)' : '#c23b2e';
       // Crossed-rifles glyph -- reads as "weapons issued here" at a glance, same idea as the
       // recycling center's arrow icon just above -- now baked into the sprite itself.
       const drew = drawSprite(ctx, 'armory',
-        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade('#5a4a38', 0.25), GLYPH: glyph, OUTLINE },
+        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade(armoryBase, 0.3), GLYPH: glyph, AMMO: ammo, OUTLINE },
         sx, sy, size);
       if (!drew) {
         ctx.fillStyle = fill;
@@ -9828,29 +14107,121 @@ class Renderer {
         ctx.moveTo(sx - size * 0.2, sy - size * 0.18); ctx.lineTo(sx + size * 0.2, sy + size * 0.18);
         ctx.moveTo(sx - size * 0.2, sy + size * 0.18); ctx.lineTo(sx + size * 0.2, sy - size * 0.18);
         ctx.stroke();
+        ctx.fillStyle = ammo;
+        ctx.fillRect(sx - size * 0.18, sy + size * 0.28, size * 0.22, size * 0.12);
       }
+      return;
+    }
+    if (s.kind === 'stabilizer') {
+      // Stabilizer Beacon (anomaly.js) -- kept as a plain Canvas primitive, same "cheap counter-
+      // buildable, no new SVG asset" precedent as rat_trap just below: a squat post with a small
+      // diamond "lamp" on top, filled a calm teal so it reads as distinct from every other
+      // structure's warmer/neutral palette (this is the one buildable whose whole job is visually
+      // signaling "hazard countermeasure, not a weapon").
+      const fill = s.destroyed ? 'rgba(60,80,80,0.4)' : '#3f8f8a';
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.08, sy - size * 0.05, size * 0.16, size * 0.32);
+      ctx.strokeRect(sx - size * 0.08, sy - size * 0.05, size * 0.16, size * 0.32);
+      const lampY = sy - size * 0.22;
+      ctx.fillStyle = s.destroyed ? fill : shade(fill, 0.4);
+      ctx.beginPath();
+      ctx.moveTo(sx, lampY - size * 0.16);
+      ctx.lineTo(sx + size * 0.16, lampY);
+      ctx.lineTo(sx, lampY + size * 0.16);
+      ctx.lineTo(sx - size * 0.16, lampY);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
       return;
     }
     if (s.kind === 'rat_trap') {
       // Kept as a plain Canvas primitive (rats.js is deliberately the "cheap" system this pass --
       // no new SVG asset needed for a small counter-buildable): a squat wooden box with a dark
       // trigger-plate slot, distinct enough from the round explosive 'trap' shape above at a glance.
-      const fill = s.destroyed ? 'rgba(80,60,40,0.4)' : '#8a6a42';
+      // Style-brief pass: fill desaturated slightly, plus a flat + single upper-left highlight
+      // (matching the rest of the category's shading technique) instead of a flat single tone.
+      const fill = s.destroyed ? 'rgba(80,60,40,0.4)' : '#856c4e';
       ctx.fillStyle = fill;
       ctx.fillRect(sx - size * 0.32, sy - size * 0.22, size * 0.64, size * 0.44);
       ctx.strokeRect(sx - size * 0.32, sy - size * 0.22, size * 0.64, size * 0.44);
       if (!s.destroyed) {
+        ctx.fillStyle = shade(fill, 0.35);
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.32, sy - size * 0.22);
+        ctx.lineTo(sx - size * 0.06, sy - size * 0.22);
+        ctx.lineTo(sx - size * 0.32, sy + size * 0.02);
+        ctx.closePath();
+        ctx.fill();
         ctx.fillStyle = 'rgba(30,25,20,0.8)';
         ctx.fillRect(sx - size * 0.2, sy - size * 0.06, size * 0.4, size * 0.12);
       }
       return;
     }
+    if (s.kind === 'lightning_rod') {
+      // Plain Canvas primitive, same "cheap single-purpose counter-buildable, no new SVG asset"
+      // precedent as rat_trap above: a slim metal pole with a small ball tip, plus a faint
+      // protection-radius ring while a Lightning Storm is actually active (weather.js's
+      // isLightningStormActive/LIGHTNING_ROD_RADIUS) so the player can see the coverage they're
+      // paying for exactly when it matters, same "show the radius during the hazard" idea as
+      // floodlight's always-on glow just reused conditionally.
+      const poleColor = s.destroyed ? 'rgba(90,90,90,0.5)' : '#8a8f96';
+      const tipColor = s.destroyed ? 'rgba(90,90,90,0.5)' : '#e8e6c8';
+      if (!s.destroyed
+          && (this._currentWeather === 'ThunderstormDry' || this._currentWeather === 'ThunderstormRainy')) {
+        ctx.strokeStyle = 'rgba(232,230,200,0.25)';
+        ctx.lineWidth = Math.max(1, size * 0.05);
+        ctx.beginPath(); ctx.arc(sx, sy, size * 2.4, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.strokeStyle = poleColor;
+      ctx.lineWidth = Math.max(1.5, size * 0.12);
+      ctx.beginPath();
+      ctx.moveTo(sx, sy + size * 0.4);
+      ctx.lineTo(sx, sy - size * 0.45);
+      ctx.stroke();
+      ctx.fillStyle = tipColor;
+      ctx.beginPath(); ctx.arc(sx, sy - size * 0.48, size * 0.14, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      return;
+    }
+    if (s.kind === 'fabrication_bay') {
+      // Plain Canvas primitive (same "cheap, no new SVG asset needed" precedent as rat_trap/
+      // lightning_rod above): a squat industrial box with a bay-door opening (echoes the garage
+      // case's door-opening idea, since this is also "a small structure that produces a mobile
+      // unit"), plus a pulsing work-light while anything is actually gestating (world.js's
+      // droneFabricationQueue) -- same "lit = actively running" language as the workshop's own
+      // staffed work-light above.
+      const fill = s.destroyed ? 'rgba(70,68,64,0.6)' : '#565048';
+      ctx.fillStyle = fill;
+      ctx.fillRect(sx - size * 0.44, sy - size * 0.4, size * 0.88, size * 0.8);
+      ctx.strokeRect(sx - size * 0.44, sy - size * 0.4, size * 0.88, size * 0.8);
+      if (!s.destroyed) {
+        ctx.fillStyle = shade(fill, 0.26);
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.44, sy - size * 0.4);
+        ctx.lineTo(sx - size * 0.1, sy - size * 0.4);
+        ctx.lineTo(sx - size * 0.44, sy - size * 0.08);
+        ctx.closePath(); ctx.fill(); // upper-left highlight facet
+        ctx.fillStyle = 'rgba(20,20,20,0.85)';
+        ctx.fillRect(sx - size * 0.22, sy - size * 0.04, size * 0.44, size * 0.34); // bay-door opening
+        const fabricating = (this._droneQueueLength || 0) > 0;
+        if (fabricating) {
+          const pulse = 0.55 + 0.35 * Math.sin(Date.now() / 200);
+          ctx.fillStyle = `rgba(120,200,190,${pulse})`;
+          ctx.beginPath(); ctx.arc(sx + size * 0.24, sy - size * 0.24, size * 0.08, 0, Math.PI * 2); ctx.fill();
+        }
+      }
+      return;
+    }
     // turret (default)
     {
-      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : '#8c949e';
+      // Style-brief pass: turret is one of the named institutional/metal structures -- desaturated
+      // and cooled slightly from the old '#8c949e' (already fairly neutral gray-blue) toward a
+      // calmer slate tone; shading is now flat + single upper-left highlight (baked into the
+      // template) instead of a radial gradient.
+      const turretBase = '#7e8894';
+      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : turretBase;
       const barrel = '#2b2b2b';
       const drew = drawSprite(ctx, 'turret',
-        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade('#8c949e', 0.3), BARREL: s.destroyed ? fill : barrel, OUTLINE },
+        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade(turretBase, 0.3), BARREL: s.destroyed ? fill : barrel, OUTLINE },
         sx, sy, size);
       if (!drew) {
         ctx.fillStyle = fill;
@@ -9870,8 +14241,13 @@ class Renderer {
       if (n.depleted) continue;
       const [sx, sy] = this.worldToScreen(n.x, n.y);
       const s = CELL * this.zoom * (0.35 + 0.35 * (n.amount / n.maxAmount));
-      const fill = '#8a8060';
-      const vein = '#b5aa80';
+      // RESTYLE: raw ore is a natural/mineral material (not yet processed metal), so it trends
+      // warm ochre/tan like the rest of the game's organic-material objects rather than the cool
+      // gray-blue used for the manufactured economy buildings above -- slightly desaturated off
+      // the old tone. The VEIN facet already served as this template's one highlight shape, so it
+      // just gets recolored to match, not restructured.
+      const fill = '#8c8068';
+      const vein = '#c2b48c';
       const drew = drawSprite(ctx, 'ore_deposit',
         { FILL: fill, FILL_HI: shade(fill, 0.25), VEIN: vein, OUTLINE }, sx, sy, s);
       if (!drew) {
@@ -9904,7 +14280,10 @@ class Renderer {
       ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.4, s * 0.55, s * 0.14, 0, 0, Math.PI * 2); ctx.fill();
       ctx.lineWidth = Math.max(1, s * 0.06);
       ctx.strokeStyle = OUTLINE;
-      const bodyFill = v.kind === 'recycling' ? '#3d7a4a' : '#7a6a3d';
+      // RESTYLE: same material-based split as the garages -- recycling truck trends desaturated
+      // cool gray-blue-green (metal/industrial haul), garbage truck trends desaturated warm
+      // ochre/tan (general/organic waste haul), each ~20% less saturated than the old tones.
+      const bodyFill = v.kind === 'recycling' ? '#3f5c52' : '#6b5c40';
       // SEA:R fuel-type tradeoff (vehicles.js FUEL_TYPES): a colored fuel-tank stripe makes the
       // dirty/clean tradeoff visible at a glance without needing to inspect the truck --
       // fossil=sooty brown, gas=blue (the "best all-around" default), ethanol=green (clean but
@@ -9937,6 +14316,60 @@ class Renderer {
         ctx.textAlign = 'center';
         ctx.fillText('?', sx, sy - s * 0.5);
       }
+    }
+  }
+
+  // Labor drones (drones.js -- RimWorld Biotech's mech-companion analog): small, distinct from
+  // both a citizen (humanoid SVG sprite) and a truck (this file's own _drawVehicles above) --
+  // a squat mechanical box on short stubby legs with a single "status eye" light, deliberately
+  // primitive Canvas 2D (same "left as an improved primitive" precedent as fence/wire/pipe) since
+  // this is a small, cheap unit that doesn't need a full SVG template. The eye color encodes the
+  // drone's one fixed WorkCategory (see WORK_CATEGORY_LABELS/DRONE_EYE_COLOR below) so its job is
+  // readable at a glance without opening the inspector, and pulses while actively Working (not
+  // just travelling) -- same "lit = actively running" language as _drawStructureShape's workshop
+  // work-light and the garage/truck "working" glow.
+  _drawDrones(world) {
+    const ctx = this.ctx;
+    for (const drone of world.drones || []) {
+      if (drone.state === 'driving') continue; // riding inside a vehicle, drawn as part of it (same convention as a Driving citizen)
+      const [sx, sy] = this.worldToScreen(drone.x, drone.y);
+      const s = CELL * this.zoom * 0.55;
+      const eyeRgb = DRONE_EYE_COLOR[drone.category] ?? [156, 156, 156];
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.28)';
+      ctx.beginPath(); ctx.ellipse(sx, sy + s * 0.38, s * 0.42, s * 0.12, 0, 0, Math.PI * 2); ctx.fill();
+      // Stubby legs -- just enough to read "small mechanical unit standing on the ground", not an
+      // animated walk-cycle (drones are tireless, not humanoid; no gait to animate).
+      ctx.strokeStyle = '#2c2c2c';
+      ctx.lineWidth = Math.max(1, s * 0.09);
+      ctx.beginPath();
+      ctx.moveTo(sx - s * 0.22, sy + s * 0.14); ctx.lineTo(sx - s * 0.22, sy + s * 0.32);
+      ctx.moveTo(sx + s * 0.22, sy + s * 0.14); ctx.lineTo(sx + s * 0.22, sy + s * 0.32);
+      ctx.stroke();
+      // Body -- a plain salvage-tech box, not a sleek sci-fi chassis, matching this project's
+      // "reskin as a simple mechanical/automated helper unit" framing rather than robot/AI framing.
+      const bodyFill = '#5a564e';
+      ctx.fillStyle = bodyFill;
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = Math.max(1, s * 0.06);
+      ctx.fillRect(sx - s * 0.34, sy - s * 0.3, s * 0.68, s * 0.5);
+      ctx.strokeRect(sx - s * 0.34, sy - s * 0.3, s * 0.68, s * 0.5);
+      ctx.fillStyle = shade(bodyFill, 0.28);
+      ctx.beginPath();
+      ctx.moveTo(sx - s * 0.34, sy - s * 0.3); ctx.lineTo(sx - s * 0.04, sy - s * 0.3);
+      ctx.lineTo(sx - s * 0.34, sy - s * 0.06); ctx.closePath(); ctx.fill(); // upper-left highlight facet
+      // Antenna -- reads as "fabricated equipment", not organic.
+      ctx.strokeStyle = '#2c2c2c';
+      ctx.beginPath(); ctx.moveTo(sx, sy - s * 0.3); ctx.lineTo(sx, sy - s * 0.48); ctx.stroke();
+      ctx.fillStyle = '#2c2c2c';
+      ctx.beginPath(); ctx.arc(sx, sy - s * 0.5, s * 0.05, 0, Math.PI * 2); ctx.fill();
+      // Status eye -- solid while idle/travelling, pulsing while actively Working, colored by the
+      // drone's one fixed WorkCategory.
+      const working = drone.state === 'working';
+      const alpha = working ? 0.55 + 0.35 * Math.sin(Date.now() / 200) : 0.9;
+      ctx.fillStyle = `rgba(${eyeRgb[0]},${eyeRgb[1]},${eyeRgb[2]},${alpha})`;
+      ctx.beginPath(); ctx.arc(sx, sy - s * 0.08, s * 0.12, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
     }
   }
 
@@ -10044,6 +14477,20 @@ class Renderer {
 
 
 
+
+
+
+
+
+// Draft/undraft order-issuing (draft.js): right-click auto-detects move-vs-attack by what's under
+// the cursor -- an attacker within this pick radius (world units, same ballpark as _pickCitizen's
+// own 0.8-unit citizen-pick radius below) means "attack this", anything else means "move here".
+const ORDER_ATTACK_PICK_RADIUS = 0.9;
+// Right-click-drag is already used for camera pan (see _onDown/_onMove below); a right-click-and-
+// release-WITHOUT-drag is the separate "issue an order" gesture. Distinguished by total on-screen
+// movement (pixels) between right-mousedown and right-mouseup staying under this threshold.
+const RIGHT_CLICK_ORDER_THRESHOLD_PX = 6;
+
 const TOOLS = [
   { key: '0', tool: null, label: 'Select', cost: null },
   { key: '1', tool: 'wall', label: 'Wall', cost: BUILD_COST.wall },
@@ -10112,6 +14559,52 @@ const TOOLS = [
   // Rat Trap (rats.js's real Prison Architect infestation countermeasure) -- ';' just claimed the
   // last easy punctuation key, "'" is the next free one.
   { key: "'", tool: 'rat_trap', label: 'Rat Trap', cost: BUILD_COST.rat_trap },
+  // Restrict Area (RimWorld Restrict-tab style, see citizens.js's paintAllowedAreaMask/
+  // isInAllowedArea and jobs.js's per-citizen allowedCheck): paints which cells the CURRENTLY
+  // SELECTED citizen's autonomous pathing/job-seeking is confined to -- not a normal buildable
+  // (cost: null, same as the zone tools), and _place() below special-cases it to write into
+  // that one citizen's mask instead of the shared world.zones grid. "'" just claimed the last
+  // easy punctuation key, ',' is the next free one.
+  { key: ',', tool: 'restrict-area', label: 'Restrict Area (paints for the selected citizen)', cost: null },
+  // Storage/Medical/Command room roles (rooms.js RoomRole.Storage/Medical/Command, PA full
+  // prefab/object catalog): three new cheap zone+furniture room roles, same "zone + minimum
+  // furniture" pattern as Bedroom/Dining/Recreation/Training. Every easy single-keypress key is
+  // claimed above -- '.', '/', and '\\' are the last free punctuation keys.
+  { key: '.', tool: 'zone-storage', label: 'Storage Zone', cost: null },
+  { key: '/', tool: 'zone-medical', label: 'Medical Zone', cost: null },
+  { key: '\\', tool: 'zone-command', label: 'Command Zone', cost: null },
+  // '=' and '-' are already claimed by the speed-up/speed-down hotkeys (see _onKey below, checked
+  // AFTER the TOOL_KEYS table so binding them here would silently break speed control) -- '`' and
+  // shift-1 ('!') are the last free keys.
+  { key: '`', tool: 'shelf', label: 'Shelf', cost: BUILD_COST.shelf },
+  { key: '!', tool: 'medical_bed', label: 'Medical Bed', cost: BUILD_COST.medical_bed },
+  // Stabilizer Beacon (anomaly.js's new colony-wide pressure meter, this pass's "real in-game
+  // response" buildable) -- every unshifted single-keypress key is claimed above; '@' (shift+2)
+  // is the next free one.
+  { key: '@', tool: 'stabilizer', label: 'Stabilizer Beacon', cost: BUILD_COST.stabilizer },
+  // Shrine (RimWorld Ideology DLC's real altar buildable, rooms.js's BEAUTY_BY_KIND.shrine): a
+  // single-tier, beauty-only passive building -- every unshifted/shift-digit key is claimed
+  // above, '#' (shift+3) is the next free one.
+  { key: '#', tool: 'shrine', label: 'Shrine', cost: BUILD_COST.shrine },
+  // Lightning Rod (weather.js's Lightning Storm calamity mitigation item, real Prison Architect
+  // calamity_settings.txt buildable) -- every unshifted/shift-digit key up through '#' is claimed
+  // above, '$' (shift+4) is the next free one.
+  { key: '$', tool: 'lightning_rod', label: 'Lightning Rod', cost: BUILD_COST.lightning_rod },
+  // Fabrication Bay (drones.js -- RimWorld Biotech's mech-companion labor drone): unlocks drone
+  // capacity, same "a building unlocks capacity" pattern as Armory -- every unshifted/shift-digit
+  // key up through '$' is claimed above, '%' (shift+5) is the next free one.
+  { key: '%', tool: 'fabrication_bay', label: 'Fabrication Bay', cost: BUILD_COST.fabrication_bay },
+  // Gymnasium room role (rooms.js RoomRole.Gymnasium, PA needs.txt Exercise need): same
+  // "zone + minimum furniture" pattern as Storage/Medical/Command above -- Fitness Station is the
+  // ONE new buildable (economy.js's BUILD_COST.fitness_station), standing in for PA's whole real
+  // gym-equipment catalog. Every unshifted/shift-digit key up through '%' is claimed above, '^'
+  // (shift+6) and '&' (shift+7) are the next free ones.
+  { key: '^', tool: 'zone-gymnasium', label: 'Gymnasium Zone', cost: null },
+  { key: '&', tool: 'fitness_station', label: 'Fitness Station', cost: BUILD_COST.fitness_station },
+  // Farm Plot (research.js's Agronomy node, jobs.js's Farming job): a renewable citizen-tended
+  // producer, distinct from the resource-node scrap-harvest loop. Every unshifted/shift-digit key
+  // up through '&' is claimed above, '*' (shift+8) is the next free one.
+  { key: '*', tool: 'farm_plot', label: 'Farm Plot', cost: BUILD_COST.farm_plot },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -10137,6 +14630,11 @@ class InputController {
     this.marqueeActive = false;
     this.marqueeStartWorldX = 0; this.marqueeStartWorldY = 0;
     this.marqueeEndWorldX = 0; this.marqueeEndWorldY = 0;
+
+    // Right-click order gesture (draft.js): tracks total on-screen movement since a right-
+    // mousedown so _onUp can tell an order-issuing click apart from a camera-pan drag -- see
+    // RIGHT_CLICK_ORDER_THRESHOLD_PX above.
+    this._rightDownX = null; this._rightDownY = null; this._rightMoved = false;
 
     canvas.addEventListener('mousemove', (e) => this._onMove(e));
     canvas.addEventListener('mousedown', (e) => this._onDown(e));
@@ -10306,6 +14804,10 @@ class InputController {
     if (this._panning) {
       this.renderer.panByScreenDelta(e.clientX - this._panLastX, e.clientY - this._panLastY, this.getWorld());
       this._panLastX = e.clientX; this._panLastY = e.clientY;
+      if (this._rightDownX != null && !this._rightMoved) {
+        const moved = Math.hypot(e.clientX - this._rightDownX, e.clientY - this._rightDownY);
+        if (moved > RIGHT_CLICK_ORDER_THRESHOLD_PX) this._rightMoved = true;
+      }
       return;
     }
     this._updateHover(e);
@@ -10321,6 +14823,9 @@ class InputController {
       e.preventDefault();
       this._panning = true;
       this._panLastX = e.clientX; this._panLastY = e.clientY;
+      // Order-issuing gesture tracking (draft.js) -- only right-click (button 2) can issue an
+      // order, middle-click (button 1) is pan-only, same as before this feature existed.
+      if (e.button === 2) { this._rightDownX = e.clientX; this._rightDownY = e.clientY; this._rightMoved = false; }
       return;
     }
     if (e.button !== 0) return;
@@ -10366,7 +14871,14 @@ class InputController {
   }
 
   _onUp(e) {
-    if (e.button === 2 || e.button === 1) { this._panning = false; return; }
+    if (e.button === 2 || e.button === 1) {
+      this._panning = false;
+      // A right-click that ended without ever exceeding the drag threshold is an order-issuing
+      // click, not a pan -- see RIGHT_CLICK_ORDER_THRESHOLD_PX's doc comment above.
+      if (e.button === 2 && this._rightDownX != null && !this._rightMoved) this._tryIssueOrder(e);
+      this._rightDownX = null; this._rightDownY = null; this._rightMoved = false;
+      return;
+    }
     this._painting = false;
     if (this.marqueeActive) {
       this.marqueeActive = false;
@@ -10416,8 +14928,29 @@ class InputController {
     if (x < 0 || y < 0 || x >= world.width || y >= world.height) return;
 
     if (this.tool.startsWith('zone-')) {
-      const kind = { 'zone-food': ZoneKind.Food, 'zone-bedroom': ZoneKind.Bedroom, 'zone-recreation': ZoneKind.Recreation, 'zone-training': ZoneKind.Training }[this.tool];
+      const kind = {
+        'zone-food': ZoneKind.Food, 'zone-bedroom': ZoneKind.Bedroom, 'zone-recreation': ZoneKind.Recreation,
+        'zone-training': ZoneKind.Training, 'zone-storage': ZoneKind.Storage, 'zone-medical': ZoneKind.Medical,
+        'zone-command': ZoneKind.Command, 'zone-gymnasium': ZoneKind.Gymnasium,
+      }[this.tool];
       world.zones.set(x, y, kind);
+      return;
+    }
+
+    // Restrict Area (RimWorld Restrict-tab style, see citizens.js's paintAllowedAreaCell): paints
+    // into the CURRENTLY SELECTED citizen's own area mask, not the shared world.zones grid --
+    // same click/drag paint gesture as the zone tools above, deliberately reusing that UX rather
+    // than inventing a new one (per the task's own instruction). A single-citizen selection is
+    // required (mirrors main.js's insp-restrict-btn, which only arms this tool from the
+    // single-citizen inspector view); a marquee multi-select or no selection is a no-op toast,
+    // not a silent failure.
+    if (this.tool === 'restrict-area') {
+      const sel = (this.selectedCitizens && this.selectedCitizens.length === 1) ? this.selectedCitizens[0] : this.selectedCitizen;
+      if (sel < 0 || sel >= world.citizens.count || !world.citizens.isAliveAt(sel)) {
+        this.onToast?.('Select one citizen first');
+        return;
+      }
+      world.citizens.paintAllowedAreaCell(sel, world.grid.width, world.grid.height, x, y, true);
       return;
     }
 
@@ -10441,6 +14974,123 @@ class InputController {
     world.build(this.tool, x + 0.5, y + 0.5);
   }
 
+  // Right-click-and-release-without-drag order gesture (draft.js + forcejob.js): if the current
+  // selection includes any drafted citizens, this issues either a move or an attack order
+  // depending on what's under the cursor -- a live attacker within ORDER_ATTACK_PICK_RADIUS means
+  // "attack this", otherwise it's a walkable-tile "move here". No separate mode-switch UI, per the
+  // task spec -- auto-detected every time, same click gesture either way. Drafted selection always
+  // wins this gesture (unchanged from before Force Job existed); only once nothing selected is
+  // drafted does a right-click instead check for a valid Force-Job target under the cursor
+  // (forcejob.js -- RimWorld-style "Prioritize" on an undrafted citizen). A no-op (not even a
+  // toast) if neither applies, so a stray right-click-release over empty ground/an ineligible
+  // selection behaves exactly like it did before either feature existed -- purely camera pan, no
+  // side effect.
+  _tryIssueOrder(e) {
+    const world = this.getWorld();
+    if (!world) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const [wx, wy] = this.renderer.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+
+    const draftedIds = this._draftedSelectionIds(world);
+    if (draftedIds.length > 0) {
+      const targetAttacker = nearestAliveAttacker(world.attackers, wx, wy, ORDER_ATTACK_PICK_RADIUS);
+      if (targetAttacker >= 0) {
+        issueAttackOrder(world, draftedIds, targetAttacker);
+        this.onToast?.(`Attack order: ${draftedIds.length} citizen${draftedIds.length > 1 ? 's' : ''}`);
+      } else {
+        issueMoveOrder(world, draftedIds, wx, wy);
+        this.onToast?.(`Move order: ${draftedIds.length} citizen${draftedIds.length > 1 ? 's' : ''}`);
+      }
+      return;
+    }
+
+    // Force Job (forcejob.js): only reachable when the selection contains zero drafted citizens.
+    // Requires an actual valid job target under the cursor -- blueprint, resource node, messy
+    // room, or unstaffed workshop station (see _findJobTargetAt) -- otherwise this stays a no-op
+    // camera-pan-adjacent click, same as the drafted branch above when nothing's selected.
+    const undraftedIds = this._undraftedSelectionIds(world);
+    if (undraftedIds.length === 0) return;
+    const target = this._findJobTargetAt(world, wx, wy);
+    if (!target) return;
+    // Multi-citizen rule (forcejob.js's pickClosestUndraftedCitizen doc comment): same target,
+    // only the closest selected citizen actually gets forced onto it.
+    const closestId = pickClosestUndraftedCitizen(world, undraftedIds, target.x, target.y);
+    if (closestId == null) return;
+    if (forceJob(world, closestId, target.kind, target.ref)) {
+      this.onToast?.('Force job assigned');
+    }
+  }
+
+  // The current selection (single-pick or marquee multi-select, see selectedCitizen/
+  // selectedCitizens above) narrowed down to just the living, currently-drafted ones, as citizen
+  // ids (draft.js's public interface takes ids, not store indices) -- shared by _tryIssueOrder
+  // above and available for any future UI (e.g. a "Draft selection" button) that wants the same
+  // narrowing logic.
+  _draftedSelectionIds(world) {
+    const indices = (this.selectedCitizens && this.selectedCitizens.length > 0)
+      ? this.selectedCitizens
+      : (this.selectedCitizen >= 0 ? [this.selectedCitizen] : []);
+    const ids = [];
+    for (const i of indices) {
+      if (i < 0 || i >= world.citizens.count) continue;
+      if (!world.citizens.isAliveAt(i) || !world.citizens.isDraftedAt(i)) continue;
+      ids.push(world.citizens.id[i]);
+    }
+    return ids;
+  }
+
+  // Mirror of _draftedSelectionIds above, narrowed to the living, currently-UNDRAFTED ones instead
+  // -- forcejob.js's Force Job is the undrafted counterpart to draft.js's move/attack orders, see
+  // _tryIssueOrder above for how the two are routed off the same right-click gesture.
+  _undraftedSelectionIds(world) {
+    const indices = (this.selectedCitizens && this.selectedCitizens.length > 0)
+      ? this.selectedCitizens
+      : (this.selectedCitizen >= 0 ? [this.selectedCitizen] : []);
+    const ids = [];
+    for (const i of indices) {
+      if (i < 0 || i >= world.citizens.count) continue;
+      if (!world.citizens.isAliveAt(i) || world.citizens.isDraftedAt(i)) continue;
+      ids.push(world.citizens.id[i]);
+    }
+    return ids;
+  }
+
+  // Job-target detection for the Force Job right-click gesture above. Small pick radius for
+  // point-like targets (blueprint/node/workshop, same ballpark as ORDER_ATTACK_PICK_RADIUS/
+  // _pickCitizen's citizen-pick radius); a messy room is instead hit-tested by "is this world
+  // point actually inside an enclosed room with mess above the same threshold jobs.js's own
+  // autonomous findNearestMessyRoom uses" (rooms.js's roomContaining), since a room has no single
+  // point location the way a structure or node does. Returns { kind: ForceJobKind, ref, x, y } (x/y
+  // being the target's own position, for pickClosestUndraftedCitizen's distance comparison) or
+  // null if nothing valid is under the cursor. Blueprints/unstaffed workshops are checked before
+  // resource nodes/messy rooms -- construction work outranking harvesting/cleaning is the existing
+  // autonomous ladder's own order (jobs.js), mirrored here purely as a sensible pick-priority
+  // tiebreak for the rare case the cursor lands on more than one candidate at once.
+  _findJobTargetAt(world, wx, wy) {
+    const PICK_RADIUS = 0.7;
+    let bestKind = null, bestRef = null, bestDist = PICK_RADIUS;
+    for (const s of world.structures) {
+      if (s.destroyed) continue;
+      const d = Math.hypot(s.x - wx, s.y - wy);
+      if (d >= bestDist) continue;
+      if (s.underConstruction) { bestDist = d; bestKind = ForceJobKind.Blueprint; bestRef = s; continue; }
+      if (s.kind === 'workshop' && s.workerId == null) { bestDist = d; bestKind = ForceJobKind.Workshop; bestRef = s; continue; }
+    }
+    if (bestKind) return { kind: bestKind, ref: bestRef, x: bestRef.x, y: bestRef.y };
+
+    for (const n of world.resourceNodes) {
+      if (n.depleted) continue;
+      const d = Math.hypot(n.x - wx, n.y - wy);
+      if (d < PICK_RADIUS) return { kind: ForceJobKind.Node, ref: n, x: n.x, y: n.y };
+    }
+
+    const room = roomContaining(world.rooms, world.grid, wx, wy);
+    if (room && (room.mess || 0) > MESS_CLEAN_THRESHOLD) {
+      return { kind: ForceJobKind.Room, ref: room, x: wx, y: wy };
+    }
+    return null;
+  }
+
   _pickCitizen(world) {
     let bestI = -1, bestDist = 0.8; // pick radius in world units
     for (let i = 0; i < world.citizens.count; i++) {
@@ -10462,6 +15112,11 @@ class InputController {
     // already the Monitor Station buildable's hotkey in TOOLS, so this deliberately only claims
     // the uppercase variant and lets 'm' fall through to the tool table below. main.js supplies
     // onToggleMap.
+    // Draft/undraft the current selection (draft.js). SHIFT+D, same uppercase-only convention as
+    // the other overlay hotkeys below -- lowercase 'd' is already the Coal Generator buildable's
+    // hotkey. main.js supplies onToggleDraft, which draft/undraft-toggles every living citizen
+    // currently selected (matches this file's own inspector-button behavior, see main.js).
+    if (e.key === 'D') { this.onToggleDraft?.(); return; }
     if (e.key === 'M') { this.onToggleMap?.(); return; }
     // Budget report overlay (world.js's finance ledger, surfaced in main.js). SHIFT+B for the
     // same reason as SHIFT+M above -- lowercase 'b' is already the Bed buildable's hotkey.
@@ -10477,6 +15132,16 @@ class InputController {
     // uppercase-only convention -- lowercase 'p' is already the Garbage Garage (Electric)
     // buildable's hotkey.
     if (e.key === 'P') { this.onTogglePrograms?.(); return; }
+    // Outpost Charter Contracts overlay (grants.js, surfaced in main.js). SHIFT+G, same
+    // uppercase-only convention -- lowercase 'g' is already the Generator buildable's hotkey.
+    if (e.key === 'G') { this.onToggleGrants?.(); return; }
+    // Fabrication/Drones overlay (drones.js, surfaced in main.js). SHIFT+N, same uppercase-only
+    // convention -- lowercase 'n' is already the Garbage Garage (Fossil) buildable's hotkey.
+    if (e.key === 'N') { this.onToggleDrones?.(); return; }
+    // Coverage Plans overlay (coverageplans.js, surfaced in main.js). SHIFT+I, same
+    // uppercase-only convention -- lowercase 'i' is already the Recycling Garage (Gas)
+    // buildable's hotkey.
+    if (e.key === 'I') { this.onToggleCoverage?.(); return; }
     // Onboarding reference panel (tutorial.js, surfaced in main.js). F1 and '?' are both free --
     // '?' is Shift+/ and appears in no TOOL_KEYS entry, and F1 collides with nothing here or in
     // main.js's F5/F9 save/load bindings. F1 needs preventDefault or the browser opens its own help.
@@ -10486,6 +15151,9 @@ class InputController {
     if (e.key === 'Escape' && this.onToggleFinance) { this.onCloseFinance?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onToggleFactions) { this.onCloseFactions?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onTogglePrograms) { this.onClosePrograms?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleGrants) { this.onCloseGrants?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleDrones) { this.onCloseDrones?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleCoverage) { this.onCloseCoverage?.(); /* falls through to clear tool */ }
     if (e.key in TOOL_KEYS) { this.setTool(TOOL_KEYS[e.key]); return; }
     if (e.key === ' ') { e.preventDefault(); this.togglePause(); return; }
     if (e.key === '+' || e.key === '=') { this.setSpeedIndex(this.speedIndex + 1); return; }
@@ -10818,7 +15486,7 @@ function buildHelp() {
   helpBuilt = true;
   el('help-body').innerHTML = HELP_SECTIONS.map(sec =>
     `<section class="help-sec">` +
-      `<h3>${sec.title}</h3>` +
+      `<h3 class="report-section-title">${sec.title}</h3>` +
       (sec.intro ? `<p class="help-intro">${sec.intro}</p>` : '') +
       `<dl>` + sec.items.map(([term, def]) =>
         `<div class="help-row"><dt>${term}</dt><dd>${def}</dd></div>`).join('') + `</dl>` +
@@ -10878,6 +15546,12 @@ function initOnboarding() {
 
 
 
+
+
+
+
+
+
 const SECONDS_PER_TICK = 0.1;
 const SAVE_KEY = 'settlement-defense-save';
 // Autosave lives in its own localStorage key, deliberately separate from SAVE_KEY -- it must
@@ -10900,7 +15574,48 @@ const AUTOSAVE_INTERVAL_TICKS = 1200;
 // otherwise the three schemes don't read or write each other's keys.
 const SLOTS_KEY = 'settlement-defense-save-slots';
 const SLOT_COUNT = 5;
-const WEATHER_ICON = { Clear: '🌤', Rain: '🌧', Cold: '❄', Heatwave: '🔥' };
+// Maps a WeatherKind string (weather.js) to a topbar glyph name (assets.js's TOPBAR_ICONS) --
+// replaces the old emoji lookup table 1:1, same fallback-to-Clear behavior on an unrecognized key.
+const WEATHER_ICON = { Clear: 'weatherClear', Rain: 'weatherRain', Cold: 'weatherCold', Heatwave: 'weatherHeatwave' };
+
+// Static topbar stat icons (element id -> assets.js TOPBAR_ICONS name) that never change once
+// set. Day/night and weather are handled separately in updateTopbar() below since their glyph
+// swaps with live state; everything here is baked in once at boot by initTopbarIcons().
+const STATIC_TOPBAR_ICONS = {
+  'stat-scrap-icon': 'scrap',
+  'stat-pollution-icon': 'pollution',
+  'stat-population-icon': 'population',
+  'stat-attackers-icon': 'attackers',
+  'stat-wave-icon': 'wave',
+  'stat-unrest-icon': 'unrest',
+  'stat-grading-icon': 'grading',
+  'stat-research-icon': 'research',
+};
+
+// Swaps an <span class="icon"> element's content for a real hand-drawn SVG <img> glyph (see
+// assets.js's TOPBAR_ICONS / topbarIconUri) -- called once per icon at boot for the static set,
+// and again on demand for the two state-driven icons (day/night, weather) whenever their state
+// changes. Alt text carries the accessible label since the glyph itself has no text.
+function setTopbarIcon(elId, iconName, alt) {
+  const el = document.getElementById(elId);
+  if (!el) return;
+  let img = el.querySelector('img');
+  if (!img) {
+    img = document.createElement('img');
+    img.className = 'icon-svg';
+    el.appendChild(img);
+  }
+  const uri = topbarIconUri(iconName);
+  if (img.src !== uri) img.src = uri;
+  img.alt = alt || iconName;
+}
+
+function initTopbarIcons() {
+  for (const [elId, iconName] of Object.entries(STATIC_TOPBAR_ICONS)) {
+    setTopbarIcon(elId, iconName, iconName);
+  }
+}
+initTopbarIcons();
 
 const canvas = document.getElementById('game');
 const renderer = new Renderer(canvas);
@@ -10917,9 +15632,12 @@ function attachAudioHooks(w) {
   w.onTurretFire = () => playTurretFire();
   w.onKill = () => playKill();
   w.onCitizenDowned = () => playCitizenDowned();
-  // Weather changes + one-off random events (weather.js) surface as a toast, same mechanism as
-  // every other player-visible notification in this file.
-  w.onRandomEvent = (text) => showToast(text);
+  w.onCitizenOnBreak = () => playMoodBreak();
+  // Weather changes + one-off random events (weather.js/factions.js/rats.js/security.js/jobs.js)
+  // surface as a toast, same mechanism as every other player-visible notification in this file,
+  // AND get discriminated by playRandomEventCue's text matching for the 6 new PA-catalog cues
+  // (unrest x4/program/faction/corrupt/rats/severe-weather) that share this one hook.
+  w.onRandomEvent = (text) => { showToast(text); playRandomEventCue(text); };
 }
 
 // LAZY BOOT: no SimWorld exists until the player starts or loads one from the title screen (see
@@ -11055,7 +15773,15 @@ window.__debug = {
   researchNodes: RESEARCH_NODES,
   isToolUnlocked: (tool) => isToolUnlocked(world.research, tool),
   doResearch: (id) => tryResearch(world.research, id),
-  audio: { isMuted, toggleMute, getVolume, setVolume, getMasterGainValue, playBuildComplete, playTurretFire, playKill, playWaveAlert, playCitizenDowned },
+  audio: {
+    isMuted, toggleMute, getVolume, setVolume, getMasterGainValue,
+    playBuildComplete, playTurretFire, playKill, playWaveAlert, playCitizenDowned,
+    // PA-catalog cues added this pass (see audio.js) -- exposed here for the same soak-test-time
+    // manual-trigger convenience the original 5 cues already have.
+    playUnrestTier1, playUnrestTier2, playUnrestTier3, playUnrestResolve, playMoodBreak,
+    playProgramComplete, playFactionSatisfied, playFactionUnmet, playCorruptDiscovered,
+    playRatTierChange, playSevereWeatherOnset, playRandomEventCue,
+  },
   // Settings/Options panel (see the "settings" section below) -- reachable from the title screen's
   // main menu and, in-game, from the pause menu's Settings button (that button was built by a
   // concurrent agent looking for exactly this openSettings/toggleSettings hook name). Also exposes
@@ -11103,6 +15829,16 @@ window.__debug = {
     fire: (citizenId) => fireCorruptStaff(world, citizenId),
     forceRoll: () => forceCorruptionRoll(world),
     forceActivate: (citizenId) => forceActivateCorruption(world, citizenId),
+    // Non-lethal takedown (WeaponTier.StunBaton) -- console-verification helpers so a soak test
+    // doesn't have to wait on the real ~40% stun-chance roll or the 1-in-game-hour cooldown.
+    K9_UPGRADE_SCRAP_COST,
+    dogs: () => world.dogs,
+    upgradeDog: (citizenId) => world.upgradeDog(citizenId),
+    isStunnedAt: (attackerIdx) => world.attackers.isStunnedAt(attackerIdx),
+    stunTicksRemaining: (attackerIdx) => world.attackers.stunTicksRemaining[attackerIdx],
+    isTrainingGraduated: (citizenId) => world.roster.isTrainingGraduated(citizenId),
+    programSites: () => world.programSites,
+    assignProgramStaff: (siteIndex, citizenId) => assignProgramStaff(world, world.programSites[siteIndex], citizenId),
   },
   // Held-citizen crisis (siege.js) -- same console-verification pattern. force() bypasses the
   // unrest-tier/probability gates so a soak test doesn't have to grind out a genuine tier-3 unrest
@@ -11111,30 +15847,228 @@ window.__debug = {
     getEvent: () => world.heldCitizenEvent,
     force: () => forceHeldCitizenCrisis(world),
   },
+  // Labor drones (drones.js) -- same console-verification pattern as every other feature above.
+  // queue()/toggle() drive the exact same functions the Fabrication panel's buttons use, so a
+  // soak test can fabricate a drone of a specific category without clicking through the UI.
+  drones: {
+    DRONE_CATEGORIES, DRONE_COST, DRONE_GESTATION_TICKS,
+    capacity: () => droneCapacity(world.structures),
+    used: () => droneSlotsUsed(world),
+    queue: (category) => queueDroneFabrication(world, category),
+    list: () => world.drones,
+    fabricationQueue: () => world.droneFabricationQueue,
+    toggle: (v) => toggleDronesPanel(v),
+  },
 };
 
-// ---------------------------------------------------------------- toolbar (built once)
+// ---------------------------------------------------------------- toolbar (categorized, built once)
+// Restructured from a single flat scrolling list (26+ items, hard to scan) into a two-level
+// category -> item-list -> detail-before-commit UI -- the same information hierarchy live-observed
+// in Super Energy Apocalypse: Recycled's build panel (category icon row, then that category's
+// buildables, then a detail readout before placing). Only the STRUCTURE is adopted; every pixel
+// here (colors, icons, layout classes) is this project's own -- see the CSS in index.html.
+// Every hotkey binding in input.js's TOOLS/TOOL_KEYS is completely untouched by this rework: a
+// keypress still calls input.setTool() directly, and syncToolbarHighlight() below just makes the
+// two-level UI follow along so the right category/detail is visible after a hotkey press too.
 const toolbarEl = document.getElementById('toolbar');
-for (const t of TOOLS) {
-  const btn = document.createElement('div');
-  btn.className = 'tool-btn';
-  btn.dataset.tool = t.tool ?? '';
-  btn.innerHTML = `<span><span class="key">[${t.key}]</span>${t.label}</span>` +
-    (t.cost != null ? `<span class="cost">$${t.cost}</span>` : '');
-  // Research gate (research.js): clicking a locked tool doesn't select it at all -- it says why
-  // and opens the Research panel, so the gate is discoverable rather than a dead button. The
-  // authoritative gate is still input.js's _place(), this is just the UI mirroring it.
-  btn.addEventListener('click', () => {
-    if (!world) return; // toolbar is hidden pregame, but never trust that as the only guard
-    if (!isToolUnlocked(world.research, t.tool)) {
-      const node = researchNodeForToolLocal(t.tool);
-      showToast(`Locked -- research "${node ? node.name : 'unknown'}" first`);
-      toggleResearch(true);
-      return;
-    }
-    input.setTool(t.tool);
+
+// Logical categories, inferred from economy.js's BUILD_COST grouping comments and each tool's own
+// kind: Defense (blocks/damages attackers), Power & Water (the two mirrored utility grids),
+// Economy & Vehicles (scrap/haul/production loop), Furniture (needs-refill objects), Security
+// (early warning + armed-staff force multipliers), Zones (paint-only, no structure/cost).
+const CATEGORY_ORDER = ['defense', 'power', 'economy', 'furniture', 'security', 'zones'];
+const CATEGORY_LABEL = {
+  defense: 'Defense', power: 'Power & Water', economy: 'Economy & Vehicles',
+  furniture: 'Furniture', security: 'Security', zones: 'Zones',
+};
+// Plain unicode glyphs, same convention already used for #topbar's stat icons (🔩👥☠ etc.) --
+// not artwork of any kind, just short original label glyphs for each category button.
+const CATEGORY_ICON = {
+  defense: '🛡', power: '⚡', economy: '🚚', furniture: '🛋', security: '👁', zones: '🧭',
+};
+const TOOL_CATEGORY = {
+  wall: 'defense', turret: 'defense', fence: 'defense', trap: 'defense',
+  floodlight: 'defense', tesla: 'defense', watchtower: 'defense', lightning_rod: 'defense',
+  generator: 'power', generator_coal: 'power', generator_wind: 'power', generator_solar: 'power',
+  generator_nuclear: 'power', waste_storage: 'power', wire: 'power', battery: 'power',
+  power_switch: 'power', pump: 'power', pipe: 'power',
+  garage_recycling_fossil: 'economy', garage_recycling_gas: 'economy',
+  garage_recycling_ethanol: 'economy', garage_recycling_electric: 'economy',
+  garage_garbage_fossil: 'economy', garage_garbage_gas: 'economy',
+  garage_garbage_ethanol: 'economy', garage_garbage_electric: 'economy',
+  recycling_center: 'economy', workshop: 'economy',
+  bed: 'furniture', table: 'furniture', door: 'furniture',
+  camera: 'security', monitor_station: 'security', armory: 'security', rat_trap: 'security',
+  stabilizer: 'security', // anomaly.js's counter-buildable, same "hazard-management, not combat" bucket as Rat Trap
+  'zone-food': 'zones', 'zone-bedroom': 'zones', 'zone-recreation': 'zones', 'zone-training': 'zones',
+};
+// One-line "Makes:"-style effect/description per buildable, written fresh in this project's own
+// voice from each tool's real cost/effect in economy.js/BUILD_COST comments, siege.js, power.js,
+// water.js, vehicles.js FUEL_TYPES -- not copied from any reference game's text.
+const TOOL_BLURB = {
+  wall: 'Blocks attacker movement and sight entirely. A citizen must walk over the blueprint and build it before it works.',
+  turret: 'Automated gun; fires at any attacker in range. +50% damage and +25% range while powered.',
+  fence: 'Soft barrier -- slows attackers crossing it instead of blocking them outright. Cheap perimeter filler.',
+  trap: 'Hidden one-shot damage trap. No power needed, but it has to be re-armed after triggering.',
+  floodlight: 'Soft barrier like Fence: slows attackers 35% inside its radius rather than stopping them.',
+  tesla: 'Chains a shock to every attacker in range per activation -- crowd control, not a single-target upgrade.',
+  watchtower: 'Extends early-warning lead time before a wave arrives (longer while powered).',
+  lightning_rod: 'Deflects 85% of lightning strikes on anything nearby during a Lightning Storm, and halves the storm\'s movement-speed penalty in the same radius.',
+  generator: 'Baseline power source. Feeds Wire to anything nearby that benefits from being powered.',
+  generator_coal: 'Cheapest generator of the bunch, but pollutes more per tick than the plain model.',
+  generator_wind: 'Zero pollution, but only counts as a power source when sited on open, unobstructed ground.',
+  generator_solar: 'Zero pollution, but only counts as a power source under open sky -- not inside an enclosed room.',
+  generator_nuclear: 'High-output wireless power radius, but accrues hazardous waste until a Waste Storage sits nearby.',
+  waste_storage: 'Contains nuclear waste within its radius, keeping citizens and structures nearby safe from it.',
+  wire: 'Near-free power conduit. Carries electricity from a generator to whatever is connected to the network.',
+  battery: 'Stores and discharges power, buffering the grid against overload spikes.',
+  power_switch: 'Manual breaker. Place a new one, or click an existing one with this tool to flip it on/off.',
+  pump: 'Water source -- the root of the water grid, same role Generator plays for the power grid.',
+  pipe: 'Near-free water conduit. Boosts Food/Recreation zone refill and the Recycling Center\'s throughput.',
+  garage_recycling_fossil: 'Recycling truck garage, fossil fuel: cheapest to build, dirtiest per haul.',
+  garage_recycling_gas: 'Recycling truck garage, gas fuel: balanced cost and pollution -- the default choice.',
+  garage_recycling_ethanol: 'Recycling truck garage, ethanol fuel: clean, but temporarily dents Food zone refill after each haul.',
+  garage_recycling_electric: 'Recycling truck garage, electric fuel: cleanest, but hauls crawl unless the garage itself is powered.',
+  garage_garbage_fossil: 'Garbage truck garage, fossil fuel: cheapest to build, dirtiest per haul.',
+  garage_garbage_gas: 'Garbage truck garage, gas fuel: balanced cost and pollution -- the default choice.',
+  garage_garbage_ethanol: 'Garbage truck garage, ethanol fuel: clean, but temporarily dents Food zone refill after each haul.',
+  garage_garbage_electric: 'Garbage truck garage, electric fuel: cleanest, but hauls crawl unless the garage itself is powered.',
+  recycling_center: 'Passively trickles pollution into scrap over time. Complements the truck haul cycle, doesn\'t replace it.',
+  workshop: 'Staffed processing station -- turns raw scrap into finished Components at a real 2x uplift.',
+  bed: 'Lets a citizen sleep to refill Rest. Pair with a Bedroom Zone for the formal room-role bonus.',
+  table: 'Lets citizens eat together, refilling Social and Rest. Pair with a Recreation/Dining zone for the room bonus.',
+  door: 'Passable wall opening -- keeps a room enclosed for room-detection bonuses while still letting citizens through.',
+  camera: 'Cheap, short-range early warning. Staff it with a Monitor Station for a much longer warning window.',
+  monitor_station: 'Staffed CCTV hub -- roughly doubles the early-warning window versus an unmanned Camera.',
+  armory: 'Auto-issues Rifle-tier weapons to every Guard/Sniper on the roster. A second Armory unlocks Heavy tier.',
+  rat_trap: 'Catches rats before an infestation spreads. Does nothing against attackers -- vermin control only.',
+  stabilizer: 'Passively decays the settlement\'s anomaly pressure meter. Does nothing against attackers -- hazard management only.',
+  'zone-food': 'Marks ground for foraging/food production. Refills Hunger when a citizen visits.',
+  'zone-bedroom': 'Marks ground as a bedroom area. Pair with a Bed on it for the formal room-role bonus.',
+  'zone-recreation': 'Marks ground for recreation. Refills Social and Mood when a citizen visits.',
+  'zone-training': 'Marks ground for the Skills Workshop program -- boosts skill-gain for citizens who use it.',
+};
+
+// ---- DOM scaffold (header + collapsible body: Select shortcut, category grid, item list, detail) ----
+toolbarEl.innerHTML = `
+  <div id="toolbar-head" title="Collapse/expand the build panel">
+    <span class="tb-title">🔨 Build</span>
+    <button id="toolbar-collapse-btn">&#9662;</button>
+  </div>
+  <div id="toolbar-body">
+    <div id="toolbar-select-btn" class="tool-btn select-btn"><span><span class="key">[0]</span>Select</span></div>
+    <div id="toolbar-categories"></div>
+    <div id="toolbar-items"></div>
+    <div id="toolbar-detail"></div>
+  </div>
+`;
+const toolbarBodyEl = document.getElementById('toolbar-body');
+const toolbarCatsEl = document.getElementById('toolbar-categories');
+const toolbarItemsEl = document.getElementById('toolbar-items');
+const toolbarDetailEl = document.getElementById('toolbar-detail');
+
+let tbCategory = null;   // currently-open category id, or null (category grid only)
+let tbDetailTool = null; // currently-detailed tool string, or null (item list, not detail)
+
+document.getElementById('toolbar-select-btn').addEventListener('click', () => {
+  if (!world) return;
+  input.setTool(null);
+});
+
+document.getElementById('toolbar-collapse-btn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  toolbarBodyEl.classList.toggle('hidden');
+  document.getElementById('toolbar-collapse-btn').innerHTML =
+    toolbarBodyEl.classList.contains('hidden') ? '&#9656;' : '&#9662;';
+});
+// Clicking anywhere on the header (not just the tiny arrow button) also toggles -- bigger, more
+// discoverable hit target for the same collapse/expand action.
+document.getElementById('toolbar-head').addEventListener('click', () => {
+  document.getElementById('toolbar-collapse-btn').click();
+});
+
+for (const catId of CATEGORY_ORDER) {
+  const b = document.createElement('div');
+  b.className = 'tb-cat-btn';
+  b.dataset.cat = catId;
+  b.innerHTML = `<span class="tb-cat-icon">${CATEGORY_ICON[catId]}</span><span class="tb-cat-label">${CATEGORY_LABEL[catId]}</span>`;
+  b.addEventListener('click', () => {
+    tbCategory = catId;
+    tbDetailTool = null;
+    renderToolbarLower();
   });
-  toolbarEl.appendChild(btn);
+  toolbarCatsEl.appendChild(b);
+}
+
+function renderToolbarLower() {
+  // Detail view wins if a tool is selected; otherwise show the open category's item list;
+  // otherwise (no category open) show neither -- just the category grid above.
+  if (tbDetailTool) {
+    toolbarItemsEl.classList.add('hidden');
+    toolbarDetailEl.classList.remove('hidden');
+    renderToolbarDetail();
+  } else if (tbCategory) {
+    toolbarDetailEl.classList.add('hidden');
+    toolbarItemsEl.classList.remove('hidden');
+    renderToolbarItems();
+  } else {
+    toolbarItemsEl.classList.add('hidden');
+    toolbarDetailEl.classList.add('hidden');
+  }
+}
+
+function renderToolbarItems() {
+  toolbarItemsEl.innerHTML = '';
+  const back = document.createElement('div');
+  back.className = 'tb-items-back';
+  back.textContent = '‹ Categories';
+  back.addEventListener('click', () => { tbCategory = null; tbDetailTool = null; renderToolbarLower(); });
+  toolbarItemsEl.appendChild(back);
+
+  for (const t of TOOLS) {
+    if (TOOL_CATEGORY[t.tool] !== tbCategory) continue;
+    const btn = document.createElement('div');
+    btn.className = 'tool-btn';
+    btn.dataset.tool = t.tool ?? '';
+    btn.innerHTML = `<span><span class="key">[${t.key}]</span>${t.label}</span>` +
+      (t.cost != null ? `<span class="cost">$${t.cost}</span>` : '');
+    // Research gate (research.js): clicking a locked tool doesn't select it at all -- it says why
+    // and opens the Research panel, so the gate is discoverable rather than a dead button. The
+    // authoritative gate is still input.js's _place(), this is just the UI mirroring it.
+    btn.addEventListener('click', () => {
+      if (!world) return; // toolbar is hidden pregame, but never trust that as the only guard
+      if (!isToolUnlocked(world.research, t.tool)) {
+        const node = researchNodeForToolLocal(t.tool);
+        showToast(`Locked -- research "${node ? node.name : 'unknown'}" first`);
+        toggleResearch(true);
+        return;
+      }
+      input.setTool(t.tool);
+      tbDetailTool = t.tool;
+      renderToolbarLower();
+    });
+    toolbarItemsEl.appendChild(btn);
+  }
+}
+
+function renderToolbarDetail() {
+  const t = TOOLS.find(x => x.tool === tbDetailTool);
+  if (!t) { toolbarDetailEl.innerHTML = ''; return; }
+  const locked = world && !isToolUnlocked(world.research, t.tool);
+  const costHtml = t.cost != null
+    ? `<span class="tb-detail-cost"><span class="icon">🔩</span>${t.cost}</span>`
+    : `<span class="tb-detail-cost tb-free">Free (paint-only)</span>`;
+  toolbarDetailEl.innerHTML = `
+    <div class="tb-detail-name">${t.label}</div>
+    <div class="tb-detail-cost-row">${costHtml}</div>
+    <div class="tb-detail-effect">${TOOL_BLURB[t.tool] || ''}</div>
+    ${locked ? `<div class="tb-detail-locked">🔒 Research-locked -- see the Research panel.</div>` : ''}
+    <button class="tb-detail-back">‹ Go Back</button>
+  `;
+  toolbarDetailEl.querySelector('.tb-detail-back').addEventListener('click', () => {
+    tbDetailTool = null;
+    renderToolbarLower();
+  });
 }
 
 // Local lookup rather than importing researchNodeForTool -- main.js only ever needs it for the
@@ -11143,8 +16077,30 @@ function researchNodeForToolLocal(tool) {
   return RESEARCH_NODES.find(n => n.unlocks.includes(tool)) || null;
 }
 
+let tbLastSyncedTool; // undefined on purpose: forces one real sync pass on the very first frame
 function syncToolbarHighlight() {
-  for (const btn of toolbarEl.children) {
+  document.getElementById('toolbar-select-btn')?.classList.toggle('active', input.tool === null);
+
+  // Follow a hotkey (or a New Game reset) that changed input.tool from outside this panel's own
+  // clicks -- jump the category/item/detail view to match, so pressing a hotkey is just as
+  // discoverable as clicking through the panel would have been. Every hotkey in input.js's
+  // TOOL_KEYS keeps working identically either way; this only decides what the panel *shows*.
+  if (input.tool !== tbLastSyncedTool) {
+    tbLastSyncedTool = input.tool;
+    if (input.tool) {
+      tbCategory = TOOL_CATEGORY[input.tool] || tbCategory;
+      tbDetailTool = input.tool;
+    } else {
+      tbDetailTool = null;
+    }
+    renderToolbarLower();
+  }
+
+  for (const b of toolbarCatsEl.children) {
+    b.classList.toggle('active', b.dataset.cat === tbCategory);
+  }
+  for (const btn of toolbarItemsEl.children) {
+    if (btn.dataset.tool === undefined) continue; // the "‹ Categories" back row
     const btnTool = btn.dataset.tool || null;
     btn.classList.toggle('active', btnTool === input.tool);
     btn.classList.toggle('locked', !isToolUnlocked(world?.research, btnTool));
@@ -11169,6 +16125,12 @@ document.getElementById('btn-research').addEventListener('click', () => toggleRe
 document.getElementById('btn-research-close').addEventListener('click', () => toggleResearch(false));
 document.getElementById('btn-programs').addEventListener('click', () => toggleProgramsPanel());
 document.getElementById('btn-programs-close').addEventListener('click', () => toggleProgramsPanel(false));
+document.getElementById('btn-grants').addEventListener('click', () => toggleGrantsPanel());
+document.getElementById('btn-grants-close').addEventListener('click', () => toggleGrantsPanel(false));
+document.getElementById('btn-coverage').addEventListener('click', () => toggleCoveragePlansPanel());
+document.getElementById('btn-coverage-close').addEventListener('click', () => toggleCoveragePlansPanel(false));
+document.getElementById('btn-drones').addEventListener('click', () => toggleDronesPanel());
+document.getElementById('btn-drones-close').addEventListener('click', () => toggleDronesPanel(false));
 document.getElementById('btn-factions').addEventListener('click', () => toggleFactions());
 document.getElementById('btn-factions-close').addEventListener('click', () => toggleFactions(false));
 
@@ -11341,7 +16303,7 @@ function renderSettings() {
     ['Menus', [
       ['Pause / Resume', 'Space'], ['Speed down / up', '- / +'],
       ['Conquest Map', 'Shift+M'], ['Budget Report', 'Shift+B'], ['Research', 'Shift+T'],
-      ['Cliques', 'Shift+F'], ['Programs', 'Shift+P'],
+      ['Cliques', 'Shift+F'], ['Programs', 'Shift+P'], ['Fabrication (Drones)', 'Shift+N'],
       ['Help Reference', 'F1 or ?'], ['Deselect tool / close Map-Research-Budget-Cliques-Programs', 'Escape'],
     ]],
     ['Save / Load', [
@@ -11924,6 +16886,8 @@ function makeWorld({ width, height, seed, aggression, startingCitizens, storytel
 const worldmapEl = document.getElementById('worldmap');
 const worldmapGridEl = document.getElementById('worldmap-grid');
 const worldmapSubEl = document.getElementById('worldmap-sub');
+const worldmapRangeLabelEl = document.getElementById('worldmap-range-label');
+const btnUpgradeRangeEl = document.getElementById('btn-worldmap-upgrade-range');
 
 function toggleWorldMap(force) {
   const show = force != null ? force : worldmapEl.classList.contains('hidden');
@@ -11932,6 +16896,25 @@ function toggleWorldMap(force) {
   if (show) renderWorldMap();
 }
 input.onToggleMap = () => toggleWorldMap();
+
+/** Refresh the "Upgrade travel range" row -- current range, next cost, capped/afford state. */
+function refreshRangeRow() {
+  if (!worldmapRangeLabelEl || !btnUpgradeRangeEl) return;
+  const maxed = worldMap.travelRange >= MAX_TRAVEL_RANGE;
+  worldmapRangeLabelEl.textContent = maxed
+    ? `Travel range: ${worldMap.travelRange} (max)`
+    : `Travel range: ${worldMap.travelRange} · next upgrade ${worldMap.rangeUpgradeCost()} scrap`;
+  btnUpgradeRangeEl.disabled = maxed || world.scrap < worldMap.rangeUpgradeCost();
+  btnUpgradeRangeEl.classList.toggle('hidden', maxed);
+}
+btnUpgradeRangeEl?.addEventListener('click', () => {
+  if (worldMap.upgradeTravelRange(world)) {
+    showToast(`Travel range upgraded to ${worldMap.travelRange}`);
+    renderWorldMap();
+  } else {
+    showToast('Cannot upgrade travel range');
+  }
+});
 input.onCloseMap = () => toggleWorldMap(false);
 input.onToggleFinance = () => toggleFinance();
 input.onCloseFinance = () => toggleFinance(false);
@@ -11970,6 +16953,29 @@ function toggleFactions(force) {
 }
 input.onToggleFactions = () => toggleFactions();
 input.onCloseFactions = () => toggleFactions(false);
+
+// ---------------------------------------------------------------- draft/undraft (draft.js)
+// Shared by the Shift+D hotkey (input.js's onToggleDraft) and the inspector's draft button (see
+// its click handler near updateInspector below) -- both just need "toggle draft for whichever
+// citizen(s) are currently selected", so this is the one place that logic lives. Mixed selections
+// (some already drafted, some not) draft everyone if ANY are undrafted, same "unify to the
+// majority action" convention RimWorld's own multi-select draft button uses, rather than a
+// per-citizen toggle that could leave a marquee-selected group in a split state from one click.
+function toggleDraftSelection() {
+  const indices = (input.selectedCitizens && input.selectedCitizens.length > 0)
+    ? input.selectedCitizens
+    : (input.selectedCitizen >= 0 ? [input.selectedCitizen] : []);
+  const alive = indices.filter(i => i >= 0 && i < world.citizens.count && world.citizens.isAliveAt(i));
+  if (alive.length === 0) return;
+  const anyUndrafted = alive.some(i => !isDrafted(world, world.citizens.id[i]));
+  for (const i of alive) {
+    const id = world.citizens.id[i];
+    if (anyUndrafted) draftCitizen(world, id); else undraftCitizen(world, id);
+  }
+  showToast(anyUndrafted ? `Drafted ${alive.length}` : `Undrafted ${alive.length}`);
+  updateInspector();
+}
+input.onToggleDraft = () => toggleDraftSelection();
 
 /** Full rebuild of the clique cards -- cheap (3 cliques) to redraw wholesale, same "no diffing
  *  needed, small enough list" reasoning as renderResearch/renderWorldMap. Shows "not formed yet"
@@ -12073,6 +17079,228 @@ function refreshPrograms() {
   renderPrograms();
 }
 
+// ---------------------------------------------------------------- outpost charter contracts overlay (grants.js)
+// Same full-screen-overlay-with-a-toggle-button convention as every panel above. One card per
+// GRANT_ORDER entry (fixed 6: Bootstrap, the 4-rung population ladder, the Emergency Stabilization
+// bailout), plus a standing Invest section below the grid for the time-locked instrument -- that
+// one isn't milestone-gated, it's a player-initiated action available any time there's enough
+// scrap on hand, so it doesn't fit the locked/available/completed card shape the others share.
+const grantsEl = document.getElementById('grants');
+const grantsGridEl = document.getElementById('grants-grid');
+const grantsSubEl = document.getElementById('grants-sub');
+const investSubEl = document.getElementById('invest-sub');
+const investPendingEl = document.getElementById('invest-pending');
+const btnInvestShort = document.getElementById('btn-invest-short');
+const btnInvestLong = document.getElementById('btn-invest-long');
+
+function toggleGrantsPanel(force) {
+  const show = force != null ? force : grantsEl.classList.contains('hidden');
+  grantsEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-grants').classList.toggle('active', show);
+  if (show) renderGrants();
+}
+input.onToggleGrants = () => toggleGrantsPanel();
+input.onCloseGrants = () => toggleGrantsPanel(false);
+
+btnInvestShort.textContent = `Short-Term (${INVEST_SHORT_TICKS}t): pay ${INVEST_COST} -> get ${INVEST_SHORT_PAYOUT}`;
+btnInvestLong.textContent = `Long-Term (${INVEST_LONG_TICKS}t): pay ${INVEST_COST} -> get ${INVEST_LONG_PAYOUT}`;
+btnInvestShort.addEventListener('click', () => {
+  const res = startInvestment(world, InvestmentTerm.Short);
+  if (!res.ok) { showToast(res.reason); return; }
+  showToast(`Invested ${INVEST_COST} scrap, matures in ${INVEST_SHORT_TICKS} ticks`);
+  renderGrants();
+});
+btnInvestLong.addEventListener('click', () => {
+  const res = startInvestment(world, InvestmentTerm.Long);
+  if (!res.ok) { showToast(res.reason); return; }
+  showToast(`Invested ${INVEST_COST} scrap, matures in ${INVEST_LONG_TICKS} ticks`);
+  renderGrants();
+});
+
+/** Full rebuild of the charter cards + investment section. ~6 cards, only while the overlay is
+ *  open -- same "cheap enough not to diff" reasoning as renderResearch/renderPrograms. */
+function renderGrants() {
+  const state = world.grants;
+  grantsGridEl.innerHTML = '';
+  let completedCount = 0;
+  for (const id of GRANT_ORDER) {
+    const def = GRANT_DEFS[id];
+    const status = charterStatus(world, id);
+    if (status === 'completed') completedCount++;
+    const card = document.createElement('div');
+    card.className = 'node' + (status === 'completed' ? ' done' : status === 'available' ? ' available' : ' blocked');
+
+    const checklistHtml = def.checklist.map(item => {
+      const ok = status === 'completed' || item.check(world, state);
+      return `<div class="chk ${ok ? 'ok' : ''}">${ok ? '✓' : '○'} ${resolveText(item.label, world)}</div>`;
+    }).join('');
+    const doneN = def.checklist.filter(item => status === 'completed' || item.check(world, state)).length;
+    const pct = def.checklist.length > 0 ? (doneN / def.checklist.length) * 100 : (status === 'completed' ? 100 : 0);
+
+    const badge = status === 'completed' ? `Fulfilled (+${def.reward} scrap)`
+      : status === 'available' ? 'Available -- clear the checklist'
+        : id === CharterKind.Bailout ? 'Hidden until the settlement is in real trouble'
+          : `Requires ${GRANT_DEFS[def.requires]?.label ?? 'a prior charter'}`;
+
+    card.innerHTML =
+      `<div class="rname">${def.label}</div>` +
+      `<div class="badge">${badge}</div>` +
+      `<div class="desc">${resolveText(def.desc, world)}</div>` +
+      (status !== 'locked' ? `<div class="bar"><div class="bar-fill" style="width:${pct}%"></div></div>${checklistHtml}` : '') +
+      `<div class="unlocks">Reward: ${def.reward} scrap</div>`;
+    grantsGridEl.appendChild(card);
+  }
+  grantsSubEl.textContent = `${completedCount} / ${GRANT_ORDER.length} charters fulfilled &middot; ${Math.round(world.scrap)} scrap on hand`;
+
+  investSubEl.textContent = `Pay ${INVEST_COST} scrap now, collect more later. Longer terms pay a bigger multiple.`;
+  btnInvestShort.disabled = world.scrap < INVEST_COST;
+  btnInvestLong.disabled = world.scrap < INVEST_COST;
+  const pending = state.investments;
+  investPendingEl.innerHTML = pending.length === 0 ? 'No pending investments.' : pending.map(inv =>
+    `<div class="chk">${inv.term === InvestmentTerm.Short ? 'Short-term' : 'Long-term'}: ${inv.cost} staked -> ${inv.payout} in ${Math.max(0, inv.matureTick - world.currentTick)} ticks</div>`
+  ).join('');
+}
+
+function refreshGrants() {
+  if (grantsEl.classList.contains('hidden')) return;
+  renderGrants();
+}
+
+// ---------------------------------------------------------------- fabrication / labor drones overlay (drones.js)
+// One card per DRONE_CATEGORIES entry with a "Fabricate" button (spends scrap immediately, queues
+// gestation -- see queueDroneFabrication's own doc comment for why), plus a live capacity readout
+// and a plain list of drones/queue entries below the grid. Deliberately not gated on a Fabrication
+// Bay's existence to hide the panel -- opening it with no Bay built yet is exactly how a player
+// discovers they need one (queueDroneFabrication's own reason string surfaces that on click).
+const dronesEl = document.getElementById('drones');
+const dronesGridEl = document.getElementById('drones-grid');
+const dronesSubEl = document.getElementById('drones-sub');
+const dronesActiveEl = document.getElementById('drones-active');
+
+function toggleDronesPanel(force) {
+  const show = force != null ? force : dronesEl.classList.contains('hidden');
+  dronesEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-drones').classList.toggle('active', show);
+  if (show) renderDrones();
+}
+input.onToggleDrones = () => toggleDronesPanel();
+input.onCloseDrones = () => toggleDronesPanel(false);
+
+function renderDrones() {
+  const cap = droneCapacity(world.structures);
+  const used = droneSlotsUsed(world);
+  dronesGridEl.innerHTML = '';
+  for (const cat of DRONE_CATEGORIES) {
+    const card = document.createElement('div');
+    card.className = 'node';
+    card.innerHTML =
+      `<div class="rname">${WORK_CATEGORY_LABELS[cat]} Drone</div>` +
+      `<div class="desc">Locked to ${WORK_CATEGORY_LABELS[cat]} for its whole lifetime. No hunger/rest/social/mood -- works this one job category autonomously, tirelessly.</div>` +
+      `<button data-cat="${cat}">Fabricate (${DRONE_COST} scrap, ${DRONE_GESTATION_TICKS}t)</button>`;
+    const btn = card.querySelector('button');
+    btn.disabled = used >= cap || world.scrap < DRONE_COST;
+    btn.addEventListener('click', () => {
+      const reason = queueDroneFabrication(world, cat);
+      if (reason) { showToast(reason); return; }
+      showToast(`Queued a ${WORK_CATEGORY_LABELS[cat]} drone -- gestating`);
+      renderDrones();
+    });
+    dronesGridEl.appendChild(card);
+  }
+  dronesSubEl.textContent = `${used} / ${cap} drone capacity used &middot; ${Math.round(world.scrap)} scrap on hand` +
+    (cap === 0 ? ' -- build a Fabrication Bay to unlock capacity' : '');
+
+  const rows = [];
+  for (const order of world.droneFabricationQueue) {
+    rows.push(`<div class="row"><span class="cat">${WORK_CATEGORY_LABELS[order.category]} (gestating)</span><span>${order.ticksRemaining}t left</span></div>`);
+  }
+  for (const drone of world.drones) {
+    const status = drone.state === 'idle' ? 'idle' : drone.state === 'seeking' ? 'travelling' : drone.state === 'driving' ? 'hauling' : 'working';
+    rows.push(`<div class="row"><span class="cat">${WORK_CATEGORY_LABELS[drone.category]} drone</span><span>${status}</span></div>`);
+  }
+  dronesActiveEl.innerHTML = rows.length ? rows.join('') : 'No drones fabricated yet.';
+}
+
+function refreshDrones() {
+  if (dronesEl.classList.contains('hidden')) return;
+  renderDrones();
+}
+
+// ---------------------------------------------------------------- coverage plans overlay (coverageplans.js)
+// Same full-screen-overlay-with-a-toggle-button convention as every panel above. One card per
+// COVERAGE_PLAN_ORDER entry (fixed 2): a one-time Buy button while unpurchased, then a live
+// threshold readout ("N / threshold structures on fire") and a Call In button once owned, gated
+// on isCallInReady the exact same way Research's button is gated on affordableNow.
+const coverageEl = document.getElementById('coverage');
+const coverageGridEl = document.getElementById('coverage-grid');
+const coverageSubEl = document.getElementById('coverage-sub');
+
+function toggleCoveragePlansPanel(force) {
+  const show = force != null ? force : coverageEl.classList.contains('hidden');
+  coverageEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-coverage').classList.toggle('active', show);
+  if (show) renderCoveragePlans();
+}
+input.onToggleCoverage = () => toggleCoveragePlansPanel();
+input.onCloseCoverage = () => toggleCoveragePlansPanel(false);
+
+function renderCoveragePlans() {
+  coverageGridEl.innerHTML = '';
+  let ownedCount = 0;
+  for (const kind of COVERAGE_PLAN_ORDER) {
+    const def = COVERAGE_PLAN_DEFS[kind];
+    const owned = isPlanActive(world, kind);
+    if (owned) ownedCount++;
+    const ready = owned && isCallInReady(world, kind);
+    const current = callInLiveCount(world, kind);
+    const card = document.createElement('div');
+    card.className = 'node' + (owned ? (ready ? ' available' : ' done') : (world.scrap >= def.cost ? '' : ' blocked'));
+    card.dataset.planId = kind;
+
+    const discountLine = Object.entries(def.discounts).map(([k, pct]) => `${k} -${Math.round(pct * 100)}%`).join(', ');
+    const badge = !owned ? `Not purchased -- ${def.cost} scrap` : ready ? 'Call-in ready' : 'Purchased -- call-in not ready';
+
+    card.innerHTML =
+      `<div class="rname">${def.label}</div>` +
+      `<div class="badge">${badge}</div>` +
+      `<div class="desc">Discounts: ${discountLine}</div>` +
+      `<div class="desc">${def.callIn.label} -- ${def.callIn.description}</div>` +
+      `<div class="badge cost-line">${current} / ${def.callIn.threshold} ${def.callIn.thresholdNoun}</div>`;
+
+    if (!owned) {
+      const btn = document.createElement('button');
+      btn.textContent = `Buy Plan (${def.cost})`;
+      btn.disabled = world.scrap < def.cost;
+      btn.addEventListener('click', () => {
+        if (!purchaseCoveragePlan(world, kind)) { showToast('Not enough scrap for this plan'); return; }
+        showToast(`Purchased: ${def.label}`);
+        renderCoveragePlans();
+      });
+      card.appendChild(btn);
+    } else {
+      const btn = document.createElement('button');
+      btn.textContent = def.callIn.label;
+      btn.disabled = !ready;
+      btn.addEventListener('click', () => {
+        if (!triggerCallIn(world, kind)) { showToast('Call-in not ready yet'); return; }
+        showToast(`${def.callIn.label}: dispatched`);
+        renderCoveragePlans();
+      });
+      card.appendChild(btn);
+    }
+    coverageGridEl.appendChild(card);
+  }
+  coverageSubEl.textContent = `${ownedCount} / ${COVERAGE_PLAN_ORDER.length} plans purchased &middot; ${Math.round(world.scrap)} scrap on hand`;
+}
+
+/** Live progress while the overlay stays open -- same "only redraw while visible" gate as the
+ *  other refresh* functions. Full rebuild every call: only 2 cards, cheap, and the readiness gate
+ *  needs to flip a button's disabled state live as fires/downed-counts change tick to tick. */
+function refreshCoveragePlans() {
+  if (coverageEl.classList.contains('hidden')) return;
+  renderCoveragePlans();
+}
+
 // ---------------------------------------------------------------- work priorities panel
 // RimWorld Work-tab-style grid: every living citizen (row) x jobs.js's 4 non-needs WorkCategory
 // columns (Construction/Hauling/Harvesting/Animal Handling). Reached from the citizen inspector's
@@ -12091,6 +17319,56 @@ function toggleWorkPriorities(force) {
 document.getElementById('insp-workprio-btn').addEventListener('click', () => toggleWorkPriorities());
 document.getElementById('btn-workprio-close').addEventListener('click', () => toggleWorkPriorities(false));
 
+// Rank Up (ranks.js) -- single-selection only, same convention as Schedule/Restrict Area/weapon
+// tier below. canRankUp's gate is re-checked inside tryRankUp itself (not just trusted from the
+// last inspector paint), so a stale button state from a mid-tick UI refresh can't spend scrap
+// without actually clearing every requirement.
+document.getElementById('insp-rankup-btn').addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || !world.citizens.isAliveAt(sel)) return;
+  const result = tryRankUp(world.citizens, sel, world);
+  if (result.ok) showToast(`${world.citizens.name[sel]} promoted to ${result.rank.name}!`);
+  updateInspector();
+});
+
+// Draft/undraft button (draft.js) -- shares toggleDraftSelection with the Shift+D hotkey, see
+// that function's doc comment above.
+document.getElementById('insp-draft-btn').addEventListener('click', () => toggleDraftSelection());
+
+// Per-citizen Schedule override (schedule.js's ScheduleOverride) -- click-to-cycle
+// None -> Sleep -> Work -> Recreation -> None. Single-selection only (mirrors the weapon-tier
+// row and Work Priorities button, both of which also only ever act on one inspected citizen).
+const SCHEDULE_OVERRIDE_CYCLE = [ScheduleOverride.None, ScheduleOverride.Sleep, ScheduleOverride.Work, ScheduleOverride.Recreation];
+document.getElementById('insp-schedule-btn').addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const cur = world.citizens.scheduleOverride[sel];
+  const idx = SCHEDULE_OVERRIDE_CYCLE.indexOf(cur);
+  world.citizens.scheduleOverride[sel] = SCHEDULE_OVERRIDE_CYCLE[(idx + 1) % SCHEDULE_OVERRIDE_CYCLE.length];
+  updateInspector();
+});
+
+// Allowed Area restriction (RimWorld Restrict-tab style, see input.js's 'restrict-area' tool /
+// citizens.js's paintAllowedAreaCell). "Restrict Area" arms paint mode targeting whichever
+// citizen is currently selected -- input.js reads input.selectedCitizen directly when painting,
+// so this deliberately does NOT require re-selecting after entering paint mode. "Clear Area"
+// removes the whole restriction and exits paint mode if it was active.
+document.getElementById('insp-restrict-btn').addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  input.setTool(input.tool === 'restrict-area' ? null : 'restrict-area');
+  updateInspector();
+  syncToolbarHighlight();
+});
+document.getElementById('insp-restrict-clear-btn').addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  world.citizens.clearAllowedArea(sel);
+  if (input.tool === 'restrict-area') { input.setTool(null); syncToolbarHighlight(); }
+  updateInspector();
+  showToast('Area restriction cleared');
+});
+
 // Corrupt/bribable staff (security.js): fires the currently-inspected citizen if (and only if)
 // they've actually been caught -- updateInspector below is what shows/hides this button in the
 // first place, so a click here always has a real discovered-corrupt id behind it.
@@ -12102,13 +17380,64 @@ document.getElementById('insp-fire-corrupt-btn').addEventListener('click', () =>
   if (result.ok) showToast(`Fired for corruption -- +${result.reward} scrap`);
 });
 
-const WORKPRIO_CYCLE_MAX = 3; // priority tiers 1-3, plus 0 (Off) -- matches WORK_CATEGORY_FIELD's 4 categories
+// Vest purchase (world.js's buyVest / citizens.js's hasVest, siege.js's CITIZEN_VEST_ARMOR_RATING)
+// -- the citizen-side counterpart to the manual weapon-tier row above, but a one-shot buy rather
+// than a togglable tier since there's only one Vest, not a ladder. updateInspector below hides
+// this once a citizen already has one.
+document.getElementById('insp-buy-vest-btn')?.addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const citizenId = world.citizens.id[sel];
+  const result = world.buyVest(citizenId);
+  if (result.ok) { showToast('Vest equipped'); updateInspector(); }
+  else if (result.reason === 'cost') showToast('Not enough scrap');
+});
+
+// Upgraded K9 tier (security.js's upgradeDog/world.upgradeDog) -- only enabled/shown for a
+// K9Handler with a real, not-yet-upgraded dog assigned, see updateInspector's insp-upgrade-dog-btn
+// toggle below.
+document.getElementById('insp-upgrade-dog-btn')?.addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const citizenId = world.citizens.id[sel];
+  const result = world.upgradeDog(citizenId);
+  if (result.ok) { showToast('K9 upgraded'); updateInspector(); }
+  else if (result.reason === 'cost') showToast('Not enough scrap');
+});
+
+// Manual weapon-tier override buttons (security.js's StaffRoster.setManualWeapon/
+// clearManualWeapon). Delegated on the row rather than one listener per tier button -- same
+// pattern as the work-priority grid's per-cell clicks below, just a flat row instead of a grid.
+document.getElementById('insp-weapon-row')?.addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const citizenId = world.citizens.id[sel];
+  if (btn.id === 'insp-weapon-auto-btn') {
+    world.roster.clearManualWeapon(citizenId);
+  } else if (btn.dataset.tier) {
+    world.roster.setManualWeapon(citizenId, btn.dataset.tier);
+  } else {
+    return;
+  }
+  updateInspector();
+});
+
+const WORKPRIO_CYCLE_MAX = 4; // priority tiers 1-4 (RimWorld's real Work-tab granularity), plus 0 (Off)
 
 /** Full rebuild of the citizen x category grid. Only ever called while the overlay is open
  *  (toggleWorkPriorities/the per-cell click handler below), so a rebuild-on-every-click is cheap
- *  enough -- same "no diffing needed, small enough list" reasoning as renderResearch. */
+ *  enough -- same "no diffing needed, small enough list" reasoning as renderResearch. Highlights
+ *  and scrolls to whichever citizen was actually selected/inspected when the panel was opened
+ *  (see toggleWorkPriorities), so the panel visibly reads as "this specific colonist's priorities"
+ *  rather than a disconnected colony-wide report -- per the user's explicit complaint that this
+ *  didn't feel tied to the selected citizen. */
 function renderWorkPriorities() {
   const c = world.citizens;
+  const highlightIdx = (input.selectedCitizens && input.selectedCitizens.length === 1)
+    ? input.selectedCitizens[0]
+    : (input.selectedCitizen >= 0 ? input.selectedCitizen : -1);
   workprioTableEl.innerHTML = '';
   const thead = document.createElement('thead');
   thead.innerHTML = '<tr><th>Citizen</th>' +
@@ -12122,6 +17451,7 @@ function renderWorkPriorities() {
     if (!c.isAliveAt(i)) continue;
     anyRows = true;
     const tr = document.createElement('tr');
+    if (i === highlightIdx) tr.className = 'wp-row-selected';
     const role = world.roster.isStaff(c.id[i]) ? world.roster.kindOf(c.id[i]) : 'Citizen';
     const nameTd = document.createElement('td');
     nameTd.innerHTML = `<div class="wp-name">${c.name[i]}</div><div class="wp-role">${role}</div>`;
@@ -12180,6 +17510,10 @@ function renderWorkPriorities() {
     empty.className = 'wp-empty';
     empty.textContent = 'No living citizens.';
     workprioTableEl.appendChild(empty);
+  }
+  if (highlightIdx >= 0) {
+    const selectedRow = workprioTableEl.querySelector('.wp-row-selected');
+    if (selectedRow) selectedRow.scrollIntoView({ block: 'center' });
   }
 }
 
@@ -12310,6 +17644,7 @@ function renderWorldMap() {
     `${held} of ${worldMap.regions.length} regions held · currently running ${active.name} ` +
     `(${Math.round(active.control)}% control)` +
     (shipping > 0 ? ` · ${shipping} allied settlement${shipping > 1 ? 's' : ''} shipping scrap in` : '');
+  refreshRangeRow();
 }
 
 /** Move the operation: bank what we've got here, then stand up a FRESH SimWorld in the new
@@ -12317,7 +17652,15 @@ function renderWorldMap() {
  *  relocating, not managing two live sims. */
 function expandTo(regionId) {
   worldMap.bankActive(world);
-  if (!worldMap.setActive(regionId)) { showToast('Cannot expand there'); return; }
+  // setActive() charges EXPANSION_FUEL_COST scrap against the settlement being left (mirrors a
+  // real gravship needing chemfuel already banked before it'll launch) and refuses the move if
+  // it's short -- give the player the real reason rather than a generic failure toast.
+  if (!worldMap.isExpandable(regionId)) { showToast('Cannot expand there'); return; }
+  if (world.scrap < EXPANSION_FUEL_COST) {
+    showToast(`Not enough scrap to launch the expedition (need ${EXPANSION_FUEL_COST})`);
+    return;
+  }
+  if (!worldMap.setActive(regionId, world)) { showToast('Cannot expand there'); return; }
   const seed = Math.floor(Math.random() * 0xffffffff);
   // Same settings the player picked for this campaign (map size, aggression, storyteller) --
   // only the seed and the region change. startGame() does the camera/selection/log resets.
@@ -12325,6 +17668,20 @@ function expandTo(regionId) {
   world.milestoneLog.push({ tick: 0, text: `Expedition established in ${worldMap.active.name}` });
   showToast(`Expanded to ${worldMap.active.name}`);
   console.log(`[WorldMap] Expanded to ${worldMap.active.name} (region ${regionId}), seed ${seed}.`);
+  // Apply the arrival mishap (if any) rolled by setActive() to the FRESH settlement -- worldmap.js
+  // can't do this itself (no world.js import, avoids a circular import), so the caller applies it
+  // once the new world actually exists. See worldmap.js's setActive()/rollArrivalMishap() comments.
+  const mishap = worldMap.pendingMishap;
+  worldMap.pendingMishap = null;
+  if (mishap?.kind === 'scrapLoss') {
+    world.scrap = Math.max(0, world.scrap - mishap.amount);
+    world.milestoneLog.push({ tick: 0, text: `Rough landing: lost ${mishap.amount} scrap in transit` });
+    showToast(`Mishap: lost ${mishap.amount} scrap on arrival`);
+  } else if (mishap?.kind === 'debuff') {
+    world.arrivalMishapTicks = mishap.ticks;
+    world.milestoneLog.push({ tick: 0, text: 'Rough landing: crew shaken, work is slower for a while' });
+    showToast('Mishap: crew shaken, work speed reduced temporarily');
+  }
   renderWorldMap();
 }
 
@@ -12349,6 +17706,7 @@ function refreshWorldMapValues() {
         `${s.citizens} citizens · ${s.waves} waves · ${s.scrap} scrap${s.fallen ? ' · fallen' : ''}`;
     }
   }
+  refreshRangeRow();
 }
 
 window.addEventListener('keydown', (e) => {
@@ -12389,8 +17747,10 @@ const FINANCE_CATEGORIES = [
   ['harvestScrap', '⛏ Harvesting', 'income'],
   ['haulScrap', '🚚 Vehicle hauls', 'income'],
   ['recyclingScrap', '♻ Recycling Center', 'income'],
+  ['farmScrap', '🌾 Farm Plots', 'income'],
   ['conquestScrap', '🗺 Conquest supply lines', 'income'],
   ['factionScrap', '🤝 Clique demands', 'income'],
+  ['grantScrap', '📜 Charter contracts & investments', 'income'],
   ['otherScrap', '❓ Other', 'income'],
   ['buildSpend', '🔨 Construction spend', 'expense'],
 ];
@@ -12425,10 +17785,11 @@ function refreshFinance() {
 // ---------------------------------------------------------------- inspector panel
 const inspectorEl = document.getElementById('inspector');
 function updateInspector() {
-  // Marquee multi-select (see input.js InputController._onUp) has no per-citizen command system
-  // to hook into -- there's no "move here"/"build this" order in this game, citizens are fully
-  // autonomous via jobs.js's priority system. So a 2+ selection is honestly just an aggregate
-  // info view (group averages + a name list), not a fake commands UI.
+  // Marquee multi-select (see input.js InputController._onUp): still mostly an aggregate info
+  // view (group averages + a name list) rather than per-citizen detail, but draft.js's command
+  // system DOES apply group-wide here -- the draft button below drafts/undrafts the whole
+  // selection together, and a drafted multi-select's right-click move/attack orders (input.js's
+  // _tryIssueOrder) go to every drafted citizen in it at once.
   if (input.selectedCitizens && input.selectedCitizens.length > 1) {
     updateInspectorMulti(input.selectedCitizens);
     return;
@@ -12461,20 +17822,68 @@ function updateInspector() {
   }
   const statusEl = document.getElementById('insp-status');
   const isDiscoveredCorrupt = world.roster.isCorruptDiscovered(c.id[sel]);
+  const drafted = c.isDraftedAt(sel);
   if (isDiscoveredCorrupt) {
     statusEl.textContent = 'Caught diverting supplies -- fire them below for a reward';
   } else if (c.isDownedAt(sel)) {
     statusEl.textContent = 'Downed';
+  } else if (drafted) {
+    // Order-progress readout (draft.js's orderKind) -- lets the player see at a glance whether a
+    // drafted citizen is actively moving/fighting or just standing at attention awaiting an order.
+    const ok = c.orderKind[sel];
+    statusEl.textContent = ok === OrderKind.Move ? 'Drafted -- moving to order'
+      : ok === OrderKind.Attack ? 'Drafted -- engaging target'
+      : 'Drafted -- standing by (right-click a tile to move, right-click an attacker to engage)';
   } else if (c.isOnBreakAt(sel)) {
     statusEl.textContent = 'On Break (mood too low to work at full speed)';
   } else {
     statusEl.textContent = '';
   }
   document.getElementById('insp-fire-corrupt-btn').classList.toggle('hidden', !isDiscoveredCorrupt);
+  // Vest purchase button (world.js's buyVest) -- hidden once already vested, same "one-shot
+  // purchase, then disappears" convention as nothing else in this panel needing a fresh precedent.
+  const buyVestBtn = document.getElementById('insp-buy-vest-btn');
+  if (buyVestBtn) {
+    const vested = c.isVestedAt(sel);
+    buyVestBtn.classList.toggle('hidden', vested);
+    buyVestBtn.textContent = `🛡️ Buy Vest (${buildCost(world, 'vest')} scrap)`;
+  }
+  // Upgraded K9 tier -- only meaningful for a K9Handler who actually has a dog assigned (should
+  // always be true given security.js's assignDogHandler wires both sides together, but a dog
+  // could in principle be missing on an old/hand-edited save, hence the explicit find() check
+  // rather than assuming one exists). Hidden entirely once already upgraded, same one-shot-
+  // purchase convention as the Vest button above.
+  const upgradeDogBtn = document.getElementById('insp-upgrade-dog-btn');
+  if (upgradeDogBtn) {
+    const dog = role === 'K9Handler' ? world.dogs.find(d => d.ownerId === c.id[sel]) : null;
+    upgradeDogBtn.classList.toggle('hidden', !dog || dog.upgraded);
+    if (dog) upgradeDogBtn.textContent = `🐕 Upgrade K9 (${K9_UPGRADE_SCRAP_COST} scrap)`;
+  }
+  const draftBtn = document.getElementById('insp-draft-btn');
+  draftBtn.textContent = drafted ? '🎯 Undraft' : '🎯 Draft';
+  draftBtn.classList.toggle('active', drafted);
+  // Per-citizen Schedule override (schedule.js) -- button label always names the CURRENT setting
+  // (same "no separate description line" convention as the draft button above), and .active
+  // marks any real override (colors it) so a glance at the panel shows whether this citizen is
+  // pinned off the colony-wide cycle.
+  const scheduleBtn = document.getElementById('insp-schedule-btn');
+  scheduleBtn.classList.remove('hidden');
+  const scheduleVal = c.scheduleOverride[sel];
+  scheduleBtn.textContent = `🕒 Schedule: ${SCHEDULE_OVERRIDE_LABELS[scheduleVal] ?? 'Colony schedule'}`;
+  scheduleBtn.classList.toggle('active', scheduleVal !== ScheduleOverride.None);
+  // Allowed Area restriction (citizens.js's hasAllowedArea) -- "Clear Area" only shows once a
+  // restriction actually exists, and the "Restrict Area" button highlights while its paint mode
+  // is the currently-armed tool so the player can see they're mid-paint.
+  const restrictBtn = document.getElementById('insp-restrict-btn');
+  restrictBtn.parentElement?.classList.remove('hidden');
+  const hasArea = c.hasAllowedArea(sel);
+  restrictBtn.classList.toggle('active', input.tool === 'restrict-area');
+  document.getElementById('insp-restrict-clear-btn').classList.toggle('hidden', !hasArea);
   setBar('hp', c.health[sel]);
   setBar('hunger', c.hunger[sel]);
   setBar('rest', c.rest[sel]);
   setBar('social', c.social[sel]);
+  setBar('hydration', c.hydration[sel]);
   setBar('mood', c.mood[sel]);
   // Per-citizen unrest-contribution score (citizens.js's computeCitizenUnrestScore, Prison
   // Architect dynamicRep.txt-style) -- 0-100 like every other bar here, distinct from the
@@ -12484,29 +17893,108 @@ function updateInspector() {
   document.getElementById('insp-skill').textContent =
     `Combat: ${skillLevel(c.skillCombat[sel])}${PASSION_ICON[c.passionCombat[sel]]} · ` +
     `Construction: ${skillLevel(c.skillConstruction[sel])}${PASSION_ICON[c.passionConstruction[sel]]}`;
-  document.getElementById('insp-room').textContent = roomStatLine(c.x[sel], c.y[sel]);
+  updateInspectorRank(sel);
+  updateInspectorWeapon(c.id[sel], role);
+  updateInspectorRoom(c.x[sel], c.y[sel]);
+}
+
+// Citizen Rank (ranks.js). Shows the current rank name + accumulated skill (skillConstruction +
+// skillCombat, ranks.js's combined "favor" stat) against the next tier's requirement, and enables
+// the Rank Up button only when canRankUp() clears every gate (skill threshold, scrap cost, and --
+// from tier 3 up -- a room-impressiveness "veteran's quarters" requirement). The button's title
+// always names the specific unmet requirement rather than just disabling silently, so a player who
+// hovers a grayed-out button can tell what's actually missing.
+function updateInspectorRank(sel) {
+  const c = world.citizens;
+  const rank = rankOf(c, sel);
+  const rankLineEl = document.getElementById('insp-rank-line');
+  const rankBtn = document.getElementById('insp-rankup-btn');
+  const check = canRankUp(c, sel, world);
+  const isMax = c.citizenRank[sel] >= RANKS.length - 1;
+  rankLineEl.textContent = isMax
+    ? `Rank: ${rank.name} (maximum)`
+    : `Rank: ${rank.name} -> ${RANKS[c.citizenRank[sel] + 1].name}`;
+  rankBtn.classList.toggle('hidden', isMax);
+  if (!isMax) {
+    rankBtn.disabled = !check.ok;
+    rankBtn.title = check.ok
+      ? `Rank up to ${check.rank.name} for ${check.rank.scrapCost} scrap -- +${Math.round((check.rank.workSpeedMult - 1) * 100)}% work speed, +${Math.round((check.rank.healthMult - 1) * 100)}% health.`
+      : `Rank Up: ${check.reason}`;
+  }
+}
+
+// Manual weapon-tier override (RimWorld-style "player picks this one's gear" -- security.js's
+// StaffRoster.setManualWeapon/clearManualWeapon, tickArmoryIssuance honors it every tick). Only
+// shown for Guard/Sniper, the only roles WEAPON_TIERS actually affects (siege.js's
+// tickStaffCombat). A button per tier, highlighting whichever is currently equipped; clicking a
+// tier the armory doesn't stock yet still sets the override (queued -- see tickArmoryIssuance's
+// doc comment) and this readout shows "(queued)" until enough Armories exist to actually issue it.
+const insWeaponRow = document.getElementById('insp-weapon-row');
+const insWeaponButtons = insWeaponRow ? Array.from(insWeaponRow.querySelectorAll('button[data-tier]')) : [];
+function updateInspectorWeapon(citizenId, role) {
+  if (!insWeaponRow) return;
+  if (role !== 'Guard' && role !== 'Sniper') {
+    insWeaponRow.classList.add('hidden');
+    return;
+  }
+  insWeaponRow.classList.remove('hidden');
+  const equipped = world.roster.weaponOf(citizenId);
+  const manual = world.roster.manualWeaponOf(citizenId);
+  const pending = world.roster.isManualWeaponPending(citizenId);
+  for (const btn of insWeaponButtons) {
+    const tier = btn.dataset.tier;
+    const isEquipped = tier === equipped;
+    const isRequested = manual != null && tier === manual;
+    btn.classList.toggle('active', isRequested ? true : (manual == null && isEquipped));
+    btn.classList.toggle('queued', isRequested && pending);
+    btn.textContent = (isRequested && pending) ? `${WEAPON_TIERS[tier].label} (queued)` : WEAPON_TIERS[tier].label;
+  }
+  const autoBtn = document.getElementById('insp-weapon-auto-btn');
+  if (autoBtn) autoBtn.classList.toggle('active', manual == null);
 }
 
 // RimWorld-style flavor labels (rooms.js's impressivenessLabel/beautyLabel/cleanlinessLabel) next
 // to the existing raw .beauty/.cleanliness/.impressiveness numbers -- cosmetic text only, the
-// numbers stay so nothing is lost, this just makes them legible at a glance the way RimWorld's
-// own room-inspect tooltip does. Reused by both the single-citizen inspector above (whichever
-// room the selected citizen currently stands in) and nothing else yet -- there's no separate
-// tile/structure inspector in this game to hook a second call site into.
-function roomStatLine(x, y) {
+// numbers stay so nothing is lost. Cleanliness and Impressiveness are genuine clamp01'd 0-1
+// values (see rooms.js's computeRoomStats doc comment) so they get real inline bar-fills like
+// every other 0-1 stat in this panel; Beauty is a raw unbounded sum (same doc comment, roughly
+// -6..+15+), not a 0-1 range, so it stays a number+label line rather than a misleading bar.
+// Reused by both the single-citizen inspector above (whichever room the selected citizen
+// currently stands in) and nothing else yet -- there's no separate tile/structure inspector in
+// this game to hook a second call site into.
+function updateInspectorRoom(x, y) {
+  const roleEl = document.getElementById('insp-room-role');
+  const cleanRow = document.getElementById('insp-clean-row');
+  const impressRow = document.getElementById('insp-impress-row');
+  const beautyEl = document.getElementById('insp-beauty');
   const room = roomContaining(world.rooms, world.grid, x, y);
-  if (!room) return 'Not in an enclosed room';
+  if (!room) {
+    roleEl.textContent = 'Not in an enclosed room';
+    cleanRow.classList.add('hidden');
+    impressRow.classList.add('hidden');
+    beautyEl.textContent = '';
+    return;
+  }
   // world.js runs computeRoomStats() BEFORE the wall-signature check that (re)builds this.rooms
   // via detectRooms -- so a room detected fresh this very tick hasn't had its .beauty/.cleanliness/
   // .impressiveness populated yet and won't until next tick. Rare (one tick right after a wall
   // completes an enclosure) but real, so this guards rather than throwing on undefined.toFixed().
   if (room.beauty == null || room.cleanliness == null || room.impressiveness == null) {
-    return 'Room stats settling...';
+    roleEl.textContent = 'Room stats settling...';
+    cleanRow.classList.add('hidden');
+    impressRow.classList.add('hidden');
+    beautyEl.textContent = '';
+    return;
   }
   const roleLabel = ROOM_ROLE_LABEL[room.role] ?? 'Unroofed Area';
-  return `${roleLabel} · Beauty ${room.beauty.toFixed(1)} (${beautyLabel(room.beauty)}) · ` +
-    `Cleanliness ${room.cleanliness.toFixed(2)} (${cleanlinessLabel(room.cleanliness)}) · ` +
-    `Impressiveness ${room.impressiveness.toFixed(2)} (${impressivenessLabel(room.impressiveness)})`;
+  roleEl.textContent = roleLabel;
+  cleanRow.classList.remove('hidden');
+  impressRow.classList.remove('hidden');
+  setBar('clean', room.cleanliness);
+  setBar('impress', room.impressiveness);
+  document.getElementById('insp-clean-pct').textContent = `${cleanlinessLabel(room.cleanliness)} (${Math.round(room.cleanliness * 100)}%)`;
+  document.getElementById('insp-impress-pct').textContent = `${impressivenessLabel(room.impressiveness)} (${Math.round(room.impressiveness * 100)}%)`;
+  beautyEl.textContent = `Beauty ${room.beauty.toFixed(1)} (${beautyLabel(room.beauty)})`;
 }
 
 function updateInspectorMulti(indices) {
@@ -12522,17 +18010,43 @@ function updateInspectorMulti(indices) {
   const names = alive.slice(0, 5).map(i => c.name[i]).join(', ');
   document.getElementById('insp-role').textContent = names + (alive.length > 5 ? `, +${alive.length - 5} more` : '');
   document.getElementById('insp-backstory').textContent = '';
-  document.getElementById('insp-status').textContent = 'Group averages below';
+  const draftedCount = alive.filter(i => c.isDraftedAt(i)).length;
+  document.getElementById('insp-status').textContent = draftedCount > 0
+    ? `${draftedCount}/${alive.length} drafted -- Group averages below`
+    : 'Group averages below';
   document.getElementById('insp-fire-corrupt-btn').classList.add('hidden'); // no per-citizen action in a multi-select, see this function's own header comment above
+  document.getElementById('insp-buy-vest-btn')?.classList.add('hidden'); // same per-citizen-only reasoning as the corrupt-fire button above
+  document.getElementById('insp-weapon-row')?.classList.add('hidden'); // per-citizen weapon override, same reasoning as the corrupt-fire button above
+  // Schedule override / Allowed Area are both single-citizen concepts (one override value, one
+  // area mask per citizen) -- hidden in a multi-select rather than guessing which citizen a click
+  // should act on, same reasoning as the weapon-tier row above.
+  document.getElementById('insp-schedule-btn')?.classList.add('hidden');
+  document.getElementById('insp-restrict-btn')?.parentElement?.classList.add('hidden');
+  // Draft button in a multi-select: same "unify to majority action" toggle as toggleDraftSelection
+  // itself -- shows Draft (about to draft everyone not yet drafted) unless the WHOLE selection is
+  // already drafted, in which case it shows Undraft.
+  const allDrafted = alive.length > 0 && draftedCount === alive.length;
+  const draftBtnMulti = document.getElementById('insp-draft-btn');
+  draftBtnMulti.textContent = allDrafted ? '🎯 Undraft' : '🎯 Draft';
+  draftBtnMulti.classList.toggle('active', allDrafted);
   const avg = (arr) => alive.reduce((s, i) => s + arr[i], 0) / alive.length;
   setBar('hp', avg(c.health));
   setBar('hunger', avg(c.hunger));
   setBar('rest', avg(c.rest));
   setBar('social', avg(c.social));
+  setBar('hydration', avg(c.hydration));
   setBar('mood', avg(c.mood));
   setBar('unrest', alive.reduce((s, i) => s + computeCitizenUnrestScore(c, i, world), 0) / alive.length / 100);
   document.getElementById('insp-skill').textContent = '';
-  document.getElementById('insp-room').textContent = '';
+  // Rank Up is a single-citizen action (one rank-up target, one scrap spend) -- hidden in a
+  // multi-select rather than guessing which citizen a click should act on, same reasoning as the
+  // weapon-tier row / Schedule / Restrict Area controls above.
+  document.getElementById('insp-rank-line').textContent = '';
+  document.getElementById('insp-rankup-btn').classList.add('hidden');
+  document.getElementById('insp-room-role').textContent = 'Group averages -- select one citizen for room detail';
+  document.getElementById('insp-clean-row').classList.add('hidden');
+  document.getElementById('insp-impress-row').classList.add('hidden');
+  document.getElementById('insp-beauty').textContent = '';
 }
 
 // Raw skill floats are unbounded accrual values (see jobs.js/siege.js gain rates), not
@@ -12592,9 +18106,9 @@ function updateTopbar() {
     unrestEl.classList.toggle('danger', world.unrestActive);
   }
   const night = isNight(world.timeOfDay);
-  document.getElementById('stat-daynight-icon').textContent = night ? '🌙' : '☀';
+  setTopbarIcon('stat-daynight-icon', night ? 'night' : 'day', night ? 'Night' : 'Day');
   document.getElementById('stat-daynight').textContent = (night ? 'Night ' : 'Day ') + Math.round(world.timeOfDay * 100) + '%';
-  document.getElementById('stat-weather-icon').textContent = WEATHER_ICON[world.weather] || '🌤';
+  setTopbarIcon('stat-weather-icon', WEATHER_ICON[world.weather] || 'weatherClear', world.weather);
   document.getElementById('stat-weather').textContent = world.weather;
   pauseBtn.textContent = world.paused ? '▶ Resume' : '⏸ Pause';
   pauseBtn.classList.toggle('active', world.paused);
@@ -12713,7 +18227,7 @@ function showTitleScreen() {
   titleMainEl.classList.remove('hidden');
   titleSetupEl.classList.add('hidden');
   // Any overlay left open by the game being torn down would otherwise reappear on the next start.
-  for (const id of ['worldmap', 'finance', 'research', 'workprio', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
+  for (const id of ['worldmap', 'finance', 'research', 'factions', 'programs', 'grants', 'drones', 'workprio', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
     document.getElementById(id).classList.add('hidden');
   }
   // Quitting to title mid-tour shouldn't burn the first-run flag -- the player hasn't actually
@@ -12749,30 +18263,120 @@ const setupSeedEl = document.getElementById('setup-seed');
 let setupAggression = AggressionPreset.Standard;
 let setupStoryteller = 'Cassandra';
 
-function buildCards(containerId, cards, getSelected, onSelect) {
+/** Radio-list rendering for the left-column setup options (aggression/storyteller): a vertical
+ *  list of plain rows (dot + name only, no per-row description -- the SEA:R-style pattern this
+ *  screen is following shows exactly one description line, next to whichever option is currently
+ *  selected, not one per option). `descId`'s element is kept in sync with the selected entry's
+ *  third tuple field on both initial render and every click. */
+function buildRadioList(containerId, descId, cards, getSelected, onSelect, onChange) {
   const el = document.getElementById(containerId);
+  const descEl = document.getElementById(descId);
   el.innerHTML = '';
+  const syncDesc = () => {
+    const sel = cards.find(([value]) => value === getSelected());
+    descEl.textContent = sel ? sel[2] : '';
+  };
   for (const [value, name, desc] of cards) {
-    const card = document.createElement('div');
-    card.className = 'card' + (value === getSelected() ? ' selected' : '');
-    card.dataset.value = value;
-    card.innerHTML = `<div class="cname">${name}</div><div class="cdesc">${desc}</div>`;
-    card.addEventListener('click', () => {
+    const row = document.createElement('div');
+    row.className = 'radio-option' + (value === getSelected() ? ' selected' : '');
+    row.dataset.value = value;
+    row.innerHTML = `<span class="dot"></span><span class="rname">${name}</span>`;
+    row.addEventListener('click', () => {
       onSelect(value);
       for (const sib of el.children) sib.classList.toggle('selected', sib.dataset.value === value);
+      syncDesc();
+      if (onChange) onChange();
     });
-    el.appendChild(card);
+    el.appendChild(row);
   }
+  syncDesc();
 }
 
 function randomSeed() { return Math.floor(Math.random() * 0xffffffff); }
 
+/** Plain-English summary of the current width/height pair -- this project's own voice, not
+ *  copied from anywhere. Three rough bands (small/mid/large) plus the exact numbers, since the
+ *  two sliders no longer carry their own per-field description now that Map Size is one field. */
+function mapSizeDescription(width, height) {
+  const avg = (width + height) / 2;
+  const band = avg <= 60 ? 'A tight, easy-to-defend footprint -- short walks, short walls, less ground to lose.'
+    : avg <= 80 ? 'A mid-sized settlement -- plenty of room to sprawl without turning defense into a full perimeter project.'
+    : 'A sprawling settlement -- lots of room to build, but a lot more perimeter for attackers to probe.';
+  return `${width} x ${height}. ${band}`;
+}
+
 function syncSetupLabels() {
-  document.getElementById('setup-width-val').textContent = setupWidthEl.value;
-  document.getElementById('setup-height-val').textContent = setupHeightEl.value;
+  document.getElementById('setup-mapsize-val').textContent = `${setupWidthEl.value} x ${setupHeightEl.value}`;
+  document.getElementById('setup-mapsize-desc').textContent =
+    mapSizeDescription(Number(setupWidthEl.value), Number(setupHeightEl.value));
   document.getElementById('setup-citizens-val').textContent = setupCitizensEl.value;
 }
-for (const el of [setupWidthEl, setupHeightEl, setupCitizensEl]) el.addEventListener('input', syncSetupLabels);
+for (const el of [setupWidthEl, setupHeightEl, setupCitizensEl]) {
+  el.addEventListener('input', () => { syncSetupLabels(); drawSetupPreview(); });
+}
+
+// ---- Setup-screen preview (right column) ----------------------------------------------------
+// Not a real terrain render (that's `render.js`'s job once a SimWorld exists) -- a lightweight,
+// seeded, purely decorative sketch so the seed field isn't just a blind number. Uses the exact
+// same seeded RNG (`makeRng`, core.js) the real world construction uses, so re-picking a seed here
+// visibly changes the sketch the same way it'll visibly change the real settlement. Aspect ratio
+// follows the current width/height, and the citizen-count dial changes how many "starting camp"
+// dots cluster at the center, so all three right/left-column controls are reflected in one place.
+const setupPreviewEl = document.getElementById('setup-preview');
+const setupPreviewCtx = setupPreviewEl.getContext('2d');
+
+function drawSetupPreview() {
+  const w = setupPreviewEl.width, h = setupPreviewEl.height;
+  const ctx = setupPreviewCtx;
+  const mapW = Number(setupWidthEl.value) || 64;
+  const mapH = Number(setupHeightEl.value) || 64;
+  const typedSeed = Number.parseInt(setupSeedEl.value, 10);
+  const seed = Number.isFinite(typedSeed) ? (typedSeed >>> 0) : 0;
+  const rng = makeRng(seed);
+
+  ctx.clearRect(0, 0, w, h);
+  ctx.fillStyle = '#20301f';
+  ctx.fillRect(0, 0, w, h);
+
+  // Playable rect scaled to the map's aspect ratio, centered in the canvas.
+  const margin = 8;
+  const availW = w - margin * 2, availH = h - margin * 2;
+  const aspect = mapW / mapH;
+  let rectW = availW, rectH = availW / aspect;
+  if (rectH > availH) { rectH = availH; rectW = availH * aspect; }
+  const rx = (w - rectW) / 2, ry = (h - rectH) / 2;
+  ctx.fillStyle = '#2c3d28';
+  ctx.fillRect(rx, ry, rectW, rectH);
+  ctx.strokeStyle = '#4a5c40';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(rx + 0.5, ry + 0.5, rectW - 1, rectH - 1);
+
+  // Scattered scrap-node-flavored dots -- count and placement both come from the seed, echoing
+  // resources.js's ResourceNode scatter without duplicating its (much heavier) real logic.
+  const nodeCount = 10 + rngInt(rng, 0, 6);
+  ctx.fillStyle = '#8a7550';
+  for (let i = 0; i < nodeCount; i++) {
+    const px = rx + rngInt(rng, 2, Math.max(3, rectW - 2));
+    const py = ry + rngInt(rng, 2, Math.max(3, rectH - 2));
+    ctx.beginPath();
+    ctx.arc(px, py, 1.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  // A small starting-camp cluster near the center, sized by the starting-citizen count.
+  const citizens = Number(setupCitizensEl.value) || 24;
+  const dotCount = Math.round(citizens / 2);
+  const cx = rx + rectW / 2, cy = ry + rectH / 2;
+  ctx.fillStyle = '#e8c15a';
+  for (let i = 0; i < dotCount; i++) {
+    const ang = rng() * Math.PI * 2;
+    const dist = rng() * Math.min(rectW, rectH) * 0.16;
+    ctx.beginPath();
+    ctx.arc(cx + Math.cos(ang) * dist, cy + Math.sin(ang) * dist, 1.3, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+setupSeedEl.addEventListener('input', drawSetupPreview);
 
 /** Read the form into a settings object, sanitising anything the player typed. A non-numeric or
  *  empty seed falls back to a fresh random one rather than producing NaN. */
@@ -12847,8 +18451,11 @@ function showSetupScreen() {
   titleSetupEl.classList.remove('hidden');
   setupSeedEl.value = String(randomSeed()); // fresh random seed every time the form is opened
   syncSetupLabels();
-  buildCards('setup-aggression', AGGRESSION_CARDS, () => setupAggression, (v) => { setupAggression = v; });
-  buildCards('setup-storyteller', STORYTELLER_CARDS, () => setupStoryteller, (v) => { setupStoryteller = v; });
+  buildRadioList('setup-aggression', 'setup-aggression-desc', AGGRESSION_CARDS,
+    () => setupAggression, (v) => { setupAggression = v; });
+  buildRadioList('setup-storyteller', 'setup-storyteller-desc', STORYTELLER_CARDS,
+    () => setupStoryteller, (v) => { setupStoryteller = v; });
+  drawSetupPreview();
 }
 
 document.getElementById('btn-title-new').addEventListener('click', () => showSetupScreen());
@@ -12921,6 +18528,20 @@ document.getElementById('btn-setup-back').addEventListener('click', () => {
 });
 document.getElementById('btn-setup-randomize').addEventListener('click', () => {
   setupSeedEl.value = String(randomSeed());
+  drawSetupPreview();
+});
+// Prev/next "browse" arrows next to the preview thumbnail -- SEA:R's map-picker interaction
+// pattern (arrows step through candidate maps), adopted here as stepping the seed by 1 so the
+// player can nudge to a neighboring layout without retyping/rerolling the whole number.
+document.getElementById('btn-setup-prev-seed').addEventListener('click', () => {
+  const cur = Number.parseInt(setupSeedEl.value, 10);
+  setupSeedEl.value = String(((Number.isFinite(cur) ? cur : 0) - 1) >>> 0);
+  drawSetupPreview();
+});
+document.getElementById('btn-setup-next-seed').addEventListener('click', () => {
+  const cur = Number.parseInt(setupSeedEl.value, 10);
+  setupSeedEl.value = String(((Number.isFinite(cur) ? cur : 0) + 1) >>> 0);
+  drawSetupPreview();
 });
 document.getElementById('btn-begin').addEventListener('click', () => beginSettlement(readSetupForm()));
 
@@ -12952,6 +18573,9 @@ function frame() {
   refreshFinance();
   refreshFactions();
   refreshPrograms();
+  refreshCoveragePlans();
+  refreshGrants();
+  refreshDrones();
   updateGrading();
   syncPauseMenu();
 

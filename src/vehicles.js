@@ -3,6 +3,7 @@
 // garage (blueprint, same construction pipeline as everything else) and then a citizen has to
 // drive it. An undriven truck just sits parked at its garage.
 import { isPowered } from './siege.js';
+import { roomContaining, RoomRole } from './rooms.js';
 
 const VEHICLE_SPEED = 0.11;
 const GARBAGE_BONUS_MIN = 15, GARBAGE_BONUS_MAX = 40;
@@ -30,6 +31,13 @@ export const FUEL_TYPES = Object.freeze({
 export const DEFAULT_FUEL_TYPE = 'gas';
 const ETHANOL_PENALTY_TICKS = 150; // ~15s at the 10Hz tick rate -- Food zone refill roughly halved meanwhile
 const UNPOWERED_ELECTRIC_WORK_MULT = 2.5; // an electric truck with no generator feeding its garage crawls
+// Storage room hook (rooms.js RoomRole.Storage, PA full prefab/object catalog): a cheap, not-
+// forced bonus -- a garage sited so its own tile falls inside a validated Storage room (a Storage
+// zone + at least 1 shelf) shaves a little off every haul's work phase, representing organized
+// staging/shelving cutting load/unload time. Deliberately small (15%, not a strict-upgrade-sized
+// number) since this is a "nice to have if you happen to zone your garage that way" bonus, not
+// something the player is expected to chase.
+const STORAGE_ROOM_WORK_MULT = 0.85;
 
 // Garage build-toolbar kinds are 'garage_<recycling|garbage>_<fuel>' (plus the original bare
 // 'garage_recycling'/'garage_garbage' kept working as a 'gas' default for save-compat and for
@@ -61,10 +69,14 @@ export function spawnParkedVehicle(world, kind, x, y, fuelType = DEFAULT_FUEL_TY
   world.vehicles.push(new Vehicle(kind, x, y, fuelType));
 }
 
-export function findUndrivenVehicle(vehicles, x, y) {
+// isAllowed: optional (x, y) -> bool predicate (jobs.js's per-citizen Allowed Area check, see
+// citizens.js's isInAllowedArea) -- omitted for every pre-existing call site, byte-for-byte the
+// old behavior.
+export function findUndrivenVehicle(vehicles, x, y, isAllowed = null) {
   let best = null, bestDist = Infinity;
   for (const v of vehicles) {
     if (v.driverId != null || v.phase !== 'parked') continue;
+    if (isAllowed && !isAllowed(v.x, v.y)) continue;
     const d = Math.hypot(v.x - x, v.y - y);
     if (d < bestDist) { bestDist = d; best = v; }
   }
@@ -104,8 +116,17 @@ export function tickVehicles(world) {
         // Electric's "energy-hungry" bite: without a generator actually feeding the garage,
         // the haul takes far longer -- the same connected-power-graph check turrets use, not a
         // fake stat.
-        v.workTimer = (fuel.requiresPower && !isPowered(world.structures, v.garageX, v.garageY))
+        let workTimer = (fuel.requiresPower && !isPowered(world.structures, v.garageX, v.garageY))
           ? BASE_WORK_TIMER * UNPOWERED_ELECTRIC_WORK_MULT : BASE_WORK_TIMER;
+        // Storage room hook (see STORAGE_ROOM_WORK_MULT doc comment above) -- checked off the
+        // garage's own tile, not the truck's current position, since a garage is a fixed
+        // structure and this is meant to reward *siting* the garage well, not wherever the truck
+        // happens to be mid-haul.
+        if (world.rooms && world.grid) {
+          const garageRoom = roomContaining(world.rooms, world.grid, v.garageX, v.garageY);
+          if (garageRoom && garageRoom.role === RoomRole.Storage && garageRoom.roleValid) workTimer *= STORAGE_ROOM_WORK_MULT;
+        }
+        v.workTimer = workTimer;
       }
       else { v.x += (dx / dist) * VEHICLE_SPEED; v.y += (dy / dist) * VEHICLE_SPEED; }
       continue;

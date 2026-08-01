@@ -3,6 +3,20 @@
 import { ZoneKind } from './zones.js';
 import { BUILD_COST, spend, canAfford } from './economy.js';
 import { isToolUnlocked, researchNodeForTool } from './research.js';
+import { nearestAliveAttacker } from './siege.js';
+import { issueMoveOrder, issueAttackOrder } from './draft.js';
+import { forceJob, ForceJobKind, pickClosestUndraftedCitizen } from './forcejob.js';
+import { roomContaining } from './rooms.js';
+import { MESS_CLEAN_THRESHOLD } from './jobs.js';
+
+// Draft/undraft order-issuing (draft.js): right-click auto-detects move-vs-attack by what's under
+// the cursor -- an attacker within this pick radius (world units, same ballpark as _pickCitizen's
+// own 0.8-unit citizen-pick radius below) means "attack this", anything else means "move here".
+const ORDER_ATTACK_PICK_RADIUS = 0.9;
+// Right-click-drag is already used for camera pan (see _onDown/_onMove below); a right-click-and-
+// release-WITHOUT-drag is the separate "issue an order" gesture. Distinguished by total on-screen
+// movement (pixels) between right-mousedown and right-mouseup staying under this threshold.
+const RIGHT_CLICK_ORDER_THRESHOLD_PX = 6;
 
 export const TOOLS = [
   { key: '0', tool: null, label: 'Select', cost: null },
@@ -72,6 +86,52 @@ export const TOOLS = [
   // Rat Trap (rats.js's real Prison Architect infestation countermeasure) -- ';' just claimed the
   // last easy punctuation key, "'" is the next free one.
   { key: "'", tool: 'rat_trap', label: 'Rat Trap', cost: BUILD_COST.rat_trap },
+  // Restrict Area (RimWorld Restrict-tab style, see citizens.js's paintAllowedAreaMask/
+  // isInAllowedArea and jobs.js's per-citizen allowedCheck): paints which cells the CURRENTLY
+  // SELECTED citizen's autonomous pathing/job-seeking is confined to -- not a normal buildable
+  // (cost: null, same as the zone tools), and _place() below special-cases it to write into
+  // that one citizen's mask instead of the shared world.zones grid. "'" just claimed the last
+  // easy punctuation key, ',' is the next free one.
+  { key: ',', tool: 'restrict-area', label: 'Restrict Area (paints for the selected citizen)', cost: null },
+  // Storage/Medical/Command room roles (rooms.js RoomRole.Storage/Medical/Command, PA full
+  // prefab/object catalog): three new cheap zone+furniture room roles, same "zone + minimum
+  // furniture" pattern as Bedroom/Dining/Recreation/Training. Every easy single-keypress key is
+  // claimed above -- '.', '/', and '\\' are the last free punctuation keys.
+  { key: '.', tool: 'zone-storage', label: 'Storage Zone', cost: null },
+  { key: '/', tool: 'zone-medical', label: 'Medical Zone', cost: null },
+  { key: '\\', tool: 'zone-command', label: 'Command Zone', cost: null },
+  // '=' and '-' are already claimed by the speed-up/speed-down hotkeys (see _onKey below, checked
+  // AFTER the TOOL_KEYS table so binding them here would silently break speed control) -- '`' and
+  // shift-1 ('!') are the last free keys.
+  { key: '`', tool: 'shelf', label: 'Shelf', cost: BUILD_COST.shelf },
+  { key: '!', tool: 'medical_bed', label: 'Medical Bed', cost: BUILD_COST.medical_bed },
+  // Stabilizer Beacon (anomaly.js's new colony-wide pressure meter, this pass's "real in-game
+  // response" buildable) -- every unshifted single-keypress key is claimed above; '@' (shift+2)
+  // is the next free one.
+  { key: '@', tool: 'stabilizer', label: 'Stabilizer Beacon', cost: BUILD_COST.stabilizer },
+  // Shrine (RimWorld Ideology DLC's real altar buildable, rooms.js's BEAUTY_BY_KIND.shrine): a
+  // single-tier, beauty-only passive building -- every unshifted/shift-digit key is claimed
+  // above, '#' (shift+3) is the next free one.
+  { key: '#', tool: 'shrine', label: 'Shrine', cost: BUILD_COST.shrine },
+  // Lightning Rod (weather.js's Lightning Storm calamity mitigation item, real Prison Architect
+  // calamity_settings.txt buildable) -- every unshifted/shift-digit key up through '#' is claimed
+  // above, '$' (shift+4) is the next free one.
+  { key: '$', tool: 'lightning_rod', label: 'Lightning Rod', cost: BUILD_COST.lightning_rod },
+  // Fabrication Bay (drones.js -- RimWorld Biotech's mech-companion labor drone): unlocks drone
+  // capacity, same "a building unlocks capacity" pattern as Armory -- every unshifted/shift-digit
+  // key up through '$' is claimed above, '%' (shift+5) is the next free one.
+  { key: '%', tool: 'fabrication_bay', label: 'Fabrication Bay', cost: BUILD_COST.fabrication_bay },
+  // Gymnasium room role (rooms.js RoomRole.Gymnasium, PA needs.txt Exercise need): same
+  // "zone + minimum furniture" pattern as Storage/Medical/Command above -- Fitness Station is the
+  // ONE new buildable (economy.js's BUILD_COST.fitness_station), standing in for PA's whole real
+  // gym-equipment catalog. Every unshifted/shift-digit key up through '%' is claimed above, '^'
+  // (shift+6) and '&' (shift+7) are the next free ones.
+  { key: '^', tool: 'zone-gymnasium', label: 'Gymnasium Zone', cost: null },
+  { key: '&', tool: 'fitness_station', label: 'Fitness Station', cost: BUILD_COST.fitness_station },
+  // Farm Plot (research.js's Agronomy node, jobs.js's Farming job): a renewable citizen-tended
+  // producer, distinct from the resource-node scrap-harvest loop. Every unshifted/shift-digit key
+  // up through '&' is claimed above, '*' (shift+8) is the next free one.
+  { key: '*', tool: 'farm_plot', label: 'Farm Plot', cost: BUILD_COST.farm_plot },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -97,6 +157,11 @@ export class InputController {
     this.marqueeActive = false;
     this.marqueeStartWorldX = 0; this.marqueeStartWorldY = 0;
     this.marqueeEndWorldX = 0; this.marqueeEndWorldY = 0;
+
+    // Right-click order gesture (draft.js): tracks total on-screen movement since a right-
+    // mousedown so _onUp can tell an order-issuing click apart from a camera-pan drag -- see
+    // RIGHT_CLICK_ORDER_THRESHOLD_PX above.
+    this._rightDownX = null; this._rightDownY = null; this._rightMoved = false;
 
     canvas.addEventListener('mousemove', (e) => this._onMove(e));
     canvas.addEventListener('mousedown', (e) => this._onDown(e));
@@ -266,6 +331,10 @@ export class InputController {
     if (this._panning) {
       this.renderer.panByScreenDelta(e.clientX - this._panLastX, e.clientY - this._panLastY, this.getWorld());
       this._panLastX = e.clientX; this._panLastY = e.clientY;
+      if (this._rightDownX != null && !this._rightMoved) {
+        const moved = Math.hypot(e.clientX - this._rightDownX, e.clientY - this._rightDownY);
+        if (moved > RIGHT_CLICK_ORDER_THRESHOLD_PX) this._rightMoved = true;
+      }
       return;
     }
     this._updateHover(e);
@@ -281,6 +350,9 @@ export class InputController {
       e.preventDefault();
       this._panning = true;
       this._panLastX = e.clientX; this._panLastY = e.clientY;
+      // Order-issuing gesture tracking (draft.js) -- only right-click (button 2) can issue an
+      // order, middle-click (button 1) is pan-only, same as before this feature existed.
+      if (e.button === 2) { this._rightDownX = e.clientX; this._rightDownY = e.clientY; this._rightMoved = false; }
       return;
     }
     if (e.button !== 0) return;
@@ -326,7 +398,14 @@ export class InputController {
   }
 
   _onUp(e) {
-    if (e.button === 2 || e.button === 1) { this._panning = false; return; }
+    if (e.button === 2 || e.button === 1) {
+      this._panning = false;
+      // A right-click that ended without ever exceeding the drag threshold is an order-issuing
+      // click, not a pan -- see RIGHT_CLICK_ORDER_THRESHOLD_PX's doc comment above.
+      if (e.button === 2 && this._rightDownX != null && !this._rightMoved) this._tryIssueOrder(e);
+      this._rightDownX = null; this._rightDownY = null; this._rightMoved = false;
+      return;
+    }
     this._painting = false;
     if (this.marqueeActive) {
       this.marqueeActive = false;
@@ -376,8 +455,29 @@ export class InputController {
     if (x < 0 || y < 0 || x >= world.width || y >= world.height) return;
 
     if (this.tool.startsWith('zone-')) {
-      const kind = { 'zone-food': ZoneKind.Food, 'zone-bedroom': ZoneKind.Bedroom, 'zone-recreation': ZoneKind.Recreation, 'zone-training': ZoneKind.Training }[this.tool];
+      const kind = {
+        'zone-food': ZoneKind.Food, 'zone-bedroom': ZoneKind.Bedroom, 'zone-recreation': ZoneKind.Recreation,
+        'zone-training': ZoneKind.Training, 'zone-storage': ZoneKind.Storage, 'zone-medical': ZoneKind.Medical,
+        'zone-command': ZoneKind.Command, 'zone-gymnasium': ZoneKind.Gymnasium,
+      }[this.tool];
       world.zones.set(x, y, kind);
+      return;
+    }
+
+    // Restrict Area (RimWorld Restrict-tab style, see citizens.js's paintAllowedAreaCell): paints
+    // into the CURRENTLY SELECTED citizen's own area mask, not the shared world.zones grid --
+    // same click/drag paint gesture as the zone tools above, deliberately reusing that UX rather
+    // than inventing a new one (per the task's own instruction). A single-citizen selection is
+    // required (mirrors main.js's insp-restrict-btn, which only arms this tool from the
+    // single-citizen inspector view); a marquee multi-select or no selection is a no-op toast,
+    // not a silent failure.
+    if (this.tool === 'restrict-area') {
+      const sel = (this.selectedCitizens && this.selectedCitizens.length === 1) ? this.selectedCitizens[0] : this.selectedCitizen;
+      if (sel < 0 || sel >= world.citizens.count || !world.citizens.isAliveAt(sel)) {
+        this.onToast?.('Select one citizen first');
+        return;
+      }
+      world.citizens.paintAllowedAreaCell(sel, world.grid.width, world.grid.height, x, y, true);
       return;
     }
 
@@ -401,6 +501,123 @@ export class InputController {
     world.build(this.tool, x + 0.5, y + 0.5);
   }
 
+  // Right-click-and-release-without-drag order gesture (draft.js + forcejob.js): if the current
+  // selection includes any drafted citizens, this issues either a move or an attack order
+  // depending on what's under the cursor -- a live attacker within ORDER_ATTACK_PICK_RADIUS means
+  // "attack this", otherwise it's a walkable-tile "move here". No separate mode-switch UI, per the
+  // task spec -- auto-detected every time, same click gesture either way. Drafted selection always
+  // wins this gesture (unchanged from before Force Job existed); only once nothing selected is
+  // drafted does a right-click instead check for a valid Force-Job target under the cursor
+  // (forcejob.js -- RimWorld-style "Prioritize" on an undrafted citizen). A no-op (not even a
+  // toast) if neither applies, so a stray right-click-release over empty ground/an ineligible
+  // selection behaves exactly like it did before either feature existed -- purely camera pan, no
+  // side effect.
+  _tryIssueOrder(e) {
+    const world = this.getWorld();
+    if (!world) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const [wx, wy] = this.renderer.screenToWorld(e.clientX - rect.left, e.clientY - rect.top);
+
+    const draftedIds = this._draftedSelectionIds(world);
+    if (draftedIds.length > 0) {
+      const targetAttacker = nearestAliveAttacker(world.attackers, wx, wy, ORDER_ATTACK_PICK_RADIUS);
+      if (targetAttacker >= 0) {
+        issueAttackOrder(world, draftedIds, targetAttacker);
+        this.onToast?.(`Attack order: ${draftedIds.length} citizen${draftedIds.length > 1 ? 's' : ''}`);
+      } else {
+        issueMoveOrder(world, draftedIds, wx, wy);
+        this.onToast?.(`Move order: ${draftedIds.length} citizen${draftedIds.length > 1 ? 's' : ''}`);
+      }
+      return;
+    }
+
+    // Force Job (forcejob.js): only reachable when the selection contains zero drafted citizens.
+    // Requires an actual valid job target under the cursor -- blueprint, resource node, messy
+    // room, or unstaffed workshop station (see _findJobTargetAt) -- otherwise this stays a no-op
+    // camera-pan-adjacent click, same as the drafted branch above when nothing's selected.
+    const undraftedIds = this._undraftedSelectionIds(world);
+    if (undraftedIds.length === 0) return;
+    const target = this._findJobTargetAt(world, wx, wy);
+    if (!target) return;
+    // Multi-citizen rule (forcejob.js's pickClosestUndraftedCitizen doc comment): same target,
+    // only the closest selected citizen actually gets forced onto it.
+    const closestId = pickClosestUndraftedCitizen(world, undraftedIds, target.x, target.y);
+    if (closestId == null) return;
+    if (forceJob(world, closestId, target.kind, target.ref)) {
+      this.onToast?.('Force job assigned');
+    }
+  }
+
+  // The current selection (single-pick or marquee multi-select, see selectedCitizen/
+  // selectedCitizens above) narrowed down to just the living, currently-drafted ones, as citizen
+  // ids (draft.js's public interface takes ids, not store indices) -- shared by _tryIssueOrder
+  // above and available for any future UI (e.g. a "Draft selection" button) that wants the same
+  // narrowing logic.
+  _draftedSelectionIds(world) {
+    const indices = (this.selectedCitizens && this.selectedCitizens.length > 0)
+      ? this.selectedCitizens
+      : (this.selectedCitizen >= 0 ? [this.selectedCitizen] : []);
+    const ids = [];
+    for (const i of indices) {
+      if (i < 0 || i >= world.citizens.count) continue;
+      if (!world.citizens.isAliveAt(i) || !world.citizens.isDraftedAt(i)) continue;
+      ids.push(world.citizens.id[i]);
+    }
+    return ids;
+  }
+
+  // Mirror of _draftedSelectionIds above, narrowed to the living, currently-UNDRAFTED ones instead
+  // -- forcejob.js's Force Job is the undrafted counterpart to draft.js's move/attack orders, see
+  // _tryIssueOrder above for how the two are routed off the same right-click gesture.
+  _undraftedSelectionIds(world) {
+    const indices = (this.selectedCitizens && this.selectedCitizens.length > 0)
+      ? this.selectedCitizens
+      : (this.selectedCitizen >= 0 ? [this.selectedCitizen] : []);
+    const ids = [];
+    for (const i of indices) {
+      if (i < 0 || i >= world.citizens.count) continue;
+      if (!world.citizens.isAliveAt(i) || world.citizens.isDraftedAt(i)) continue;
+      ids.push(world.citizens.id[i]);
+    }
+    return ids;
+  }
+
+  // Job-target detection for the Force Job right-click gesture above. Small pick radius for
+  // point-like targets (blueprint/node/workshop, same ballpark as ORDER_ATTACK_PICK_RADIUS/
+  // _pickCitizen's citizen-pick radius); a messy room is instead hit-tested by "is this world
+  // point actually inside an enclosed room with mess above the same threshold jobs.js's own
+  // autonomous findNearestMessyRoom uses" (rooms.js's roomContaining), since a room has no single
+  // point location the way a structure or node does. Returns { kind: ForceJobKind, ref, x, y } (x/y
+  // being the target's own position, for pickClosestUndraftedCitizen's distance comparison) or
+  // null if nothing valid is under the cursor. Blueprints/unstaffed workshops are checked before
+  // resource nodes/messy rooms -- construction work outranking harvesting/cleaning is the existing
+  // autonomous ladder's own order (jobs.js), mirrored here purely as a sensible pick-priority
+  // tiebreak for the rare case the cursor lands on more than one candidate at once.
+  _findJobTargetAt(world, wx, wy) {
+    const PICK_RADIUS = 0.7;
+    let bestKind = null, bestRef = null, bestDist = PICK_RADIUS;
+    for (const s of world.structures) {
+      if (s.destroyed) continue;
+      const d = Math.hypot(s.x - wx, s.y - wy);
+      if (d >= bestDist) continue;
+      if (s.underConstruction) { bestDist = d; bestKind = ForceJobKind.Blueprint; bestRef = s; continue; }
+      if (s.kind === 'workshop' && s.workerId == null) { bestDist = d; bestKind = ForceJobKind.Workshop; bestRef = s; continue; }
+    }
+    if (bestKind) return { kind: bestKind, ref: bestRef, x: bestRef.x, y: bestRef.y };
+
+    for (const n of world.resourceNodes) {
+      if (n.depleted) continue;
+      const d = Math.hypot(n.x - wx, n.y - wy);
+      if (d < PICK_RADIUS) return { kind: ForceJobKind.Node, ref: n, x: n.x, y: n.y };
+    }
+
+    const room = roomContaining(world.rooms, world.grid, wx, wy);
+    if (room && (room.mess || 0) > MESS_CLEAN_THRESHOLD) {
+      return { kind: ForceJobKind.Room, ref: room, x: wx, y: wy };
+    }
+    return null;
+  }
+
   _pickCitizen(world) {
     let bestI = -1, bestDist = 0.8; // pick radius in world units
     for (let i = 0; i < world.citizens.count; i++) {
@@ -422,6 +639,11 @@ export class InputController {
     // already the Monitor Station buildable's hotkey in TOOLS, so this deliberately only claims
     // the uppercase variant and lets 'm' fall through to the tool table below. main.js supplies
     // onToggleMap.
+    // Draft/undraft the current selection (draft.js). SHIFT+D, same uppercase-only convention as
+    // the other overlay hotkeys below -- lowercase 'd' is already the Coal Generator buildable's
+    // hotkey. main.js supplies onToggleDraft, which draft/undraft-toggles every living citizen
+    // currently selected (matches this file's own inspector-button behavior, see main.js).
+    if (e.key === 'D') { this.onToggleDraft?.(); return; }
     if (e.key === 'M') { this.onToggleMap?.(); return; }
     // Budget report overlay (world.js's finance ledger, surfaced in main.js). SHIFT+B for the
     // same reason as SHIFT+M above -- lowercase 'b' is already the Bed buildable's hotkey.
@@ -437,6 +659,16 @@ export class InputController {
     // uppercase-only convention -- lowercase 'p' is already the Garbage Garage (Electric)
     // buildable's hotkey.
     if (e.key === 'P') { this.onTogglePrograms?.(); return; }
+    // Outpost Charter Contracts overlay (grants.js, surfaced in main.js). SHIFT+G, same
+    // uppercase-only convention -- lowercase 'g' is already the Generator buildable's hotkey.
+    if (e.key === 'G') { this.onToggleGrants?.(); return; }
+    // Fabrication/Drones overlay (drones.js, surfaced in main.js). SHIFT+N, same uppercase-only
+    // convention -- lowercase 'n' is already the Garbage Garage (Fossil) buildable's hotkey.
+    if (e.key === 'N') { this.onToggleDrones?.(); return; }
+    // Coverage Plans overlay (coverageplans.js, surfaced in main.js). SHIFT+I, same
+    // uppercase-only convention -- lowercase 'i' is already the Recycling Garage (Gas)
+    // buildable's hotkey.
+    if (e.key === 'I') { this.onToggleCoverage?.(); return; }
     // Onboarding reference panel (tutorial.js, surfaced in main.js). F1 and '?' are both free --
     // '?' is Shift+/ and appears in no TOOL_KEYS entry, and F1 collides with nothing here or in
     // main.js's F5/F9 save/load bindings. F1 needs preventDefault or the browser opens its own help.
@@ -446,6 +678,9 @@ export class InputController {
     if (e.key === 'Escape' && this.onToggleFinance) { this.onCloseFinance?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onToggleFactions) { this.onCloseFactions?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onTogglePrograms) { this.onClosePrograms?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleGrants) { this.onCloseGrants?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleDrones) { this.onCloseDrones?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleCoverage) { this.onCloseCoverage?.(); /* falls through to clear tool */ }
     if (e.key in TOOL_KEYS) { this.setTool(TOOL_KEYS[e.key]); return; }
     if (e.key === ' ') { e.preventDefault(); this.togglePause(); return; }
     if (e.key === '+' || e.key === '=') { this.setSpeedIndex(this.speedIndex + 1); return; }

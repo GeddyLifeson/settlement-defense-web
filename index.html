@@ -43,6 +43,42 @@
     backdrop-filter: blur(3px);
   }
 
+  /* ---- Shared report/management-screen chrome ----
+     Prison-Architect-style consistency pass: every full-screen report/management panel (Research,
+     Budget Report, Conquest Map, Cliques, Programs, Settings, Statistics/Achievements, Credits,
+     Help) shares one title-bar layout, one close-button look, one content padding, and one
+     internal section-header treatment, even though every panel's actual content is completely
+     different. This is what used to be N near-identical copies of the same rules under
+     #panelid-scoped selectors (one per backlog wave/agent) that had quietly drifted -- only
+     #help-panel had a close-btn hover state, #credits used an unrelated accent-filled button
+     instead of .close-btn, and #credits' box padding (26px 30px) didn't match everyone else's
+     (20px 24px). Per-panel selectors below now only set what's genuinely panel-specific: overlay
+     z-index (layering has real functional constraints, see each panel's own comment), and the
+     box's width/max-height/overflow (content shape genuinely differs panel to panel). */
+  .report-panel .box { padding: 20px 24px; }
+  .report-head {
+    display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px;
+  }
+  .report-head h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  .report-head .spacer { flex: 1; }
+  .close-btn, .report-head .replay-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+  }
+  .close-btn:hover, .report-head .replay-btn:hover { background: #3a342f; }
+  /* Section-header convention for any report panel with internal subsections (Settings' Audio/
+     Difficulty/Accessibility/Keybindings, Statistics' Lifetime Stats/Achievements, Help's topic
+     sections) -- same font-weight/size/letter-spacing/border treatment everywhere instead of three
+     near-matches. Margin is deliberately left to each panel's own selector below: Settings and
+     Help already get their inter-section gap from a wrapping element's margin-bottom
+     (.set-section / .help-sec), so a shared top-margin here would double up that spacing -- only
+     the header's own look is shared, not panel-specific layout rhythm. */
+  .report-section-title {
+    font-size: 13px; font-weight: 600; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--accent);
+    border-bottom: 1px solid var(--panel-border); padding-bottom: 5px;
+  }
+
   /* Accessibility text-size scale (Settings panel, --ui-scale on :root): every full-screen modal's
      centered .box is uniformly scaled rather than rewriting each individual font-size declaration
      throughout this stylesheet -- the flex-centered parent means transform:scale keeps it centered
@@ -51,20 +87,40 @@
      ("scales every full-screen panel"). */
   .box { transform: scale(var(--ui-scale)); }
 
-  /* ---- Top status bar ---- */
+  /* ---- Top status bar ----
+     Visual hierarchy pass: stats are split into two icon-labeled groups instead of one flat
+     row -- .stat-primary (scrap/pollution/population, the always-relevant-at-a-glance trio,
+     per the live-observation brief: largest icon+number, leftmost, one per resource color) and
+     .stat-secondary (everything else that's still a live readout but not something you need to
+     track every second -- attackers/wave/unrest/day-night/weather/grading/research). A thin
+     divider (.topbar-div) separates the secondary stats from the button cluster, and the button
+     cluster itself is split into three labeled sub-groups (.btn-playback / .btn-panels /
+     .btn-system) with their own dividers so "pause/speed" reads as a different kind of control
+     than "open a management panel" or "save/load/restart" -- same underlying buttons/behavior
+     as before, just visually grouped instead of one undifferentiated run of 15 buttons. */
   #topbar {
     position: fixed; top: 10px; left: 10px; right: 10px;
-    display: flex; align-items: center; gap: 14px;
+    display: flex; align-items: center; gap: 10px;
     padding: 8px 14px; font-size: 14px;
     overflow-x: auto; overflow-y: hidden; scrollbar-width: thin;
   }
-  #topbar .stat { display: flex; align-items: center; gap: 5px; white-space: nowrap; flex-shrink: 0; }
+  #topbar .stat-group { display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
+  #topbar .stat { display: flex; align-items: center; gap: 6px; white-space: nowrap; flex-shrink: 0; }
   #topbar button { flex-shrink: 0; }
-  #topbar .stat .icon { font-size: 15px; }
-  #topbar .stat .val { font-weight: 600; }
+  #topbar .icon-svg { display: block; flex-shrink: 0; }
+  /* Primary trio: larger icon + larger bold number, so they read first in the scan order. */
+  #topbar .stat-primary .icon-svg { width: 22px; height: 22px; }
+  #topbar .stat-primary .val { font-size: 16px; font-weight: 700; }
+  /* Secondary stats: smaller icon/number and slightly dimmed, so the eye lands on them second --
+     still fully legible, just visually subordinate to the primary trio. */
+  #topbar .stat-secondary { gap: 10px; opacity: 0.88; }
+  #topbar .stat-secondary .icon-svg { width: 15px; height: 15px; }
+  #topbar .stat-secondary .val { font-weight: 600; font-size: 13px; }
   #topbar .stat .val.danger { color: var(--danger); }
   #stat-unrest-wrap.hidden { display: none; }
   #topbar .spacer { flex: 1; }
+  #topbar .topbar-div { width: 1px; align-self: stretch; margin: 2px 0; background: var(--panel-border); flex-shrink: 0; }
+  #topbar .btn-group { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
   #topbar button {
     background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
     border-radius: 5px; padding: 5px 10px; font-size: 13px; cursor: pointer;
@@ -73,13 +129,34 @@
   #topbar button.active { background: var(--accent); color: #201a10; border-color: var(--accent); }
   #speed-label { min-width: 28px; text-align: center; font-size: 13px; color: var(--text-dim); }
 
-  /* ---- Build toolbar ---- */
+  /* ---- Build toolbar ----
+     Categorized two-level UI (category icon row -> that category's item list -> a detail-before-
+     commit readout), replacing the old single flat scrolling list of 26+ items. Structure only
+     (not pixels) borrowed from live observation of Super Energy Apocalypse: Recycled's build
+     panel -- every color/icon/class here is this project's own. Header + collapsible body so it
+     doesn't eat screen space while not building (click the header or the arrow to collapse). */
   #toolbar {
-    position: fixed; left: 10px; bottom: 10px; top: 60px;
-    display: flex; flex-direction: column; gap: 4px;
-    padding: 8px; font-size: 13px;
-    overflow-y: auto; scrollbar-width: thin;
+    position: fixed; left: 10px; top: 60px; bottom: 10px;
+    display: flex; flex-direction: column;
+    padding: 0; font-size: 13px; width: 220px;
+    overflow: hidden;
   }
+  #toolbar-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 9px 12px; font-weight: 600; color: var(--accent);
+    border-bottom: 1px solid var(--panel-border); cursor: pointer; flex-shrink: 0; user-select: none;
+  }
+  #toolbar-head .tb-title { font-size: 13px; }
+  #toolbar-head button {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 4px; padding: 2px 9px; font-size: 13px; cursor: pointer; line-height: 1.4;
+  }
+  #toolbar-head button:hover { background: #3a342f; }
+  #toolbar-body {
+    display: flex; flex-direction: column; gap: 6px;
+    padding: 8px; overflow-y: auto; scrollbar-width: thin;
+  }
+  #toolbar-body.hidden { display: none; }
   #toolbar .tool-btn {
     display: flex; justify-content: space-between; gap: 14px;
     background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
@@ -90,6 +167,51 @@
   #toolbar .tool-btn .cost { color: var(--text-dim); }
   #toolbar .tool-btn.active .cost { color: #4a3c1f; }
   #toolbar .key { opacity: 0.6; margin-right: 6px; }
+  #toolbar-select-btn { margin-bottom: 2px; }
+
+  /* Category icon row -- always visible whenever the body is expanded, per the build-panel's
+     category -> items -> detail hierarchy. */
+  #toolbar-categories {
+    display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px;
+  }
+  .tb-cat-btn {
+    display: flex; flex-direction: column; align-items: center; gap: 2px;
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 7px 2px 6px; cursor: pointer; font-size: 9.5px;
+    text-align: center; line-height: 1.15;
+  }
+  .tb-cat-btn:hover { background: #3a342f; }
+  .tb-cat-btn.active { background: var(--accent); color: #201a10; border-color: var(--accent); }
+  .tb-cat-icon { font-size: 17px; }
+
+  /* That category's item list, shown below the category row once one is picked. */
+  #toolbar-items { display: flex; flex-direction: column; gap: 4px; }
+  #toolbar-items.hidden { display: none; }
+  .tb-items-back {
+    color: var(--text-dim); font-size: 11px; cursor: pointer; padding: 2px 2px 4px 2px;
+  }
+  .tb-items-back:hover { color: var(--text); }
+
+  /* Detail-before-commit readout for the selected buildable: name, cost (same resource-icon
+     convention as #topbar's stats), a one-line effect summary, and a Go Back button. */
+  #toolbar-detail { padding: 2px; }
+  #toolbar-detail.hidden { display: none; }
+  .tb-detail-name { font-weight: 700; font-size: 13.5px; color: var(--accent); margin-bottom: 6px; }
+  .tb-detail-cost-row { margin-bottom: 8px; }
+  .tb-detail-cost {
+    display: inline-flex; align-items: center; gap: 4px;
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 5px;
+    padding: 3px 8px; font-size: 12px;
+  }
+  .tb-detail-cost .icon { font-size: 13px; }
+  .tb-detail-cost.tb-free { color: var(--good); }
+  .tb-detail-effect { font-size: 11.5px; color: var(--text-dim); line-height: 1.4; margin-bottom: 10px; }
+  .tb-detail-locked { font-size: 11px; color: var(--danger); margin-bottom: 8px; }
+  .tb-detail-back {
+    width: 100%; background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+  }
+  .tb-detail-back:hover { background: #3a342f; }
 
   /* ---- Citizen inspector ---- */
   #inspector {
@@ -109,19 +231,84 @@
   #inspector .bar-fill.social { background: #b565d9; }
   #inspector .bar-fill.mood { background: var(--good); }
   #inspector .bar-fill.unrest { background: var(--danger); }
+  #inspector .bar-fill.hydration { background: #4fb8b0; }
+  #inspector .bar-fill.clean { background: #7fbf6a; }
+  #inspector .bar-fill.impress { background: var(--accent); }
   #inspector .skill-line { margin-top: 8px; font-size: 12px; color: var(--text-dim); }
+
+  /* ---- Vitals summary row (always visible, no header) + labeled sections below it ---- */
+  #inspector .insp-vitals-row { display: flex; gap: 12px; margin: 6px 0 4px; }
+  #inspector .insp-vital { flex: 1; min-width: 0; }
+  #inspector .insp-status-line:empty { display: none; margin: 0; }
+  #inspector .stat-row.hidden { display: none; }
+  #inspector .insp-section {
+    margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--panel-border);
+  }
+  #inspector .insp-section-head {
+    font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em;
+    color: var(--text-dim); margin-bottom: 6px;
+  }
+  #inspector .insp-section .subtitle { margin-bottom: 6px; }
+  #inspector .insp-section:last-child #insp-beauty:empty { display: none; }
   #inspector #insp-workprio-btn {
     margin-top: 10px; width: 100%;
     background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
     border-radius: 5px; padding: 6px 8px; font-size: 12px; cursor: pointer;
   }
   #inspector #insp-workprio-btn:hover { background: #3a342f; }
+  #inspector #insp-schedule-btn {
+    margin-top: 6px; width: 100%;
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+  }
+  #inspector #insp-schedule-btn:hover { background: #3a342f; }
+  #inspector #insp-schedule-btn.active { border-color: #7fd0e0; color: #7fd0e0; }
+  /* Allowed Area restriction row (RimWorld Restrict-tab style) -- two small buttons side by
+     side, same compact-row shape as the weapon-tier row below but only ever 1-2 buttons wide. */
+  #inspector .insp-area-row { display: flex; gap: 6px; margin-top: 6px; }
+  #inspector .insp-area-row button {
+    flex: 1; background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 6px 8px; font-size: 12px; cursor: pointer;
+  }
+  #inspector .insp-area-row button:hover { background: #3a342f; }
+  #inspector #insp-restrict-btn.active { border-color: #e0a860; color: #e0a860; }
   #inspector #insp-fire-corrupt-btn {
     margin-top: 6px; width: 100%;
     background: #4a2320; color: var(--text); border: 1px solid var(--danger);
     border-radius: 5px; padding: 6px 8px; font-size: 12px; cursor: pointer;
   }
   #inspector #insp-fire-corrupt-btn:hover { background: #5c2b27; }
+  /* Manual weapon-tier override row (security.js WeaponTier) -- a compact button-group, same
+     "one row of small pill buttons" shape as nothing else currently in this panel, so styled
+     standalone rather than reusing an existing class. .active marks whichever tier is actually
+     equipped (or Auto, when no override is set); .queued (only possible on a non-Auto tier)
+     layers a dashed border on top of .active to show a request that hasn't been issued yet
+     because current armory stock doesn't support it. */
+  #inspector .insp-weapon-row {
+    display: flex; gap: 4px; margin-top: 8px; flex-wrap: wrap;
+  }
+  #inspector .insp-weapon-row.hidden { display: none; }
+  #inspector .insp-weapon-row button {
+    flex: 1; min-width: 0;
+    background: #2c2825; color: var(--text-dim); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 4px; font-size: 11px; cursor: pointer;
+  }
+  #inspector .insp-weapon-row button:hover { background: #3a342f; color: var(--text); }
+  #inspector .insp-weapon-row button.active {
+    background: #21323a; color: #4fd1ff; border-color: #4fd1ff;
+  }
+  #inspector .insp-weapon-row button.queued {
+    border-style: dashed; color: #f0c674;
+  }
+  #inspector .draft-btn {
+    margin-top: 8px; width: 100%;
+    background: #21323a; color: var(--text); border: 1px solid #4fd1ff;
+    border-radius: 5px; padding: 6px 8px; font-size: 12px; cursor: pointer; font-weight: 600;
+  }
+  #inspector .draft-btn:hover { background: #2a3f49; }
+  /* Active (drafted) state -- filled solid instead of outlined, same "this is currently ON"
+     convention as .active on the topbar's mute/pause buttons elsewhere in this stylesheet. */
+  #inspector .draft-btn.active { background: #4fd1ff; color: #0c1a1f; }
 
   /* ---- Work Priorities panel ---- Same full-screen dimmed .box.panel convention as #research. */
   #workprio {
@@ -160,11 +347,14 @@
   #workprio .wp-cell.wp-p1 { color: #201a10; background: var(--accent); border-color: var(--accent); }
   #workprio .wp-cell.wp-p2 { color: var(--text); background: #4a3c1f; border-color: #8a7a52; }
   #workprio .wp-cell.wp-p3 { color: var(--text-dim); background: #332e2a; }
+  #workprio .wp-cell.wp-p4 { color: #55504a; background: #262320; border-color: #423c35; }
   #workprio .wp-reset {
     background: none; color: var(--text-dim); border: 1px solid var(--panel-border);
     border-radius: 4px; padding: 3px 8px; font-size: 10.5px; cursor: pointer;
   }
   #workprio .wp-reset:hover { background: #3a342f; color: var(--text); }
+  #workprio tr.wp-row-selected { background: rgba(212, 175, 55, 0.12); }
+  #workprio tr.wp-row-selected .wp-name { color: var(--accent); }
   #workprio .wp-empty { color: var(--text-dim); font-size: 12.5px; padding: 12px 4px; }
 
   /* ---- Event log ---- */
@@ -290,12 +480,9 @@
   }
   #worldmap.hidden { display: none; }
   #worldmap .box {
-    padding: 20px 24px; width: min(880px, 94vw); max-height: 92vh; overflow: auto;
+    width: min(880px, 94vw); max-height: 92vh; overflow: auto;
   }
-  #worldmap .map-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  #worldmap h2 { margin: 0; font-size: 20px; color: var(--accent); }
   #worldmap .map-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
-  #worldmap .map-head .spacer { flex: 1; }
   #worldmap .grid {
     display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px;
   }
@@ -324,10 +511,6 @@
     padding: 4px 6px; font-size: 11px; font-weight: 600; cursor: pointer; width: 100%;
   }
   #worldmap .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
-  #worldmap .close-btn {
-    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
-    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
-  }
 
   /* ---- Finance / budget report overlay ---- */
   #finance {
@@ -336,12 +519,9 @@
   }
   #finance.hidden { display: none; }
   #finance .box {
-    padding: 20px 24px; width: min(520px, 94vw); max-height: 92vh; overflow: auto;
+    width: min(520px, 94vw); max-height: 92vh; overflow: auto;
   }
-  #finance .fin-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  #finance h2 { margin: 0; font-size: 20px; color: var(--accent); }
   #finance .fin-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
-  #finance .fin-head .spacer { flex: 1; }
   #finance .fin-rows { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
   #finance .fin-row {
     display: flex; justify-content: space-between; align-items: center;
@@ -357,10 +537,6 @@
     display: flex; justify-content: space-between; font-size: 11px; color: var(--text-dim); margin-bottom: 4px;
   }
   #finance-chart { display: block; width: 100%; height: 90px; background: #241f1a; border-radius: 6px; }
-  #finance .close-btn {
-    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
-    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
-  }
 
   /* ---- Settlement Grading popover (non-carceral reframe of Prison Architect's 4-axis Grading
      tab -- Safety/Wellbeing/Sustainability/Cohesion, see grading.js). Click-to-expand from the
@@ -386,11 +562,8 @@
     display: flex; align-items: center; justify-content: center; z-index: 20;
   }
   #research.hidden { display: none; }
-  #research .box { padding: 20px 24px; width: min(880px, 94vw); max-height: 92vh; overflow: auto; }
-  #research .res-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  #research h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #research .box { width: min(880px, 94vw); max-height: 92vh; overflow: auto; }
   #research .res-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
-  #research .res-head .spacer { flex: 1; }
   #research .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   #research .node {
     background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
@@ -417,10 +590,6 @@
   }
   #research .node button:disabled { background: #3a342f; color: var(--text-dim); cursor: not-allowed; }
   #research .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
-  #research .close-btn {
-    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
-    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
-  }
   /* Locked buildables stay visible in the toolbar (so the player can see what's coming) but
      read as unavailable and don't respond to hover. */
   #toolbar .tool-btn.locked { opacity: 0.42; cursor: not-allowed; }
@@ -435,11 +604,8 @@
     display: flex; align-items: center; justify-content: center; z-index: 20;
   }
   #factions.hidden { display: none; }
-  #factions .box { padding: 20px 24px; width: min(720px, 94vw); max-height: 92vh; overflow: auto; }
-  #factions .fac-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  #factions h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #factions .box { width: min(720px, 94vw); max-height: 92vh; overflow: auto; }
   #factions .fac-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
-  #factions .fac-head .spacer { flex: 1; }
   #factions .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   #factions .node {
     background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
@@ -456,10 +622,6 @@
   #factions .node .bar { height: 6px; background: #332e2a; border-radius: 4px; overflow: hidden; }
   #factions .node .bar-fill { height: 100%; border-radius: 4px; transition: width 0.3s; }
   #factions .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
-  #factions .close-btn {
-    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
-    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
-  }
 
   /* ---- Structured Group Programs overlay (programs.js) -- same shared structure/classes as
      #research/#factions above, re-scoped under #programs per the same each-overlay-scoped-
@@ -469,11 +631,8 @@
     display: flex; align-items: center; justify-content: center; z-index: 20;
   }
   #programs.hidden { display: none; }
-  #programs .box { padding: 20px 24px; width: min(760px, 94vw); max-height: 92vh; overflow: auto; }
-  #programs .prog-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  #programs h2 { margin: 0; font-size: 20px; color: var(--accent); }
+  #programs .box { width: min(760px, 94vw); max-height: 92vh; overflow: auto; }
   #programs .prog-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
-  #programs .prog-head .spacer { flex: 1; }
   #programs .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
   #programs .node {
     background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
@@ -491,10 +650,85 @@
   #programs .node .bar { height: 6px; background: #332e2a; border-radius: 4px; overflow: hidden; }
   #programs .node .bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
   #programs .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
-  #programs .close-btn {
-    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
-    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
+
+  /* ---- Outpost Charter Contracts overlay (grants.js) -- same shared structure/classes as
+     #research/#factions/#programs above (.box/.grid/.node/.badge/.bar/.legend/.close-btn),
+     re-scoped under #grants per the same each-overlay-scoped-separately convention, plus its own
+     .invest-section for the time-locked investment instrument (not a card grid -- a single
+     standing action, so it gets its own small block below the grid instead). */
+  #grants {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
   }
+  #grants.hidden { display: none; }
+  #grants .box { width: min(820px, 94vw); max-height: 92vh; overflow: auto; }
+  #grants .grants-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
+  #grants .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #grants .node {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 5px;
+    min-height: 150px;
+  }
+  #grants .node.done { border-color: var(--good); }
+  #grants .node.available { border-color: var(--accent); border-style: dashed; }
+  #grants .node.blocked { opacity: 0.5; }
+  #grants .node .rname { font-weight: 700; font-size: 13px; line-height: 1.2; }
+  #grants .node .badge {
+    font-size: 9.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim);
+  }
+  #grants .node.done .badge { color: var(--good); }
+  #grants .node.available .badge { color: var(--accent); }
+  #grants .node .desc { font-size: 10.5px; color: var(--text-dim); line-height: 1.35; }
+  #grants .node .unlocks { font-size: 10px; color: var(--text-dim); margin-top: auto; }
+  #grants .node .bar { height: 6px; background: #332e2a; border-radius: 4px; overflow: hidden; }
+  #grants .node .bar-fill { height: 100%; background: var(--accent); border-radius: 4px; transition: width 0.3s; }
+  #grants .node.done .bar-fill { background: var(--good); }
+  #grants .node .chk { font-size: 10px; color: var(--text-dim); }
+  #grants .node .chk.ok { color: var(--good); }
+  #grants .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
+  #grants .invest-section {
+    margin-top: 14px; padding: 10px 12px; background: #23201d;
+    border: 1px solid var(--panel-border); border-radius: 6px;
+  }
+  #grants .invest-head { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+  #grants .invest-sub { font-size: 11px; color: var(--text-dim); margin-bottom: 8px; }
+  #grants .invest-actions { display: flex; gap: 8px; }
+  #grants .invest-actions button {
+    flex: 1; background: var(--accent); color: #201a10; border: none; border-radius: 4px;
+    padding: 6px 8px; font-size: 11px; font-weight: 600; cursor: pointer;
+  }
+  #grants .invest-actions button:disabled { background: #3a342f; color: var(--text-dim); cursor: not-allowed; }
+  #grants .invest-pending { margin-top: 8px; font-size: 10.5px; color: var(--text-dim); }
+
+  /* ---- Fabrication / Labor Drones overlay (drones.js) -- same full-screen-overlay convention
+     and .node card shape as #research/#grants above. ---- */
+  #drones {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
+  }
+  #drones.hidden { display: none; }
+  #drones .box { width: min(820px, 94vw); max-height: 92vh; overflow: auto; }
+  #drones .drones-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
+  #drones .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+  #drones .node {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 8px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 5px;
+    min-height: 110px;
+  }
+  #drones .node .rname { font-weight: 700; font-size: 13px; line-height: 1.2; }
+  #drones .node .desc { font-size: 10.5px; color: var(--text-dim); line-height: 1.35; }
+  #drones .node button {
+    margin-top: auto; background: var(--accent); color: #201a10; border: none; border-radius: 4px;
+    padding: 6px 8px; font-size: 11px; font-weight: 600; cursor: pointer;
+  }
+  #drones .node button:disabled { background: #3a342f; color: var(--text-dim); cursor: not-allowed; }
+  #drones .drones-active {
+    margin-top: 14px; padding: 10px 12px; background: #23201d;
+    border: 1px solid var(--panel-border); border-radius: 6px; font-size: 11.5px;
+  }
+  #drones .drones-active .row { display: flex; justify-content: space-between; padding: 3px 0; color: var(--text-dim); }
+  #drones .drones-active .row .cat { color: var(--text); }
+  #drones .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
 
   /* ---- Settings overlay ---- Reachable from BOTH the title screen's main menu (no SimWorld yet)
      and in-game via the pause menu's Settings button -- so like #saveload it is deliberately NOT
@@ -506,11 +740,8 @@
     display: flex; align-items: center; justify-content: center; z-index: 47;
   }
   #settings.hidden { display: none; }
-  #settings .box { padding: 20px 24px; width: min(640px, 94vw); max-height: 92vh; overflow: auto; }
-  #settings .set-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  #settings h2 { margin: 0; font-size: 20px; color: var(--accent); }
-  #settings .set-head .spacer { flex: 1; }
-  #settings h3 { margin: 0 0 8px 0; font-size: 13px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--accent); }
+  #settings .box { width: min(640px, 94vw); max-height: 92vh; overflow: auto; }
+  #settings h3 { margin: 0 0 8px 0; }
   #settings .set-section { margin-bottom: 20px; }
   #settings .set-section:last-child { margin-bottom: 0; }
   #settings .field { margin-bottom: 12px; }
@@ -544,10 +775,6 @@
   #settings .key-row .k {
     background: #2c2825; border: 1px solid var(--panel-border); border-radius: 4px;
     padding: 1px 6px; font-size: 11px; color: var(--accent); white-space: nowrap; flex-shrink: 0;
-  }
-  #settings .close-btn {
-    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
-    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
   }
 
   /* ---- Save / Load slots overlay ---- */
@@ -613,11 +840,8 @@
     display: flex; align-items: center; justify-content: center; z-index: 45;
   }
   #statspanel.hidden { display: none; }
-  #statspanel .box { padding: 20px 24px; width: min(760px, 94vw); max-height: 92vh; overflow: auto; }
-  #statspanel .stats-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  #statspanel h2 { margin: 0; font-size: 20px; color: var(--accent); }
-  #statspanel h3 { margin: 18px 0 8px 0; font-size: 13px; letter-spacing: 0.05em; text-transform: uppercase; color: var(--accent); }
-  #statspanel .stats-head .spacer { flex: 1; }
+  #statspanel .box { width: min(760px, 94vw); max-height: 92vh; overflow: auto; }
+  #statspanel h3 { margin: 18px 0 8px 0; }
   #statspanel .stats-sub { color: var(--text-dim); font-size: 12px; margin-top: 2px; }
   #statspanel .stats-rows { display: flex; flex-direction: column; gap: 6px; }
   #statspanel .stats-row {
@@ -637,33 +861,27 @@
   #statspanel .ach-card.done .ach-name { color: var(--good); }
   #statspanel .ach-card .ach-desc { color: var(--text-dim); font-size: 10.5px; line-height: 1.35; }
   #statspanel .ach-card .ach-date { color: var(--text-dim); font-size: 9.5px; margin-top: 4px; }
-  #statspanel .close-btn {
-    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
-    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
-  }
 
-  /* ---- Credits / About overlay ---- Same full-screen dimmed .box.panel convention as #gameover/
-     #pausemenu; reachable from the title screen so it needs to render above #titlescreen's
-     z-index:40. */
+  /* ---- Credits / About overlay ---- Same full-screen dimmed .box.panel convention, same shared
+     .report-head/.close-btn title-bar chrome as #research/#worldmap/#finance/etc above (this used
+     to be the one panel that skipped the shared title bar entirely -- a centered h2 with no head
+     row, and its "Close" button borrowed #credits button's accent-filled primary look instead of
+     .close-btn -- both fixed to match the rest; the body copy below the head stays centered, that
+     part is genuinely this panel's own content shape). Reachable from the title screen so it needs
+     to render above #titlescreen's z-index:40. */
   #credits {
     position: fixed; inset: 0; background: rgba(0,0,0,0.78);
     display: flex; align-items: center; justify-content: center; z-index: 45;
   }
   #credits.hidden { display: none; }
-  #credits .box { padding: 26px 30px; width: min(460px, 92vw); text-align: center; }
-  #credits h2 { margin: 0 0 6px 0; font-size: 22px; color: var(--accent); }
-  #credits .credits-desc { color: var(--text-dim); font-size: 12.5px; line-height: 1.5; margin: 0 0 18px 0; }
+  #credits .box { width: min(460px, 92vw); text-align: center; }
+  #credits .credits-desc { color: var(--text-dim); font-size: 12.5px; line-height: 1.5; margin: 0 0 18px 0; text-align: left; }
   #credits .credits-list { list-style: none; margin: 0 0 22px 0; padding: 0; text-align: left; }
   #credits .credits-list li {
     background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
     padding: 8px 12px; font-size: 12.5px; margin-bottom: 6px;
   }
   #credits .credits-list li b { color: var(--accent); }
-  #credits button {
-    background: var(--accent); color: #201a10; border: none; border-radius: 6px;
-    padding: 9px 22px; font-size: 14px; font-weight: 600; cursor: pointer;
-  }
-  #credits button:hover { filter: brightness(1.1); }
 
   /* ---- Title screen / New Game setup ----
      Same full-screen-modal convention as #worldmap / #finance / #research above (fixed inset:0,
@@ -677,6 +895,7 @@
   #titlescreen.hidden { display: none; }
   #titlescreen .box { padding: 26px 30px; width: min(560px, 94vw); max-height: 94vh; overflow: auto; }
   #titlescreen .box.hidden { display: none; }
+  #titlescreen #title-setup { width: min(780px, 96vw); }
   #titlescreen h1 {
     margin: 0; font-size: 34px; letter-spacing: 0.04em; color: var(--accent); line-height: 1.1;
   }
@@ -694,7 +913,42 @@
   #titlescreen .savenote { margin-top: 16px; font-size: 11px; color: var(--text-dim); }
 
   /* setup form */
-  #titlescreen .setup-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 16px; }
+  #titlescreen .setup-sub { color: var(--text-dim); font-size: 12px; }
+  #titlescreen .setup-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 18px; }
+  #titlescreen .setup-start-btn {
+    flex-shrink: 0; padding: 13px 24px; font-size: 15px; border-radius: 8px; white-space: nowrap;
+  }
+  #titlescreen .setup-columns { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 26px; align-items: start; }
+  @media (max-width: 620px) { #titlescreen .setup-columns { grid-template-columns: 1fr; } }
+  #titlescreen .setup-col-right { display: flex; flex-direction: column; }
+  #titlescreen .dual-slider { display: flex; flex-direction: column; gap: 4px; }
+  #titlescreen .dual-slider-row { display: flex; align-items: center; gap: 8px; }
+  #titlescreen .dual-slider-row .mini-label { width: 42px; flex-shrink: 0; font-size: 10.5px; color: var(--text-dim); }
+  #titlescreen .radio-list { display: flex; flex-direction: column; gap: 6px; }
+  #titlescreen .radio-option {
+    display: flex; align-items: center; gap: 9px; background: #23201d; border: 1px solid var(--panel-border);
+    border-radius: 6px; padding: 8px 10px; font-size: 12.5px; cursor: pointer;
+  }
+  #titlescreen .radio-option:hover { background: #2b2723; }
+  #titlescreen .radio-option .dot {
+    position: relative; width: 12px; height: 12px; border-radius: 50%; border: 1px solid var(--panel-border);
+    flex-shrink: 0;
+  }
+  #titlescreen .radio-option.selected { border-color: var(--accent); }
+  #titlescreen .radio-option.selected .dot { border-color: var(--accent); }
+  #titlescreen .radio-option.selected .dot::after {
+    content: ''; position: absolute; inset: 2px; border-radius: 50%; background: var(--accent);
+  }
+  #titlescreen .radio-option .rname { font-weight: 600; }
+  #titlescreen .radio-option.selected .rname { color: var(--accent); }
+  #titlescreen .option-desc { font-size: 10.5px; color: var(--text-dim); line-height: 1.4; margin-top: 6px; }
+  #titlescreen .preview-frame { display: flex; align-items: center; justify-content: center; gap: 8px; }
+  #titlescreen #setup-preview { border: 1px solid var(--panel-border); border-radius: 6px; background: #1a1815; display: block; }
+  #titlescreen .preview-nav {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border); border-radius: 5px;
+    padding: 6px 9px; font-size: 12px; cursor: pointer; flex-shrink: 0;
+  }
+  #titlescreen .preview-nav:hover { background: #3a342f; }
   #titlescreen .field { margin-bottom: 14px; }
   #titlescreen .field > .label {
     display: flex; justify-content: space-between; align-items: baseline;
@@ -754,6 +1008,7 @@
   body.pregame #finance,
   body.pregame #research,
   body.pregame #programs,
+  body.pregame #drones,
   body.pregame #pausemenu,
   body.pregame #tutorial,
   body.pregame #help-panel,
@@ -816,18 +1071,11 @@
     display: flex; align-items: center; justify-content: center; z-index: 20;
   }
   #help-panel.hidden { display: none; }
-  #help-panel .box { padding: 20px 24px; width: min(820px, 94vw); max-height: 92vh; overflow: auto; }
-  #help-panel .help-head { display: flex; align-items: baseline; gap: 12px; margin-bottom: 4px; }
-  #help-panel h2 { margin: 0; font-size: 20px; color: var(--accent); }
-  #help-panel .help-head .spacer { flex: 1; }
+  #help-panel .box { width: min(820px, 94vw); max-height: 92vh; overflow: auto; }
   #help-panel .help-sub { color: var(--text-dim); font-size: 12px; margin-bottom: 16px; }
   #help-panel .help-sec { margin-bottom: 18px; }
   #help-panel .help-sec:last-child { margin-bottom: 0; }
-  #help-panel .help-sec h3 {
-    margin: 0 0 6px 0; font-size: 13px; color: var(--accent);
-    letter-spacing: 0.04em; text-transform: uppercase;
-    border-bottom: 1px solid var(--panel-border); padding-bottom: 5px;
-  }
+  #help-panel .help-sec h3 { margin: 0 0 6px 0; }
   #help-panel .help-intro, #help-panel .help-outro {
     font-size: 11.5px; line-height: 1.5; color: var(--text-dim); margin: 0 0 8px 0;
   }
@@ -840,11 +1088,6 @@
   }
   #help-panel dt { font-weight: 600; font-size: 12px; }
   #help-panel dd { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text-dim); }
-  #help-panel .close-btn, #help-panel .replay-btn {
-    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
-    border-radius: 5px; padding: 5px 12px; font-size: 13px; cursor: pointer;
-  }
-  #help-panel .close-btn:hover, #help-panel .replay-btn:hover { background: #3a342f; }
   @media (max-width: 620px) {
     #help-panel .help-row { grid-template-columns: 1fr; gap: 2px; }
   }
@@ -869,43 +1112,68 @@
 <canvas id="game"></canvas>
 
 <div id="topbar" class="panel">
-  <div class="stat"><span class="icon">🔩</span><span class="val" id="stat-scrap">0</span></div>
-  <div class="stat"><span class="icon">👥</span><span class="val" id="stat-citizens">0</span></div>
-  <div class="stat"><span class="icon">☠</span><span class="val" id="stat-attackers">0</span></div>
-  <div class="stat"><span class="icon">🌊</span>Wave <span class="val" id="stat-wave">0</span></div>
-  <div class="stat"><span class="icon">☣</span><span class="val" id="stat-pollution">0</span></div>
-  <div class="stat hidden" id="stat-unrest-wrap" title="Colony-wide unrest -- rises when a large share of citizens are struggling at once (OnBreak or low Wellbeing); a sustained crisis applies a real work-speed penalty to the whole settlement until conditions recover">
-    <span class="icon">⚠</span><span class="val" id="stat-unrest">0%</span>
+  <!-- Primary trio (SEA:R-observed layout: primary resource first/largest, distinct color per
+       resource, icon+bold number, no text label needed to scan for a specific one) -- scrap,
+       pollution, population are the three you need to track every second regardless of what
+       else is happening. Icon <span>s are populated with real hand-drawn SVG glyphs by
+       initTopbarIcons() in main.js (assets.js's TOPBAR_ICONS), not left as emoji text. -->
+  <div class="stat-group stat-primary">
+    <div class="stat" title="Scrap -- the settlement's core currency, spent on every buildable"><span class="icon" id="stat-scrap-icon"></span><span class="val" id="stat-scrap">0</span></div>
+    <div class="stat" title="Pollution -- rises from generators/trucks; high pollution degrades Sustainability grading and can spark fire risk"><span class="icon" id="stat-pollution-icon"></span><span class="val" id="stat-pollution">0</span></div>
+    <div class="stat" title="Living citizens currently in the settlement"><span class="icon" id="stat-population-icon"></span><span class="val" id="stat-citizens">0</span></div>
   </div>
-  <div class="stat" title="Duty Roster clock -- day/night cycle driving citizen sleep/work/recreation schedule">
-    <span class="icon" id="stat-daynight-icon">☀</span><span class="val" id="stat-daynight">Day</span>
-  </div>
-  <div class="stat" title="Current weather -- Rain slows citizens down, Cold/Heatwave add extra hunger/rest decay unless citizens are indoors">
-    <span class="icon" id="stat-weather-icon">🌤</span><span class="val" id="stat-weather">Clear</span>
-  </div>
-  <div class="stat" id="stat-grading-btn" style="cursor:pointer" title="Settlement quality -- Safety/Wellbeing/Sustainability/Cohesion, click for detail">
-    <span class="icon">🏛</span><span class="val" id="stat-grading">100</span>
-  </div>
-  <div class="stat" title="Research Points -- accrue passively, scaled by how many citizens are alive [Shift+T]">
-    <span class="icon">🔬</span><span class="val" id="stat-research">0</span>
+  <div class="topbar-div"></div>
+  <!-- Secondary stats: still live readouts, just not the three you need every second -- smaller
+       icon/number, slightly dimmed, grouped together as a visually subordinate cluster. -->
+  <div class="stat-group stat-secondary">
+    <div class="stat" title="Hostile attackers currently alive on the map"><span class="icon" id="stat-attackers-icon"></span><span class="val" id="stat-attackers">0</span></div>
+    <div class="stat" title="Current wave number"><span class="icon" id="stat-wave-icon"></span><span class="val" id="stat-wave">0</span></div>
+    <div class="stat hidden" id="stat-unrest-wrap" title="Colony-wide unrest -- rises when a large share of citizens are struggling at once (OnBreak or low Wellbeing); a sustained crisis applies a real work-speed penalty to the whole settlement until conditions recover">
+      <span class="icon" id="stat-unrest-icon"></span><span class="val" id="stat-unrest">0%</span>
+    </div>
+    <div class="stat" title="Duty Roster clock -- day/night cycle driving citizen sleep/work/recreation schedule">
+      <span class="icon" id="stat-daynight-icon"></span><span class="val" id="stat-daynight">Day</span>
+    </div>
+    <div class="stat" title="Current weather -- Rain slows citizens down, Cold/Heatwave add extra hunger/rest decay unless citizens are indoors">
+      <span class="icon" id="stat-weather-icon"></span><span class="val" id="stat-weather">Clear</span>
+    </div>
+    <div class="stat" id="stat-grading-btn" style="cursor:pointer" title="Settlement quality -- Safety/Wellbeing/Sustainability/Cohesion, click for detail">
+      <span class="icon" id="stat-grading-icon"></span><span class="val" id="stat-grading">100</span>
+    </div>
+    <div class="stat" title="Research Points -- accrue passively, scaled by how many citizens are alive [Shift+T]">
+      <span class="icon" id="stat-research-icon"></span><span class="val" id="stat-research">0</span>
+    </div>
   </div>
   <div class="spacer"></div>
-  <button id="btn-pause">⏸ Pause</button>
-  <button id="btn-speed-down">−</button>
-  <span id="speed-label">1x</span>
-  <button id="btn-speed-up">+</button>
-  <button id="btn-recenter" title="Snap the camera back to auto-follow the settlement">⛶ Recenter</button>
-  <button id="btn-worldmap" title="Conquest map -- per-region control meters and expansion [Shift+M]">🗺 Map</button>
-  <button id="btn-finance" title="Budget report -- scrap income/expense breakdown and trend [Shift+B]">💰 Budget</button>
-  <button id="btn-research" title="Research -- tech tree unlocking advanced buildables [Shift+T]">🔬 Research</button>
-  <button id="btn-factions" title="Cliques -- rival citizen cliques and their demands [Shift+F]">🤝 Cliques</button>
-  <button id="btn-programs" title="Programs -- Skills Workshop / Wellness Counseling / Community Circle status [Shift+P]">📋 Programs</button>
-  <button id="btn-help" title="Reference -- job priorities, building, waves, resources and every building category [F1 or ?]">❓ Help</button>
-  <button id="btn-fullscreen" title="Toggle fullscreen">⛶ Fullscreen</button>
-  <button id="btn-mute" title="Mute/unmute procedurally-synthesized sound effects">🔊 Sound</button>
-  <button id="btn-save">💾 Save</button>
-  <button id="btn-load">📂 Load</button>
-  <button id="btn-restart">🔄 New</button>
+  <!-- Button cluster, grouped by kind rather than one undifferentiated run: playback controls,
+       then panel-launchers (secondary/toggleable, per the ask), then save/system utilities. -->
+  <div class="btn-group btn-playback">
+    <button id="btn-pause">⏸ Pause</button>
+    <button id="btn-speed-down">−</button>
+    <span id="speed-label">1x</span>
+    <button id="btn-speed-up">+</button>
+    <button id="btn-recenter" title="Snap the camera back to auto-follow the settlement">⛶ Recenter</button>
+  </div>
+  <div class="topbar-div"></div>
+  <div class="btn-group btn-panels">
+    <button id="btn-worldmap" title="Conquest map -- per-region control meters and expansion [Shift+M]">🗺 Map</button>
+    <button id="btn-finance" title="Budget report -- scrap income/expense breakdown and trend [Shift+B]">💰 Budget</button>
+    <button id="btn-research" title="Research -- tech tree unlocking advanced buildables [Shift+T]">🔬 Research</button>
+    <button id="btn-factions" title="Cliques -- rival citizen cliques and their demands [Shift+F]">🤝 Cliques</button>
+    <button id="btn-programs" title="Programs -- Skills Workshop / Wellness Counseling / Community Circle status [Shift+P]">📋 Programs</button>
+    <button id="btn-grants" title="Outpost Charter Contracts -- milestone grants and time-locked investments [Shift+G]">📜 Charters</button>
+    <button id="btn-coverage" title="Coverage Plans -- pre-purchased discount bundles that unlock threshold-gated emergency call-ins [Shift+I]">🧯 Coverage</button>
+    <button id="btn-drones" title="Fabrication -- build a Fabrication Bay to unlock drone capacity, then fabricate labor drones [Shift+N]">🛠 Drones</button>
+    <button id="btn-help" title="Reference -- job priorities, building, waves, resources and every building category [F1 or ?]">❓ Help</button>
+  </div>
+  <div class="topbar-div"></div>
+  <div class="btn-group btn-system">
+    <button id="btn-fullscreen" title="Toggle fullscreen">⛶ Fullscreen</button>
+    <button id="btn-mute" title="Mute/unmute procedurally-synthesized sound effects">🔊 Sound</button>
+    <button id="btn-save">💾 Save</button>
+    <button id="btn-load">📂 Load</button>
+    <button id="btn-restart">🔄 New</button>
+  </div>
 </div>
 
 <div id="toolbar" class="panel"></div>
@@ -919,28 +1187,114 @@
 </div>
 
 <div id="inspector" class="panel hidden">
-  <h3 id="insp-name"></h3>
-  <div class="subtitle" id="insp-role"></div>
-  <div class="subtitle" id="insp-backstory" title=""></div>
-  <div class="subtitle" id="insp-status"></div>
-  <div class="stat-row"><div class="label"><span>Health</span><span id="insp-hp-pct"></span></div><div class="bar"><div class="bar-fill hp" id="insp-hp"></div></div></div>
-  <div class="stat-row"><div class="label"><span>Hunger</span><span id="insp-hunger-pct"></span></div><div class="bar"><div class="bar-fill hunger" id="insp-hunger"></div></div></div>
-  <div class="stat-row"><div class="label"><span>Rest</span><span id="insp-rest-pct"></span></div><div class="bar"><div class="bar-fill rest" id="insp-rest"></div></div></div>
-  <div class="stat-row"><div class="label"><span>Social</span><span id="insp-social-pct"></span></div><div class="bar"><div class="bar-fill social" id="insp-social"></div></div></div>
-  <div class="stat-row"><div class="label"><span>Mood</span><span id="insp-mood-pct"></span></div><div class="bar"><div class="bar-fill mood" id="insp-mood"></div></div></div>
-  <div class="stat-row" title="How close this citizen is to becoming a flashpoint for unrest (Prison Architect dynamicRep.txt-style per-citizen riot-proneness -- riled up/volatile temperament/nearby fighting push it up, a good room and skill investment pull it down). Distinct from the colony-wide Unrest reading in the topbar."><div class="label"><span>Unrest Risk</span><span id="insp-unrest-pct"></span></div><div class="bar"><div class="bar-fill unrest" id="insp-unrest"></div></div></div>
-  <div class="skill-line" id="insp-skill"></div>
-  <div class="subtitle" id="insp-room" title="Room stats where this citizen currently stands (RimWorld-style beauty/cleanliness/impressiveness labels, cosmetic flavor text next to the raw numbers)"></div>
-  <button id="insp-workprio-btn" title="Work Priorities -- bias which jobs this citizen (or the whole roster) prefers, without removing their autonomy">📋 Work Priorities</button>
-  <button id="insp-fire-corrupt-btn" class="hidden" title="This staffer was caught secretly diverting scrap. Fire them off the duty roster for a scrap reward.">🚫 Fire for Reward</button>
+  <!-- Vitals: always-visible summary row (Prison-Architect-info-panel convention -- name, mood,
+       health, alive/downed/on-break status stay visible with no scrolling/expanding; everything
+       else below is grouped into labeled sections). -->
+  <div class="insp-vitals">
+    <h3 id="insp-name"></h3>
+    <div class="subtitle" id="insp-role"></div>
+    <div class="insp-vitals-row">
+      <div class="insp-vital"><div class="label"><span>Mood</span><span id="insp-mood-pct"></span></div><div class="bar"><div class="bar-fill mood" id="insp-mood"></div></div></div>
+      <div class="insp-vital"><div class="label"><span>Health</span><span id="insp-hp-pct"></span></div><div class="bar"><div class="bar-fill hp" id="insp-hp"></div></div></div>
+    </div>
+    <div class="subtitle insp-status-line" id="insp-status"></div>
+    <!-- Draft/undraft (draft.js -- RimWorld-style manual control, see that file's header comment
+         for the full command system this gates). Lives in the always-visible Vitals section, not
+         a collapsible sub-section below, since it's the single most important per-citizen action
+         this panel exposes -- same prominence RimWorld gives its own Draft button. Works for
+         both a single selection and a marquee multi-select (see main.js's updateInspector/
+         updateInspectorMulti), toggling every living citizen currently selected together. -->
+    <button id="insp-draft-btn" class="draft-btn" title="Draft: pulls the selected citizen(s) out of all autonomous work/needs behavior and puts them under direct control -- right-click a tile to move them there, right-click a live attacker to order an attack. [Shift+D]">🎯 Draft</button>
+  </div>
+
+  <div class="insp-section">
+    <div class="insp-section-head">Needs</div>
+    <div class="stat-row"><div class="label"><span>Hunger</span><span id="insp-hunger-pct"></span></div><div class="bar"><div class="bar-fill hunger" id="insp-hunger"></div></div></div>
+    <div class="stat-row"><div class="label"><span>Rest</span><span id="insp-rest-pct"></span></div><div class="bar"><div class="bar-fill rest" id="insp-rest"></div></div></div>
+    <div class="stat-row"><div class="label"><span>Social</span><span id="insp-social-pct"></span></div><div class="bar"><div class="bar-fill social" id="insp-social"></div></div></div>
+    <div class="stat-row"><div class="label"><span>Hydration</span><span id="insp-hydration-pct"></span></div><div class="bar"><div class="bar-fill hydration" id="insp-hydration"></div></div></div>
+  </div>
+
+  <div class="insp-section">
+    <div class="insp-section-head">Status</div>
+    <div class="subtitle" id="insp-backstory" title=""></div>
+    <div class="stat-row" title="How close this citizen is to becoming a flashpoint for unrest (Prison Architect dynamicRep.txt-style per-citizen riot-proneness -- riled up/volatile temperament/nearby fighting push it up, a good room and skill investment pull it down). Distinct from the colony-wide Unrest reading in the topbar."><div class="label"><span>Unrest Risk</span><span id="insp-unrest-pct"></span></div><div class="bar"><div class="bar-fill unrest" id="insp-unrest"></div></div></div>
+    <button id="insp-fire-corrupt-btn" class="hidden" title="This staffer was caught secretly diverting scrap. Fire them off the duty roster for a scrap reward.">🚫 Fire for Reward</button>
+    <!-- Vest purchase (world.js's buyVest, citizens.js's hasVest, siege.js's
+         CITIZEN_VEST_ARMOR_RATING/resolveCitizenArmorRoll) -- available to ANY living citizen, not
+         just staff, closing the "citizens have no defense at all" gap. Hidden once this citizen
+         already has one (main.js's updateInspector). -->
+    <button id="insp-buy-vest-btn" title="Equip this citizen with a Vest -- real armor rating that can deflect or halve incoming attacker damage (siege.js's armor-vs-penetration roll), same mechanism guards/turrets already use.">🛡️ Buy Vest</button>
+    <!-- Upgraded K9 tier (security.js's K9_UPGRADE_*/upgradeDog, real PA RobotDog anchor: ~0.75x
+         health / 1.3x endurance / 1.3x range / 1.2x speed). Only shown for a K9Handler with a
+         real dog assigned (main.js's updateInspector), hidden once that dog is already upgraded. -->
+    <button id="insp-upgrade-dog-btn" class="hidden" title="Upgrade this handler's K9 -- longer detection range, faster follow speed, and a shorter cooldown between bites (real PA RobotDog stat tradeoffs).">🐕 Upgrade K9</button>
+  </div>
+
+  <div class="insp-section">
+    <div class="insp-section-head">Skills &amp; Work</div>
+    <div class="skill-line" id="insp-skill"></div>
+    <!-- Citizen Rank (ranks.js -- RimWorld Royalty-style seniority ladder, condensed
+         non-carceral). insp-rank-line shows the current rank + progress toward the next tier;
+         insp-rankup-btn is enabled only when canRankUp() passes every gate (combined skill,
+         scrap cost, and -- from tier 3 up -- a "veteran's quarters" room-impressiveness
+         requirement), and its title always names the specific unmet requirement when disabled,
+         same "always show why" convention as the weapon-tier row below. -->
+    <div class="skill-line" id="insp-rank-line"></div>
+    <button id="insp-rankup-btn" title="Rank Up">⭐ Rank Up</button>
+    <button id="insp-workprio-btn" title="Work Priorities -- bias which jobs this citizen (or the whole roster) prefers, without removing their autonomy">📋 Work Priorities</button>
+    <!-- Per-citizen Schedule override (schedule.js's ScheduleOverride -- RimWorld Schedule-tab
+         style). Click-to-cycle button, same interaction convention as nothing else in this panel
+         but the simplest honest UI for a 4-value enum with no natural grid shape. Defaults to
+         "Colony schedule" (no override) for every citizen. -->
+    <button id="insp-schedule-btn" title="Schedule Override -- pin this citizen to a fixed Sleep/Work/Recreation bias regardless of the colony's day/night cycle (schedule.js). Click to cycle. A genuine starvation/exhaustion emergency still always wins, same as the colony-wide schedule.">🕒 Schedule: Colony schedule</button>
+    <!-- Allowed Area restriction (RimWorld Restrict-tab style, reusing zones.js's per-cell paint
+         UX pattern via input.js's 'restrict-area' tool). "Restrict Area" arms paint mode for
+         THIS selected citizen; "Clear Area" removes the whole restriction in one click (this
+         feature's own convenience -- zones.js itself has no per-cell erase either, painting a
+         different kind over a cell is how zones are ever changed, so a restriction here is
+         additive-only same as zones, with "Clear Area" as the one all-or-nothing undo). -->
+    <div class="insp-area-row">
+      <button id="insp-restrict-btn" title="Restrict Area -- paint the zone this citizen's autonomous pathing/job-seeking is confined to (jobs.js). A direct drafted move order still overrides it.">🚧 Restrict Area</button>
+      <button id="insp-restrict-clear-btn" class="hidden" title="Remove this citizen's area restriction -- they can go anywhere again.">Clear Area</button>
+    </div>
+    <!-- Manual weapon-tier override (security.js WeaponTier/StaffRoster) -- only shown for
+         Guard/Sniper (main.js's updateInspectorWeapon toggles .hidden). "Auto" hands the staffer
+         back to the fully-automatic armory-count-based assignment; a specific tier button
+         requests that tier from the armory's real stock -- if the armory doesn't currently
+         support it, the request queues (shown as "(queued)") and is issued automatically the
+         moment enough Armories exist, rather than being silently dropped or rejected outright. -->
+    <div class="insp-weapon-row" id="insp-weapon-row" title="Manually override this staffer's issued weapon tier, drawn from real armory stock -- Auto returns them to the settlement's normal automatic assignment.">
+      <button id="insp-weapon-auto-btn">Auto</button>
+      <button data-tier="Sidearm">Sidearm</button>
+      <button data-tier="Rifle">Rifle</button>
+      <button data-tier="Heavy">Heavy</button>
+      <!-- Non-lethal takedown (security.js WeaponTier.StunBaton) -- a real percentage chance to
+           briefly incapacitate an attacker instead of dealing damage, on a long (1 in-game hour)
+           cooldown. Requires at least one Armory built, same as every other non-Sidearm tier. -->
+      <button data-tier="StunBaton" title="Non-lethal: instead of dealing damage, a real chance per swing to briefly stun an attacker. Long cooldown. Requires at least one Armory.">Stun Baton</button>
+    </div>
+  </div>
+
+  <div class="insp-section" id="insp-room-section">
+    <div class="insp-section-head">Room</div>
+    <div class="subtitle" id="insp-room-role" title="Room stats where this citizen currently stands (RimWorld-style beauty/cleanliness/impressiveness labels, cosmetic flavor text next to the raw numbers)"></div>
+    <div class="stat-row hidden" id="insp-clean-row"><div class="label"><span>Cleanliness</span><span id="insp-clean-pct"></span></div><div class="bar"><div class="bar-fill clean" id="insp-clean"></div></div></div>
+    <div class="stat-row hidden" id="insp-impress-row"><div class="label"><span>Impressiveness</span><span id="insp-impress-pct"></span></div><div class="bar"><div class="bar-fill impress" id="insp-impress"></div></div></div>
+    <div class="subtitle" id="insp-beauty"></div>
+  </div>
 </div>
 
 <!-- Work Priorities panel (RimWorld Work-tab-style, see jobs.js's WorkCategory and citizens.js's
-     hasWorkPriorities/workPriority* fields). Reached from the citizen inspector's button above.
-     Grid is every living citizen (rows) x the 4 non-needs work categories (columns); each cell
-     click-cycles Disabled -> 1 -> 2 -> 3 -> Disabled. Citizens never customized here keep running
-     jobs.js's original fixed-order ladder untouched. Same full-screen .box.panel convention as
-     #research/#worldmap/#finance. -->
+     hasWorkPriorities/workPriority* fields). Reached from the citizen inspector's button above --
+     opening it highlights and scrolls to whichever citizen/single-selection was inspected, so it
+     visibly reads as "this colonist's priorities", not a disconnected colony-wide report (RimWorld's
+     real Work tab is itself this same all-colonists grid, so the grid shape is intentional -- the
+     per-citizen tie-in is the selected-row highlight). Grid is every living citizen (rows) x
+     jobs.js's 6 non-needs work categories (columns); each cell click-cycles
+     Disabled -> 1 -> 2 -> 3 -> 4 -> Disabled (RimWorld's real 4-tier granularity). Citizens never
+     customized here keep running jobs.js's original fixed-order ladder untouched. Same full-screen
+     .box.panel convention as #research/#worldmap/#finance. -->
 <div id="workprio" class="hidden">
   <div class="box panel">
     <div class="wp-head">
@@ -948,7 +1302,7 @@
       <div class="spacer"></div>
       <button class="close-btn" id="btn-workprio-close">Close</button>
     </div>
-    <div class="wp-sub">Click a cell to cycle Off &rarr; 1 &rarr; 2 &rarr; 3 &rarr; Off. Lower number = higher priority; Off means that citizen never does that job. Needs (hunger/rest/social) always still come first for everyone. A row still reading "Default" hasn't been touched -- that citizen keeps the original autonomous order (Construction &gt; Hauling &gt; Harvesting &gt; Animal Handling); click any cell to start customizing it, or use Reset to go back.</div>
+    <div class="wp-sub">Click a cell to cycle Off &rarr; 1 &rarr; 2 &rarr; 3 &rarr; 4 &rarr; Off. Lower number = higher priority; Off means that citizen never does that job. Needs (hunger/rest/social) always still come first for everyone. A row still reading "Default" hasn't been touched -- that citizen keeps the original autonomous order (Construction &gt; Hauling &gt; Harvesting &gt; Animal Handling); click any cell to start customizing it, or use Reset to go back. The highlighted row is the citizen you had selected/inspected when you opened this panel.</div>
     <div class="wp-table-wrap"><table class="wp-table" id="workprio-table"></table></div>
   </div>
 </div>
@@ -993,27 +1347,33 @@
   </div>
 </div>
 
-<div id="worldmap" class="hidden">
+<div id="worldmap" class="hidden report-panel">
   <div class="box panel">
-    <div class="map-head">
+    <div class="map-head report-head">
       <h2>Conquest Map</h2>
       <div class="spacer"></div>
       <button class="close-btn" id="btn-worldmap-close">Close [Shift+M]</button>
     </div>
     <div class="map-sub" id="worldmap-sub"></div>
+    <div class="map-range-row" id="worldmap-range-row">
+      <span id="worldmap-range-label"></span>
+      <button id="btn-worldmap-upgrade-range">Upgrade travel range</button>
+    </div>
     <div class="grid" id="worldmap-grid"></div>
     <div class="legend">
       Control rises while your settlement holds ground -- surviving waves, keeping citizens alive and
       banking scrap all push the meter. At 100% a region is yours for good and starts shipping scrap
       to whichever settlement you're currently running. Expanding moves your operation to a fresh
-      settlement in the chosen region; the one you leave keeps its progress.
+      settlement in the chosen region; the one you leave keeps its progress. Launching an expedition
+      costs scrap up front and carries a real risk of a rough landing; upgrading travel range lets you
+      leapfrog past regions directly adjacent to your holdings.
     </div>
   </div>
 </div>
 
-<div id="finance" class="hidden">
+<div id="finance" class="hidden report-panel">
   <div class="box panel">
-    <div class="fin-head">
+    <div class="fin-head report-head">
       <h2>Budget Report</h2>
       <div class="spacer"></div>
       <button class="close-btn" id="btn-finance-close">Close [Shift+B]</button>
@@ -1025,9 +1385,9 @@
   </div>
 </div>
 
-<div id="research" class="hidden">
+<div id="research" class="hidden report-panel">
   <div class="box panel">
-    <div class="res-head">
+    <div class="res-head report-head">
       <h2>Research</h2>
       <div class="spacer"></div>
       <button class="close-btn" id="btn-research-close">Close [Shift+T]</button>
@@ -1047,9 +1407,9 @@
 <!-- Cliques / faction-demand overlay (factions.js -- reskinned Prison Architect gang-demand
      system, see that file's header for the real numbers this was ported from). Same
      full-screen-overlay-with-a-toggle-button convention as #research/#worldmap/#finance above. -->
-<div id="factions" class="hidden">
+<div id="factions" class="hidden report-panel">
   <div class="box panel">
-    <div class="fac-head">
+    <div class="fac-head report-head">
       <h2>Cliques</h2>
       <div class="spacer"></div>
       <button class="close-btn" id="btn-factions-close">Close [Shift+F]</button>
@@ -1070,9 +1430,9 @@
      Architect's real reform-program schema: SessionCost/Places/SessionLength/NumSessions/
      Difficulty, a Room+Teacher requirement, Voluntary intake). Same full-screen-overlay
      convention as #research/#worldmap/#finance/#factions above. -->
-<div id="programs" class="hidden">
+<div id="programs" class="hidden report-panel">
   <div class="box panel">
-    <div class="prog-head">
+    <div class="prog-head report-head">
       <h2>Programs</h2>
       <div class="spacer"></div>
       <button class="close-btn" id="btn-programs-close">Close [Shift+P]</button>
@@ -1085,6 +1445,86 @@
       actually holding the post -- no staffer physically present, no sessions run. Citizens attend
       voluntarily when they stand to benefit, same as any other need-driven trip. A program lists
       "Unstaffed" or "No room" until both requirements are met.
+    </div>
+  </div>
+</div>
+
+<!-- Outpost Charter Contracts overlay (grants.js -- reskinned port of Prison Architect's real
+     grants.lua: a milestone checklist that pays a real reward on completion, a scaling
+     population-tier ladder unlocked strictly in sequence, and a time-locked investment
+     instrument). Same full-screen-overlay convention as #research/#worldmap/#finance/#programs
+     above. -->
+<div id="grants" class="hidden report-panel">
+  <div class="box panel">
+    <div class="grants-head report-head">
+      <h2>Outpost Charter Contracts</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-grants-close">Close [Shift+G]</button>
+    </div>
+    <div class="grants-sub" id="grants-sub"></div>
+    <div class="grid" id="grants-grid"></div>
+    <div class="invest-section">
+      <div class="invest-head">Time-Locked Investment</div>
+      <div class="invest-sub" id="invest-sub"></div>
+      <div class="invest-actions">
+        <button id="btn-invest-short"></button>
+        <button id="btn-invest-long"></button>
+      </div>
+      <div class="invest-pending" id="invest-pending"></div>
+    </div>
+    <div class="legend">
+      Charter contracts are milestone-gated: the checklist items on a card are free, but the
+      reward only pays out once every item on that card is checked, and the population-tier
+      ladder only unlocks one rung at a time. The Emergency Stabilization Charter only appears
+      once the settlement is genuinely in financial trouble -- and even then it won't pay until
+      the settlement's own finances actually recover, not the moment the crisis is spotted.
+    </div>
+  </div>
+</div>
+
+<!-- Fabrication / Labor Drones overlay (drones.js -- RimWorld Biotech DLC's mech-companion labor
+     drone, reskinned per SEA:R's salvage-tech aesthetic rather than robot/AI framing). Same
+     full-screen-overlay convention as #research/#grants/#coverage above. Build a Fabrication Bay
+     (toolbar) to unlock capacity, then fabricate a drone here locked to one WorkCategory. -->
+<div id="drones" class="hidden report-panel">
+  <div class="box panel">
+    <div class="drones-head report-head">
+      <h2>Fabrication</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-drones-close">Close [Shift+N]</button>
+    </div>
+    <div class="drones-sub" id="drones-sub"></div>
+    <div class="grid" id="drones-grid"></div>
+    <div class="drones-active" id="drones-active"></div>
+    <div class="legend">
+      A Fabrication Bay unlocks drone capacity (2 slots per Bay, same "a building unlocks
+      capacity" pattern as an Armory unlocking weapon tiers) -- it doesn't spawn a drone on its
+      own. Fabricating a drone spends scrap immediately and locks it to exactly one work category
+      for its whole lifetime; it rolls off the line after a real gestation delay. A drone has no
+      hunger, rest, social, or mood -- it never eats, sleeps, or breaks, it just works its one
+      assigned job category for as long as work of that kind exists.
+    </div>
+  </div>
+</div>
+
+<!-- Coverage Plans overlay (coverageplans.js -- reskinned port of a real Prison Architect
+     mechanic: a pre-purchased insurance-style bundle that discounts a themed set of buildables
+     AND unlocks an on-demand emergency call-in usable once a real threshold is crossed). Same
+     full-screen-overlay convention as #research/#grants/#programs above. -->
+<div id="coverage" class="hidden report-panel">
+  <div class="box panel">
+    <div class="coverage-head report-head">
+      <h2>Coverage Plans</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-coverage-close">Close [Shift+I]</button>
+    </div>
+    <div class="coverage-sub" id="coverage-sub"></div>
+    <div class="grid" id="coverage-grid"></div>
+    <div class="legend">
+      Each plan is a one-time purchase that permanently discounts its themed buildables and
+      unlocks a matching emergency call-in. A call-in only fires once its real threshold is
+      actually crossed (active fires for Fire Response, downed citizens for Medical Response) --
+      buying the plan alone does nothing until that threshold is met.
     </div>
   </div>
 </div>
@@ -1127,16 +1567,16 @@
      renderSettings() fills in the volume slider's current value, the aggression/storyteller
      dropdowns (only meaningful with a live SimWorld), and the keybinding reference from input.js's
      TOOLS table + the documented hotkeys below -- nothing here is hand-typed twice. -->
-<div id="settings" class="hidden">
+<div id="settings" class="hidden report-panel">
   <div class="box panel">
-    <div class="set-head">
+    <div class="set-head report-head">
       <h2>Settings</h2>
       <div class="spacer"></div>
       <button class="close-btn" id="btn-settings-close">Close</button>
     </div>
 
     <div class="set-section">
-      <h3>Audio</h3>
+      <h3 class="report-section-title">Audio</h3>
       <div class="field">
         <div class="label"><span>Volume</span><span class="val" id="settings-volume-val">50%</span></div>
         <input type="range" id="settings-volume" min="0" max="100" step="1" value="50">
@@ -1145,7 +1585,7 @@
     </div>
 
     <div class="set-section">
-      <h3>Difficulty</h3>
+      <h3 class="report-section-title">Difficulty</h3>
       <div class="field">
         <div class="label"><span>Attacker aggression</span></div>
         <select id="settings-aggression"></select>
@@ -1158,7 +1598,7 @@
     </div>
 
     <div class="set-section">
-      <h3>Accessibility</h3>
+      <h3 class="report-section-title">Accessibility</h3>
       <label class="set-check"><input type="checkbox" id="settings-highcontrast"> High-contrast mode (shape/pattern cues for attackers vs. citizens and zone kinds, not just color)</label>
       <div class="field">
         <div class="label"><span>UI size</span><span class="val" id="settings-textsize-val">100%</span></div>
@@ -1168,7 +1608,7 @@
     </div>
 
     <div class="set-section">
-      <h3>Keybindings (reference only -- not rebindable)</h3>
+      <h3 class="report-section-title">Keybindings (reference only -- not rebindable)</h3>
       <div class="key-groups" id="settings-keybinds"></div>
     </div>
   </div>
@@ -1200,9 +1640,9 @@
 
 <!-- Persistent reference panel (src/tutorial.js builds #help-body from HELP_SECTIONS). Same
      full-screen .box.panel convention as #research / #worldmap / #finance. -->
-<div id="help-panel" class="hidden">
+<div id="help-panel" class="hidden report-panel">
   <div class="box panel">
-    <div class="help-head">
+    <div class="help-head report-head">
       <h2>Settlement Handbook</h2>
       <div class="spacer"></div>
       <button class="replay-btn" id="btn-help-replay" type="button">↻ Replay tour</button>
@@ -1238,48 +1678,73 @@
   </div>
 
   <div class="box panel hidden" id="title-setup">
-    <h2>New Settlement</h2>
-    <div class="setup-sub">Everything here is fixed for the life of the settlement -- choose carefully.</div>
-
-    <div class="field">
-      <div class="label"><span>Map width</span><span class="val" id="setup-width-val">64</span></div>
-      <input type="range" id="setup-width" min="48" max="96" step="4" value="64">
-    </div>
-    <div class="field">
-      <div class="label"><span>Map height</span><span class="val" id="setup-height-val">64</span></div>
-      <input type="range" id="setup-height" min="48" max="96" step="4" value="64">
-      <div class="hint">Bigger maps mean more room to sprawl and more ground to defend.</div>
-    </div>
-
-    <div class="field">
-      <div class="label"><span>Starting citizens</span><span class="val" id="setup-citizens-val">24</span></div>
-      <input type="range" id="setup-citizens" min="12" max="32" step="1" value="24">
-      <div class="hint">More hands early, but a bigger settlement draws bigger waves.</div>
-    </div>
-
-    <div class="field">
-      <div class="label"><span>Seed</span></div>
-      <div class="seed-row">
-        <input type="text" id="setup-seed" inputmode="numeric" autocomplete="off">
-        <button id="btn-setup-randomize" type="button">🎲 Randomize</button>
+    <div class="setup-head">
+      <div>
+        <h2>New Settlement</h2>
+        <div class="setup-sub">Everything here is fixed for the life of the settlement -- choose carefully.</div>
       </div>
-      <div class="hint">Terrain, names, traits and every roll in the run come from this number.</div>
+      <button id="btn-begin" class="primary setup-start-btn" type="button">Start ▶</button>
     </div>
 
-    <div class="field">
-      <div class="label"><span>Attacker aggression</span></div>
-      <div class="cards" id="setup-aggression"></div>
-    </div>
+    <!-- Two-column setup layout: left column is the "what kind of run" decisions (each a
+         selectable control with one description line for whatever's currently picked), right
+         column is the "which specific run" controls (seed/citizen-count) plus a small seeded
+         preview so the seed isn't a blind number. Start is the single prominent CTA above,
+         deliberately outside both columns so it never gets mistaken for a setup control. -->
+    <div class="setup-columns">
+      <div class="setup-col setup-col-left">
+        <div class="field">
+          <div class="label"><span>Map size</span><span class="val" id="setup-mapsize-val">64 x 64</span></div>
+          <div class="dual-slider">
+            <div class="dual-slider-row"><span class="mini-label">Width</span><input type="range" id="setup-width" min="48" max="96" step="4" value="64"></div>
+            <div class="dual-slider-row"><span class="mini-label">Height</span><input type="range" id="setup-height" min="48" max="96" step="4" value="64"></div>
+          </div>
+          <div class="option-desc" id="setup-mapsize-desc"></div>
+        </div>
 
-    <div class="field">
-      <div class="label"><span>Storyteller</span></div>
-      <div class="cards" id="setup-storyteller"></div>
+        <div class="field">
+          <div class="label"><span>Attacker aggression</span></div>
+          <div class="radio-list" id="setup-aggression"></div>
+          <div class="option-desc" id="setup-aggression-desc"></div>
+        </div>
+
+        <div class="field">
+          <div class="label"><span>Storyteller</span></div>
+          <div class="radio-list" id="setup-storyteller"></div>
+          <div class="option-desc" id="setup-storyteller-desc"></div>
+        </div>
+      </div>
+
+      <div class="setup-col setup-col-right">
+        <div class="field">
+          <div class="label"><span>Preview</span></div>
+          <div class="preview-frame">
+            <button id="btn-setup-prev-seed" class="preview-nav" type="button" title="Previous seed">◀</button>
+            <canvas id="setup-preview" width="150" height="150"></canvas>
+            <button id="btn-setup-next-seed" class="preview-nav" type="button" title="Next seed">▶</button>
+          </div>
+          <div class="hint">A rough, non-final sketch of this seed's layout -- actual terrain is generated when the settlement starts.</div>
+        </div>
+
+        <div class="field">
+          <div class="label"><span>Starting citizens</span><span class="val" id="setup-citizens-val">24</span></div>
+          <input type="range" id="setup-citizens" min="12" max="32" step="1" value="24">
+          <div class="hint">More hands early, but a bigger settlement draws bigger waves.</div>
+        </div>
+
+        <div class="field">
+          <div class="label"><span>Seed</span></div>
+          <div class="seed-row">
+            <input type="text" id="setup-seed" inputmode="numeric" autocomplete="off">
+            <button id="btn-setup-randomize" type="button">🎲 Randomize</button>
+          </div>
+          <div class="hint">Terrain, names, traits and every roll in the run come from this number.</div>
+        </div>
+      </div>
     </div>
 
     <div class="setup-actions">
       <button id="btn-setup-back" type="button">Back</button>
-      <div class="spacer"></div>
-      <button id="btn-begin" class="primary" type="button">Begin Settlement</button>
     </div>
   </div>
 </div>
@@ -1289,26 +1754,33 @@
      #titlescreen (z-index 45), same as #credits directly below. main.js's renderStats() fills in
      both #stats-rows (lifetime totals) and #stats-achievements (the checklist) every time this is
      opened -- cheap enough (11 achievement cards, 5 stat rows) not to bother diffing. -->
-<div id="statspanel" class="hidden">
+<div id="statspanel" class="hidden report-panel">
   <div class="box panel">
-    <div class="stats-head">
+    <div class="stats-head report-head">
       <h2>Statistics &amp; Achievements</h2>
       <div class="spacer"></div>
       <button class="close-btn" id="btn-stats-close">Close</button>
     </div>
     <div class="stats-sub" id="stats-sub"></div>
-    <h3>Lifetime Stats</h3>
+    <h3 class="report-section-title">Lifetime Stats</h3>
     <div class="stats-rows" id="stats-rows"></div>
-    <h3>Achievements</h3>
+    <h3 class="report-section-title">Achievements</h3>
     <div class="ach-grid" id="stats-achievements"></div>
   </div>
 </div>
 
 <!-- Credits / About overlay -- reachable from the title screen's "Credits" button. Same
-     full-screen-modal convention as the other overlays; sits above #titlescreen (z-index 45). -->
-<div id="credits" class="hidden">
+     full-screen-modal convention as the other overlays; sits above #titlescreen (z-index 45).
+     Same shared report-head/close-btn title bar as every other report panel (previously this was
+     the one panel with no head row and a centered accent-filled "Close" button instead of the
+     standard top-right .close-btn -- see the CSS comment above #credits for why that changed). -->
+<div id="credits" class="hidden report-panel">
   <div class="box panel">
-    <h2>Settlement Defense</h2>
+    <div class="report-head">
+      <h2>Settlement Defense</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-credits-close">Close</button>
+    </div>
     <p class="credits-desc">
       A RimWorld / Prison Architect / Super Energy Apocalypse: Recycled mashup -- defend your
       settlement, manage its needs, and expand your reach.
@@ -1318,7 +1790,6 @@
       <li><b>Prison Architect</b> -- grading/reporting systems, reframed for a non-carceral settlement</li>
       <li><b>Super Energy Apocalypse: Recycled</b> -- wave-based siege defense</li>
     </ul>
-    <button id="btn-credits-close">Close</button>
   </div>
 </div>
 

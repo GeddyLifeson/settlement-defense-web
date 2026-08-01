@@ -13,8 +13,8 @@ SRC = ROOT / "src"
 # way that matters here since everything runs top-to-bottom, but keep it topological anyway).
 ORDER = [
     "core.js", "assets.js", "traits.js", "backstories.js", "grid.js", "zones.js", "economy.js", "research.js", "resources.js", "vehicles.js",
-    "rooms.js", "power.js", "water.js", "citizens.js", "security.js", "siege.js", "relationships.js", "director.js",
-    "schedule.js", "programs.js", "jobs.js", "factions.js", "worldmap.js", "fire.js", "weather.js", "rats.js", "grading.js", "audio.js", "metaprogress.js", "world.js", "render.js", "input.js", "tutorial.js", "main.js",
+    "rooms.js", "ranks.js", "power.js", "water.js", "citizens.js", "coverageplans.js", "security.js", "siege.js", "relationships.js", "director.js",
+    "schedule.js", "sickness.js", "programs.js", "jobs.js", "drones.js", "forcejob.js", "draft.js", "factions.js", "worldmap.js", "fire.js", "weather.js", "rats.js", "anomaly.js", "grading.js", "audio.js", "metaprogress.js", "grants.js", "world.js", "render.js", "input.js", "tutorial.js", "main.js",
 ]
 
 IMPORT_RE = re.compile(r"^\s*import\s+[\s\S]*?from\s+['\"][^'\"]*['\"];?\s*$", re.MULTILINE)

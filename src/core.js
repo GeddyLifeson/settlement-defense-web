@@ -46,6 +46,13 @@ export const StaffRoleKind = Object.freeze({
   Foreman: 'Foreman',           // Skills Workshop
   Psychologist: 'Psychologist', // Wellness Counseling
   Facilitator: 'Facilitator',   // Community Circle
+  Organizer: 'Organizer',       // Community Gathering (RimWorld Ideology Party/Festival analog,
+                                 // see programs.js's ProgramKind.CommunityGathering)
+  // Staff training-program track (Prison Architect reform_programs_dlc.txt's real STAFF-facing
+  // training programs, distinct from the citizen-facing programs above -- see programs.js's
+  // ProgramKind.GuardResponseTraining / security.js's tickStaffTraining). The trainer role, not
+  // the trainee -- Guard/Sniper/Monitor (already-defined roles above) are who ATTENDS the course.
+  Instructor: 'Instructor',
 });
 
 export const TerrainKind = Object.freeze({

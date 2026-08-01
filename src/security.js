@@ -14,6 +14,12 @@ import { ZoneKind } from './zones.js';
 // corruption section near the bottom of this file. research.js precedes security.js in
 // build.py's ORDER, so this named import is safe in the flat-concatenated bundle too.
 import { isNodeUnlocked } from './research.js';
+// Staff training-program dispatch (see tickStaffTraining near the bottom of this file):
+// programs.js comes AFTER security.js in build.py's ORDER, same "later-ordered module, function-
+// body-only usage" shape as the JobState import from jobs.js right above (jobs.js itself imports
+// FROM security.js already -- TAME_CHANCE_PER_TICK etc -- so this is the exact same already-
+// proven-safe circular-import pattern, not a new risk).
+import { PROGRAM_DEFS, isSiteStaffed, roomPostFor } from './programs.js';
 
 export const AlertLevel = Object.freeze({
   Calm: 0,
@@ -32,16 +38,47 @@ export const WeaponTier = Object.freeze({
   Sidearm: 'Sidearm',
   Rifle: 'Rifle',
   Heavy: 'Heavy',
+  // Non-lethal takedown weapon (real PA anchor: StunBaton, cost 350, 40% stun chance, 1hr
+  // cooldown -- see WEAPON_TIERS.StunBaton below for how the 1hr converts onto this project's
+  // tick rate). Deliberately NOT part of the Sidearm->Rifle->Heavy armory-stock progression
+  // (WEAPON_TIER_ORDER below) -- it's a distinct tactical choice a player opts a specific
+  // guard/sniper into via the existing manual-override system, not a strictly-better tier that
+  // more Armories should auto-issue.
+  StunBaton: 'StunBaton',
 });
 
+// penetrationBonus (0-100, same units as siege.js's ARMOR_RATING/armorPenetration scale): added
+// on top of GUARD_PENETRATION(15)/SNIPER_PENETRATION(40) in siege.js's tickStaffCombat (and
+// draft.js's drafted-combat mirror of the same pipeline) -- a higher tier doesn't just hit
+// harder, it also punches through more armor, same real-anchor shape as RimWorld's own gun
+// spread (armorPenetrationBase runs roughly 0 -> 0.35 across its tiers, i.e. 0-35 on this
+// project's 0-100 scale). Sidearm stays +0 so an unarmoried roster's penetration is byte-for-byte
+// unchanged from before this field existed.
 export const WEAPON_TIERS = Object.freeze({
-  [WeaponTier.Sidearm]: Object.freeze({ label: 'Sidearm', damageMult: 1,    rangeMult: 1,    cooldownMult: 1 }),
-  [WeaponTier.Rifle]:   Object.freeze({ label: 'Rifle',   damageMult: 1.6,  rangeMult: 1.15, cooldownMult: 1.15 }),
-  [WeaponTier.Heavy]:   Object.freeze({ label: 'Heavy',   damageMult: 2.4,  rangeMult: 0.8,  cooldownMult: 1.75 }),
+  [WeaponTier.Sidearm]: Object.freeze({ label: 'Sidearm', damageMult: 1,    rangeMult: 1,    cooldownMult: 1,    penetrationBonus: 0 }),
+  [WeaponTier.Rifle]:   Object.freeze({ label: 'Rifle',   damageMult: 1.6,  rangeMult: 1.15, cooldownMult: 1.15, penetrationBonus: 10 }),
+  [WeaponTier.Heavy]:   Object.freeze({ label: 'Heavy',   damageMult: 2.4,  rangeMult: 0.8,  cooldownMult: 1.75, penetrationBonus: 20 }),
+  // Stun Baton (see WeaponTier.StunBaton above). damageMult: 0 -- siege.js's tickStaffCombat
+  // special-cases `nonLethal` tiers to skip damageAttacker entirely and roll stunChance instead,
+  // so damageMult never actually multiplies anything, but it's kept at the honest value (this
+  // weapon deals zero lethal damage) rather than left undefined. rangeMult 0.85: a baton is a
+  // shorter-reach tool than a firearm, real tradeoff for the utility it buys. cooldownMult 25:
+  // GUARD_COOLDOWN(4 ticks) * 25 = 100 ticks = exactly 1 in-game hour at this project's
+  // GAME_DAY_TICKS(2400)/24 = 100-ticks-per-hour rate -- the real "1hr cooldown" anchor, not an
+  // arbitrary tuning pick. stunDurationTicks(30) is deliberately much shorter than the cooldown
+  // (a "brief" incapacitation per the task brief, not a lockdown) -- picked in the same
+  // neighborhood as siege.js's HELD_CITIZEN_BEAT_PAUSE_TICKS(30), this project's existing
+  // "~3-second dramatic beat" unit.
+  [WeaponTier.StunBaton]: Object.freeze({
+    label: 'Stun Baton', damageMult: 0, rangeMult: 0.85, cooldownMult: 25, penetrationBonus: 0,
+    nonLethal: true, stunChance: 0.4, stunDurationTicks: 30,
+  }),
 });
 
 // Weakest -> strongest; how far up this list a guard/sniper can be issued is gated by how many
-// Armories the settlement has actually built (see tickArmoryIssuance).
+// Armories the settlement has actually built (see tickArmoryIssuance). StunBaton is deliberately
+// NOT in this progression list -- see its doc comment on WeaponTier above -- tickArmoryIssuance
+// special-cases it separately, gated on "at least one Armory exists" rather than a stock rung.
 const WEAPON_TIER_ORDER = [WeaponTier.Sidearm, WeaponTier.Rifle, WeaponTier.Heavy];
 
 // Patrol routes + staff fatigue (FEATURE_RESEARCH.md's Prison Architect section): `post` may be
@@ -60,6 +97,13 @@ export class StaffRoster {
     this._roleById = new Map(); // citizenId -> StaffRoleKind
     this._postById = new Map(); // citizenId -> array of 1-4 {x, y} waypoints (1 = static post)
     this._weaponById = new Map(); // citizenId -> WeaponTier, see tickArmoryIssuance
+    // Manual weapon-tier override (RimWorld-style "player picks this one's gear" ask): citizenId
+    // -> WeaponTier the PLAYER explicitly requested, distinct from `_weaponById` above (which is
+    // the tier they're actually currently carrying -- may lag behind the request, see
+    // tickArmoryIssuance's queueing behavior). A citizen with no entry here is untouched and keeps
+    // the fully-automatic armory-count-based assignment exactly as before -- this map only ever
+    // holds staff the player has actually clicked an override for.
+    this._manualWeaponById = new Map();
     this._patrolIndexById = new Map(); // citizenId -> index of the waypoint currently being walked to
     this._patrolPauseById = new Map(); // citizenId -> ticks spent paused at the current waypoint
     this._offDutyById = new Set(); // citizenId currently clocked off, recovering hunger/rest like a normal citizen
@@ -70,6 +114,14 @@ export class StaffRoster {
     this._corruptEligible = new Set();      // citizenId flagged "crooked" -- capable of going actively corrupt
     this._corruptActiveUntil = new Map();   // citizenId -> tick an active bribe period ends
     this._corruptDiscovered = new Set();    // citizenId caught mid-bribe, awaiting the player firing them
+
+    // Staff training-program track (programs.js's ProgramKind.GuardResponseTraining, see
+    // tickStaffTraining near the bottom of this file): citizenId -> true once this staffer has
+    // graduated the full course. Distinct from citizens.js's store.programSessionsDone (which
+    // resets to 0 after every completed course, citizen-facing programs included) -- this is a
+    // one-way "already trained" flag tickStaffTraining reads so it stops re-dispatching a
+    // graduate, matching the task's "cheap item" scope: one course, not a repeatable grind.
+    this._trainingGraduated = new Set();
   }
 
   // post may be a single {x, y} (backward compat / old save shape) or an array of 2-4 {x, y}
@@ -131,29 +183,92 @@ export class StaffRoster {
     this._weaponById.set(citizenId, tier);
   }
 
+  // ---- manual weapon-tier override (see tickArmoryIssuance) ----
+  // Player-requested tier, or null if this staffer has never been manually touched (still fully
+  // automatic).
+  manualWeaponOf(citizenId) {
+    return this._manualWeaponById.get(citizenId) ?? null;
+  }
+
+  setManualWeapon(citizenId, tier) {
+    this._manualWeaponById.set(citizenId, tier);
+  }
+
+  // Hands a staffer back to fully-automatic armory-count-based assignment.
+  clearManualWeapon(citizenId) {
+    this._manualWeaponById.delete(citizenId);
+  }
+
+  // True while a manual override is set but the armory doesn't yet stock enough of that tier to
+  // actually issue it -- tickArmoryIssuance falls back to the best tier it CAN issue in the
+  // meantime and keeps re-checking every tick, so this flips false on its own once enough
+  // Armories are built (or the player lowers the request).
+  isManualWeaponPending(citizenId) {
+    const requested = this._manualWeaponById.get(citizenId);
+    if (requested == null) return false;
+    return this._weaponById.get(citizenId) !== requested;
+  }
+
   // ---- corrupt/bribable staff (see tickStaffCorruption below) ----
   isCorruptEligible(citizenId) { return this._corruptEligible.has(citizenId); }
   isCorruptActive(citizenId) { return this._corruptActiveUntil.has(citizenId); }
   isCorruptDiscovered(citizenId) { return this._corruptDiscovered.has(citizenId); }
+
+  // ---- staff training (see tickStaffTraining below) ----
+  isTrainingGraduated(citizenId) { return this._trainingGraduated.has(citizenId); }
+  markTrainingGraduated(citizenId) { this._trainingGraduated.add(citizenId); }
 }
 
-// Armory issuance (scoped version per FEATURE_RESEARCH.md: no per-citizen pick-a-tier UI --
-// simply, once assigned to Guard/Sniper AND an Armory exists, they're equipped with whatever
-// tier the settlement's Armory count supports). Every built (not destroyed/under-construction)
-// Armory unlocks one more rung of WEAPON_TIER_ORDER, so a second Armory is a real strategic
-// payoff, not just a cosmetic duplicate. Runs every tick (world.js) so a freshly-assigned guard
-// or a freshly-completed Armory both propagate immediately, and a destroyed Armory correctly
-// downgrades everyone back rather than leaving them permanently over-equipped.
+// Armory issuance. Originally (per FEATURE_RESEARCH.md) scoped as no per-citizen pick-a-tier UI
+// -- every Guard/Sniper on the roster with no manual override just gets whatever tier the
+// settlement's Armory count supports. That automatic behavior is UNCHANGED below for anyone the
+// player hasn't touched. RimWorld-style manual override (later ask): a staffer with a
+// `roster._manualWeaponById` entry gets THAT tier instead, but never above what current armory
+// stock actually supports -- there's no per-unit weapon inventory in this game (an Armory unlocks
+// a whole rung of WEAPON_TIER_ORDER for everyone, not N individual weapons), so "stock" for a
+// tier here means "the armory count has unlocked that rung", the same real gate the automatic
+// path already uses. If the player requests a tier stock doesn't support yet, this QUEUES the
+// request (documented choice, not a straight reject): the staffer keeps the best tier stock
+// currently allows and is auto-promoted to the requested tier the moment enough Armories exist,
+// with zero further action needed -- natural to implement since this function already re-runs
+// every tick anyway, and it means the player's choice is never silently lost or requires them to
+// remember to re-click it later. Every built (not destroyed/under-construction) Armory unlocks
+// one more rung of WEAPON_TIER_ORDER, so a second Armory is a real strategic payoff, not just a
+// cosmetic duplicate. Runs every tick (world.js) so a freshly-assigned guard, a freshly-completed
+// Armory, or a fresh manual override all propagate immediately, and a destroyed Armory correctly
+// downgrades everyone (auto AND manual-but-now-unsupported) back rather than leaving them
+// permanently over-equipped -- no weapon is ever "created out of thin air" beyond what the
+// armory count actually backs.
 export function tickArmoryIssuance(roster, structures) {
   let armoryCount = 0;
   for (const s of structures) {
     if (s.kind === 'armory' && !s.destroyed && !s.underConstruction) armoryCount++;
   }
-  const tierIndex = Math.min(WEAPON_TIER_ORDER.length - 1, armoryCount);
-  const tier = WEAPON_TIER_ORDER[tierIndex];
+  const stockTierIndex = Math.min(WEAPON_TIER_ORDER.length - 1, armoryCount);
+  const autoTier = WEAPON_TIER_ORDER[stockTierIndex];
   for (const [citizenId, kind] of roster._roleById.entries()) {
     if (kind !== StaffRoleKind.Guard && kind !== StaffRoleKind.Sniper) continue;
-    roster.equip(citizenId, tier);
+    const manualTier = roster.manualWeaponOf(citizenId);
+    if (manualTier == null) {
+      roster.equip(citizenId, autoTier);
+      continue;
+    }
+    // Stun Baton (WeaponTier.StunBaton): outside WEAPON_TIER_ORDER's stock-rung progression, so
+    // it can't be looked up by index below. Real gate: needs at least one Armory built at all
+    // (the same "an Armory is what lets you issue anything beyond bare hands" premise the
+    // automatic path uses), independent of how many Armories -- a second/third Armory unlocks
+    // Rifle/Heavy stock, not "more" non-lethal capability. Falls back to the best tier the armory
+    // DOES support (same queueing behavior as an unsupported Rifle/Heavy request) if no Armory
+    // exists yet.
+    if (manualTier === WeaponTier.StunBaton) {
+      roster.equip(citizenId, armoryCount >= 1 ? WeaponTier.StunBaton : autoTier);
+      continue;
+    }
+    const manualIndex = WEAPON_TIER_ORDER.indexOf(manualTier);
+    // Clamp to whatever the armory actually stocks right now -- issues the requested tier
+    // immediately if stock covers it, otherwise the best available tier while the request queues.
+    const grantedIndex = Math.min(manualIndex, stockTierIndex);
+    roster.equip(citizenId, WEAPON_TIER_ORDER[grantedIndex]);
   }
 }
 
@@ -166,6 +281,10 @@ export function tickStaffDuty(store, roster, idOf, speed = 0.05) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
     if (store.isDownedAt(i)) continue; // downed staff can't hold their post
+    // Drafted (draft.js): a drafted guard/sniper/monitor leaves their post entirely and follows
+    // direct player orders instead -- same "pulled out of autonomy, even mid-task" rule jobs.js
+    // applies, just for the staff-duty side of things.
+    if (store.isDraftedAt(i)) continue;
     const id = idOf(i);
     if (!roster.isStaff(id)) continue;
     if (roster.isOffDuty(id)) continue; // clocked off recovering a need -- see tickStaffOffDuty
@@ -232,6 +351,9 @@ export function tickStaffOffDuty(store, roster, idOf, zones) {
   for (let i = 0; i < store.count; i++) {
     if (!store.isAliveAt(i)) continue;
     if (store.isDownedAt(i)) continue;
+    // Drafted (draft.js): no needs-seeking at all while drafted, same rule as jobs.js's tickJobs
+    // -- a drafted citizen doesn't get auto-dispatched off duty for food/rest either.
+    if (store.isDraftedAt(i)) continue;
     const id = idOf(i);
     if (!roster.isStaff(id)) continue;
 
@@ -269,6 +391,35 @@ const DOG_RANGE = 2.5; const DOG_DAMAGE = 0.08; const DOG_COOLDOWN = 3; const DO
 // TURRET/GUARD/TESLA/TRAP/SNIPER_PENETRATION constants) -- a dog is cheap/fast, not armor-piercing.
 const DOG_PENETRATION = 10;
 
+// Upgraded K9 tier (real PA anchor: RobotDog -- ~0.75x health / 1.3x endurance / 1.3x range /
+// 1.2x speed vs a normal dog). This project's dogs have no damage-taking system of their own --
+// nothing in the sim currently attacks a K9 unit, tickDogs below is bite-out only -- so
+// K9_UPGRADE_HEALTH_MULT is stored as real per-dog data (dog.healthMult, readable/verifiable via
+// window.__debug) rather than gated behind a whole new dog-combat system this scope doesn't call
+// for; endurance/range/speed are all real, immediately measurable effects on tickDogs below (a
+// shorter cooldown between bites, a longer detection range, a faster follow speed).
+export const K9_UPGRADE_HEALTH_MULT = 0.75;
+export const K9_UPGRADE_ENDURANCE_MULT = 1.3; // cuts effective cooldown -- more bites per minute
+export const K9_UPGRADE_RANGE_MULT = 1.3;
+export const K9_UPGRADE_SPEED_MULT = 1.2;
+// Priced with trap(15)/turret(25) (economy.js BUILD_COST) -- upgrading a dog you already own is a
+// real strategic investment in an existing K9, not a cheap add-on.
+export const K9_UPGRADE_SCRAP_COST = 25;
+
+// Upgrades an already-tamed dog (any entry in world.dogs) in place. Mirrors world.buyVest's
+// per-unit-purchase shape (spend scrap, flip a flag) rather than economy.js's structure-purchase
+// path, since a dog isn't a Structure. Returns { ok: true } or { ok: false, reason }.
+export function upgradeDog(world, dog) {
+  if (!dog) return { ok: false, reason: 'invalid' };
+  if (dog.upgraded) return { ok: false, reason: 'already' };
+  if (world.scrap < K9_UPGRADE_SCRAP_COST) return { ok: false, reason: 'cost' };
+  world.scrap -= K9_UPGRADE_SCRAP_COST;
+  if (world.finance) world.finance.buildSpend += K9_UPGRADE_SCRAP_COST;
+  dog.upgraded = true;
+  dog.healthMult = K9_UPGRADE_HEALTH_MULT;
+  return { ok: true };
+}
+
 // K9 units: each dog follows its handler loosely and bites the nearest attacker in range,
 // fast and cheap per-hit compared to a guard's sidearm -- matches the GDD's non-carceral
 // civil-protection-force framing ("guards/snipers/K9/CCTV", never inmates).
@@ -279,23 +430,29 @@ export function tickDogs(dogs, citizens, roster, attackers, onScrap, rng = Math.
     const ownerIdx = findCitizenIndexById(citizens, dog.ownerId);
     if (ownerIdx < 0 || !citizens.isAliveAt(ownerIdx)) continue;
 
+    // Upgraded K9 stats (see K9_UPGRADE_* above) -- unupgraded dogs get exactly the old constants
+    // unchanged, byte-for-byte, so this is backward compatible with every existing save/dog.
+    const range = dog.upgraded ? DOG_RANGE * K9_UPGRADE_RANGE_MULT : DOG_RANGE;
+    const speed = dog.upgraded ? DOG_SPEED * K9_UPGRADE_SPEED_MULT : DOG_SPEED;
+    const cooldownMax = dog.upgraded ? Math.max(1, Math.round(DOG_COOLDOWN / K9_UPGRADE_ENDURANCE_MULT)) : DOG_COOLDOWN;
+
     const dx = citizens.x[ownerIdx] - dog.x;
     const dy = citizens.y[ownerIdx] - dog.y;
     const dist = Math.hypot(dx, dy);
     if (dist > 1.2) {
-      dog.x += (dx / dist) * DOG_SPEED;
-      dog.y += (dy / dist) * DOG_SPEED;
+      dog.x += (dx / dist) * speed;
+      dog.y += (dy / dist) * speed;
     }
 
     if (dog.cooldown > 0) { dog.cooldown--; continue; }
-    let bestI = -1, bestDist = DOG_RANGE;
+    let bestI = -1, bestDist = range;
     for (let i = 0; i < attackers.count; i++) {
       if (!attackers.isAliveAt(i)) continue;
       const d = Math.hypot(attackers.x[i] - dog.x, attackers.y[i] - dog.y);
       if (d < bestDist) { bestDist = d; bestI = i; }
     }
     if (bestI >= 0) {
-      dog.cooldown = DOG_COOLDOWN;
+      dog.cooldown = cooldownMax;
       if (damageAttacker(attackers, bestI, DOG_DAMAGE, DamageType.Kinetic, DOG_PENETRATION, rng)) onScrap?.(4);
     }
   }
@@ -539,6 +696,7 @@ export function fireCorruptStaff(world, citizenId) {
   roster._roleById.delete(citizenId);
   roster._postById.delete(citizenId);
   roster._weaponById.delete(citizenId);
+  roster._manualWeaponById.delete(citizenId);
   roster._patrolIndexById.delete(citizenId);
   roster._patrolPauseById.delete(citizenId);
   roster._offDutyById.delete(citizenId);
@@ -584,4 +742,67 @@ export function forceActivateCorruption(world, citizenId) {
   roster._corruptEligible.add(citizenId);
   roster._corruptActiveUntil.set(citizenId, world.currentTick + CORRUPTION_BRIBE_DURATION_TICKS);
   return true;
+}
+
+// --- Staff training-program track (Prison Architect reform_programs_dlc.txt's real staff-facing
+// training tracks, distinct from programs.js's citizen-facing programs -- see
+// ProgramKind.GuardResponseTraining there) ---
+//
+// Staff never reach jobs.js's Idle branch while on duty (world.js's isStaffOnDutyAt gates
+// staffOnDuty(i) true for anyone not off-duty, and tickJobs's very first per-citizen check
+// `if (staffOnDuty(i)) continue;` skips them entirely) -- so unlike a citizen, who opportunistically
+// finds a joinable program site through jobs.js's own findJoinableSite call, an eligible
+// Guard/Sniper/Monitor needs to be dispatched here directly, same shape as dispatchStaffToNeed's
+// food/rest trip above. The trick: temporarily flip roster.setOffDuty(id, true) -- that's the one
+// existing signal that makes world.js's isStaffOnDutyAt go false, which is what actually lets
+// tickJobs process this citizen's SeekingProgram/Attending state machine (programs.js's exact same
+// machinery every citizen-facing program already uses). tickStaffOffDuty's own existing "back to
+// Idle -> resume on-duty if no food/rest need" branch (see above) then hands them back to
+// tickStaffDuty's patrol automatically once jobs.js resets jobState to Idle -- no new "resume"
+// code needed here, that plumbing already existed for the food/rest case and is generic.
+const TRAINABLE_ROLES = new Set([StaffRoleKind.Guard, StaffRoleKind.Sniper, StaffRoleKind.Monitor]);
+
+function findTrainingSite(world) {
+  if (!world.programSites) return null;
+  for (const site of world.programSites) {
+    if (site.kind !== 'guard_response_training') continue;
+    if (site.attendeeIds.length >= PROGRAM_DEFS[site.kind].places) continue;
+    if (!isSiteStaffed(world, site)) continue;
+    return site;
+  }
+  return null;
+}
+
+// Called once per world tick (world.js), after tickStaffOffDuty and before tickJobs -- same
+// ordering reasoning as tickStaffOffDuty's own doc comment (the dispatch needs to land before
+// tickJobs runs the same tick so the fresh SeekingProgram state actually gets walked). Cheap:
+// bails instantly if no training site exists yet (the common case for most of a run), and even
+// once one does, only iterates the (small) roster-eligible population, same cost shape as
+// tickArmoryIssuance above.
+export function tickStaffTraining(world, idOf) {
+  if (!world.programSites || world.programSites.length === 0) return;
+  const roster = world.roster;
+  const store = world.citizens;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i) || store.isDownedAt(i) || store.isDraftedAt(i)) continue;
+    const id = idOf(i);
+    if (!roster.isStaff(id)) continue;
+    if (!TRAINABLE_ROLES.has(roster.kindOf(id))) continue;
+    if (roster.isTrainingGraduated(id)) continue; // one course is enough, see the StaffRoster doc comment
+    if (roster.isOffDuty(id)) continue; // busy with a genuine food/rest trip, don't interrupt it
+    // On-duty staff's jobState is otherwise untouched by tickStaffDuty (it only moves store.x/y),
+    // so Idle here means "currently just holding post/patrol, free to dispatch" -- same bar
+    // dispatchStaffToNeed implicitly relies on for the food/rest case via the off-duty flag.
+    if (store.jobState[i] !== JobState.Idle) continue;
+
+    const site = findTrainingSite(world);
+    if (!site) continue;
+
+    const target = roomPostFor(site.room, world.grid);
+    store.jobState[i] = JobState.SeekingProgram;
+    store.targetX[i] = target.x; store.targetY[i] = target.y;
+    store._jobRef[i] = site;
+    store.programSite[i] = site;
+    roster.setOffDuty(id, true);
+  }
 }

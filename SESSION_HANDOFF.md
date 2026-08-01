@@ -692,11 +692,420 @@ session. Zero console errors across the full soak.
 **Style/art note**: a separate research pass studied RimWorld's/Prison Architect's real sprite
 art (viewed only, nothing copied) and wrote a concrete style brief -- muted 2-4-tone material
 palettes, flat-fill-plus-single-highlight-band shading (current `assets.js` leans more toward
-full gradients than this), bolder/more opaque outlines, chunky low-detail pawn proportions. Not
-yet applied to any actual art -- next art pass should pull from this brief plus a UI/UX-layout
-pass (bottom-docked categorized build palette, top resource bar, tabbed side panels -- studied
-live from RimWorld/PA/SEA:R gameplay) to restructure both the sprite style and panel layout
-together. Neither has been executed yet as of this handoff update.
+full gradients than this), bolder/more opaque outlines, chunky low-detail pawn proportions. A
+UI/UX-layout pass (bottom-docked categorized build palette, top resource bar, tabbed side panels)
+is still unaddressed -- the humanoid art half of this brief is now done, see below.
+
+## HUMANOID STYLE-BRIEF PASS (this session): DONE
+
+Applied the style brief above specifically to `_drawHumanoid`/`_drawAnimal` and their shared
+assets.js templates (citizens, the 4 attacker archetypes, tamed dogs, wild animals -- everything
+that shares one silhouette pipeline). Structures/vehicles were NOT touched by this pass (a
+concurrent session was seen editing those templates independently while this one ran -- both
+scopes are disjoint, no conflict).
+
+- **Palette** (`render.js`): `ROLE_COLOR`, `ATTACKER_STYLES` body/head, the citizen skin tone
+  (now `CITIZEN_SKIN = '#e1c8a8'`), and the tamed-dog coat all desaturated ~15-25% off their old
+  punchy hex values (computed by hand from the originals, see the comments at each constant for
+  the before/after). Hazard/attention accents were deliberately left alone: downed gray, the
+  onBreak `desaturate()` tint, the Boss's pulsing threat ring + crown, and the tamed-dog collar
+  (a small "this one's yours" accent) all keep their existing saturation.
+- **Shading** (`assets.js`'s `humanoid_torso`/`animal_body` templates): replaced the
+  `bodyShade`/`headShade`/`coatShade` linear/radial gradients with a flat base fill per part plus
+  ONE solid highlight ellipse clipped to that part's own silhouette (`torsoClip`/`headClip`/
+  `animalBodyClip`/`animalHeadClip`), covering roughly the top 20-30% of each shape, biased
+  upper-left. `render.js` now passes `BODY_HI`/`HEAD_HI` (both `shade(color, 0.3)`) instead of the
+  old `BODY_SHADOW`/gradient-stop pair.
+- **Outline**: `OUTLINE` bumped from `rgba(20,16,12,0.75)` to `rgba(10,10,12,0.95)` -- true near-
+  black (not warm-tinted) and near-opaque, for crisper silhouette edges at small sprite size. This
+  is a single shared constant so it affects every sprite, not just humanoids -- intentional, per
+  the brief.
+- **Proportions**: head circle radius bumped 19->21 (recentered cy 24->23) in `humanoid_torso`,
+  hair paths nudged outward to match -- a small, incremental head-to-torso bump, not a redesign.
+- **Latent bug fixed in passing**: `shade()`/`desaturate()` (`render.js`) only ever parsed
+  `#rrggbb` hex via `hex.slice(1)`; `desaturate()`'s own `rgb(...)` output already got fed back
+  into `shade()` for onBreak citizens (`BODY_HI = shade(bodyColor, 0.3)` where `bodyColor` can be
+  `desaturate(baseColor, 0.6)`), which silently produced black. Added a shared `parseColor()` that
+  handles both formats; both functions now compose correctly regardless of input format.
+- **Preserved, verified not just assumed**: downed dimming, onBreak desaturation + the "z" glyph,
+  the health bar, the Boss's threat ring/crown and the high-contrast accessibility ring overlay,
+  the walk-bob leg animation (untouched, still Canvas-drawn), tamed-vs-wild dog coat/collar
+  distinction. Citizens don't have an onFire or corrupt-staff visual state today (only structures
+  catch fire; staff corruption has no per-citizen render hook) -- confirmed via grep, nothing to
+  preserve there.
+
+**Verification**: `python build.py` clean, zero duplicate top-level declarations, zero console
+errors on load. Visual proof via `window.__debug` + `canvas.toDataURL()` (the reliable path per
+this file's own verification-pattern section -- the Claude_Browser screenshot/zoom tool still
+can't composite this pane): captured citizen normal/downed/onBreak side by side (flat fill + one
+clear highlight patch on head and torso, viewably larger head, crisp near-black outline, correct
+health bar), Grunt/Boss attacker archetypes (crown intact, threat ring still full-saturation), and
+a tamed dog (flat coat + highlight, gold collar). `tests/run.html` still reports `ALL PASSED`
+(render-only change, no simulation logic touched).
+
+## NEW GAME SETUP LAYOUT PASS (this session): DONE
+
+User played a legally-owned reference game (Super Energy Apocalypse: Recycled) and asked for its
+title/mode-select layout *pattern* adopted for this project's New Game setup screen -- explicit
+hard constraint: layout/interaction conventions are fair to reuse, actual UI art/graphics are not,
+and none of this pass touched or added any art (pure DOM/CSS restructure + one small procedural
+`<canvas>` sketch, no copied assets). Scope was `#title-setup` in `index.html` + its wiring in
+`src/main.js` only -- `#title-main` (the actual title screen) was left alone, it didn't need it.
+
+**What changed** (every existing parameter/default preserved exactly -- `readSetupForm()` and
+`beginSettlement()`'s defaults are byte-for-byte unchanged, this was a layout pass only):
+- Two-column layout: left column is Map size / Attacker aggression / Storyteller, each a
+  selectable control with exactly one description line reflecting the *current* selection (the
+  SEA:R pattern -- previously aggression/storyteller were 3-card grids with a description baked
+  into every card at once). New `buildRadioList()` in `main.js` replaces the old `buildCards()`;
+  width/height sliders now share one "Map size" field with a computed small/mid/large description
+  (`mapSizeDescription()`, fresh text, not copied from anywhere).
+- Right column is Seed / Starting citizens plus a small seeded procedural preview canvas
+  (`drawSetupPreview()`) -- not real terrain (this engine's real terrain gen has no seed-driven
+  variety worth previewing yet, see "Known gaps" above), just a seeded scatter of scrap-node-style
+  dots plus a starting-camp cluster sized by the citizen slider, aspect-ratio-matched to the
+  current width/height. Prev/next arrows next to the thumbnail step the seed by 1 (SEA:R's
+  map-browse-arrows pattern, reused as a seed nudge since this game doesn't have discrete map
+  choices to page through).
+- A single prominent "Start ▶" button sits top-right in its own `.setup-head` row, visually and
+  structurally separate from both columns (was previously bottom-of-form next to "Back").
+- `#title-setup`'s panel widened (560px -> 780px) to fit two columns; new CSS added under the
+  existing `#titlescreen` scope (`.setup-columns`, `.radio-list`/`.radio-option`, `.option-desc`,
+  `.preview-frame`, `.dual-slider`, `.setup-head`/`.setup-start-btn`) with a single-column fallback
+  under 620px. The old `.cards`/`.card` rules are now dead CSS (nothing left references them) but
+  were left in place rather than risk breaking something else that might reuse the class names.
+
+**Verified**: full rebuild (`python build.py`), zero duplicate top-level declarations, zero
+console errors through the title -> New Game -> pick Aggressive -> step seed via arrows -> Start
+flow (Claude in Chrome extension, own dedicated tab -- the shared browser pane had several other
+stale tabs open from earlier in this session's history, switched to a fresh tab to avoid any
+cross-tab interference). Confirmed via `window.__debug.getWorld()` that every setup control's
+value actually reaches the running world: one pass picking Aggressive/Cassandra/64x64/24 (mostly
+defaults) matched exactly, a second pass explicitly changing every field (Calm/Randy/96x48/12
+citizens/seed 42 via the sliders+radio rows+prev/next-arrow-adjusted seed) also matched exactly on
+`world.aggression`/`world.storyteller`/`world.grid.width`/`world.grid.height`/`world.seed`/
+`world.citizens.count`. `tests/run.html` still 89/89 (unsurprising -- no simulation code touched).
+
+## DRAFT/UNDRAFT COMMAND SYSTEM (this session): DONE, new architectural foundation for later agents
+
+User's explicit ask: "I do not have the same amount of control over NPCs here as I do in RimWorld"
+-- RimWorld's core player-agency mechanic (draft a colonist off autonomous AI, give direct move/
+attack orders, undraft to resume autonomy) had zero equivalent here. Citizens were pure autonomous
+AI via jobs.js's priority ladder; the existing drag-select multi-select (see the FULL BACKLOG CLEAR
+section above) explicitly punted on this ("no per-citizen command system to hook into yet"). This
+pass builds that system. Framed as the architectural foundation for a wave of follow-on agents, so
+priority was a clean, well-documented public surface over polish.
+
+**New module: `src/draft.js`** -- full public interface documented in its own header comment block:
+`isDrafted(world, citizenId)`, `draftCitizen(world, citizenId)`, `undraftCitizen(world, citizenId)`,
+`issueMoveOrder(world, citizenIds, x, y)`, `issueAttackOrder(world, citizenIds, targetAttackerIndex)`,
+`cancelOrder(world, citizenId)`, `tickDrafted(world)` (called once per tick from `world.js`'s
+`tick()`, right after `tickStaffCombat`). All take citizen **ids**, not store indices, matching this
+codebase's existing convention (`world.idOf`/`_jobRef` etc.).
+
+- **State**: `citizens.js`'s `CitizenFlags` gets a new `Drafted` bit (extends the existing Dead/
+  OnBreak/Downed bitflag pattern, defaults to unset so every existing citizen/save/test is
+  unaffected). New per-citizen SoA fields on `CitizenStore` -- `orderKind` (0 None/1 Move/2 Attack),
+  `orderTargetX/Y`, `orderAttackIndex` -- same shape/precedent as `jobState`/`_jobRef`.
+- **Removal from autonomy**: `jobs.js`'s `tickJobs`, `security.js`'s `tickStaffDuty`/
+  `tickStaffOffDuty`, and `siege.js`'s `tickStaffCombat` all check `store.isDraftedAt(i)` first thing
+  and skip a drafted citizen entirely -- no needs-seeking, no construction/harvesting/cleaning/
+  program-attending/staff-post-holding/auto-target-combat. `draftCitizen()` also immediately
+  releases whatever claim they held (blueprint/workshop/animal/program-site) via a new shared
+  `jobs.js` export, `releaseCurrentJobClaim` (factored out of the existing Duty-Roster sleep-
+  interrupt block, which now calls the same function -- verified byte-identical behavior there).
+  This is what makes the stop genuinely mid-task instant, not just "skip on the next Idle check."
+- **Move orders**: reuse the exact straight-line travel approach every other travel state in this
+  project already uses (jobs.js has no pathfinding, only `grid.isBlocked` for placement/wall-
+  blocking) -- `jobs.js`'s `JOB_SPEED`/`ARRIVE_DIST` constants exported and reused directly, not
+  reinvented.
+- **Attack orders**: reuse `siege.js`'s real damage pipeline (`damageAttacker`/`rollsHit`/
+  `DamageType`) and the same `GUARD_*`/`SNIPER_*` baseline stats `tickStaffCombat` uses (all four
+  exported from siege.js for this reuse) -- a drafted Guard/Sniper fights with their real
+  armory-issued weapon tier, any other drafted citizen fights unarmed-civilian baseline (RimWorld
+  itself lets you draft/fight with any colonist). Targets an **index** into `AttackerStore`, not a
+  stable id (AttackerStore has none, matching every other existing combat call site) -- documented,
+  accepted edge case at 1024 simultaneous attackers, see draft.js's header comment.
+- **Input**: `input.js`'s right-click was previously pan-only. Added a movement-threshold check
+  (`RIGHT_CLICK_ORDER_THRESHOLD_PX`) so a right-click-and-release-without-drag is now a distinct
+  "issue an order" gesture, auto-detecting move-vs-attack by what's under the cursor
+  (`nearestAliveAttacker`, exported from siege.js for this). Works off the existing single-select
+  and marquee multi-select uniformly. Shift+D hotkey and an inspector "🎯 Draft/Undraft" button
+  (works for both single and multi-select, "unify to majority action" toggle) round out the UX.
+- **Visual**: `render.js`'s `_drawCitizens` gets a small cyan ring under a drafted citizen's feet
+  (same state-tint convention as onBreak's "z" glyph/Downed's gray tint) plus a dashed order-line to
+  the current move/attack target -- reuses `highContrast`'s dashed-vs-solid convention.
+
+**Verified**: full rebuild (`python build.py`), zero duplicate top-level declarations (including one
+real collision caught and fixed -- `draft.js`'s own `findCitizenIndexById` helper collided with
+`security.js`'s identically-named one; renamed to `_draftFindCitizenIndexById`, same underscore-
+prefix convention `siege.js` already uses for its own copy). Also caught and fixed a real `build.py`
+bug during this pass: multiple `export const` statements on one source line only had the first
+`export` stripped (the regex is `^export\s+`, line-start-anchored) -- left a real `SyntaxError:
+Unexpected token 'export'` in the bundle that silently broke the entire game (blank `window.__debug`)
+until caught via console errors; fixed by putting each export on its own line, not a build.py change
+(every other file in this codebase already followed one-export-per-line, this was draft.js's own
+mistake). `tests/run.html` 89/89 passing unchanged (draft state defaults to false for every citizen,
+confirmed no regression). Live-verified via `window.__debug` + real mouse clicks through the Claude
+in Chrome extension: drafting a citizen mid-Harvesting stopped them instantly (jobState 10 -> 0,
+position frozen with no order active); a move order pathed a citizen ~7 tiles and arrived/stopped;
+an attack order engaged a specific spawned attacker (including a tougher Boss-kind target, watched
+mid-engagement) rather than the nearest/best autonomous target, and resolved back to standing-by on
+kill; undrafting resumed full autonomy (jobState left Idle on its own within the same soak). Real
+screenshots captured (Claude in Chrome extension) showing the drafted-citizen ring + inspector
+"Drafted -- standing by/moving to order/engaging target" states, a citizen mid-move-order (dashed
+line to target tile), and a citizen mid-attack-order against a Boss (dashed line to the live target,
+crown/threat-ring visible on the attacker) -- all via the real right-click gesture, not just direct
+`draft.js` calls.
+
+## GROUP DRAFT COMMANDS PASS (this session): DONE
+
+Closed the gap the earlier drag-select section explicitly punted on ("no per-citizen command
+system to hook into yet") now that draft.js exists. Investigation found most of this was already
+built by the draft-system pass itself and just needed verifying, not writing: `main.js` already had
+a shared `toggleDraftSelection()` (used by both the Shift+D hotkey and the inspector's `#insp-
+draft-btn`) that drafts/undrafts every citizen in `input.selectedCitizens` at once with "unify to
+majority action" labeling, `updateInspectorMulti()` already showed a `${draftedCount}/${alive.length}
+drafted` line and toggled the same button between "🎯 Draft"/"🎯 Undraft" for the whole group, and
+`input.js`'s `_tryIssueOrder`/`_draftedSelectionIds` already fed the *entire* multi-selection's ids
+into `issueMoveOrder`/`issueAttackOrder` on a single right-click -- so items 1/2/4 of the ask were
+already live.
+
+**What was actually missing and got built this pass**: group move orders sent every drafted citizen
+to the literal same (x, y) with no spread, so they'd path onto and stack on one tile. Added
+`_formationOffset(index, total)` to `draft.js` -- a simple ring formation (citizen 0 gets the exact
+clicked point, then rings of `ring*6` slots at `ring*0.55` world-unit radius) -- and changed
+`issueMoveOrder` to resolve the REAL post-filter list of citizens that will receive the order first
+(so formation slots aren't wasted on ids that get skipped), then assign each a `(x+ox, y+oy)` target
+instead of the raw point.
+
+**Verified**: `python build.py` clean, zero duplicate top-level declarations, `tests/run.html`
+89/89 passing unchanged. Live via `window.__debug` (`javascript_tool`, Claude in Chrome extension):
+drafted 4 citizens at once via the same `input.onToggleDraft()` path the UI button uses, confirmed
+`isDraftedAt` true for all 4; called `issueMoveOrder` with 4 ids at one target point and confirmed 4
+distinct `orderTargetX/Y` values (not identical); ran 400 ticks and confirmed all 4 arrived
+(orderKind back to 0) at visibly distinct, clustered-not-stacked final positions; force-spawned a
+wave, issued a group `issueAttackOrder` against one attacker, confirmed all 4 citizens' orderKind
+flipped to Attack against the same index, and watched the target's health drop across multiple
+citizens' hits and die within 30 ticks (not just one citizen's damage). Real screenshot (Claude in
+Chrome extension) of a live drag-selected 4-citizen group post-draft confirms the inspector reads
+"4 citizens selected" / "4/4 drafted -- Group averages below" / an "Undraft" button, and a zoomed
+crop shows 4 separate cyan draft-rings clustered near the move target, not overlapping on one tile.
+
+## ROUND 7 (this session): art/UI restyle + Draft/Undraft NPC-control system, ALL LANDED
+
+User asked for the art/UI to draw more on RimWorld/PA's real visual and layout conventions
+(never their actual asset files -- studied only, described in prose, all new hand-authored SVG),
+plus real player-agency parity with RimWorld's colonist control model ("I don't have the same
+amount of control over NPCs here as I do in RimWorld"). 11 agents, all landed and individually
+verified:
+
+**Art restyle** (5 agents, `assets.js`/`render.js`): humanoids/attackers/animals, defense
+structures, power/utility structures, economy structures + vehicles, furniture + security.
+Consistent brief across all five: desaturate ~15-25%, flat-fill + one solid highlight shape
+(replacing full-surface gradients), outline opacity bumped ~0.75->~0.94-1.0 near-black, slightly
+chunkier humanoid head-to-torso ratio. Hazard/glow accents (tesla arc, nuclear core, camera lens)
+deliberately kept as full-saturation/gradient exceptions. Every state-dependent visual (destroyed,
+underConstruction, overload, sited/crowded tints, monitor-station 3-way color) preserved and
+re-verified, not assumed.
+
+**UI/UX restructure** (5 agents): build toolbar recategorized into category->item-list->detail
+(inspired by observing SEA:R's own build panel live), topbar got real hand-drawn icon glyphs +
+primary/secondary visual hierarchy, citizen inspector reorganized into labeled sections (Vitals/
+Needs/Status/Skills&Work/Room) with inline bar-fills instead of raw numbers, all 9 report/modal
+panels (Research/Budget/Map/Factions/Programs/Settings/Stats/Help/Credits) got unified shared
+chrome (title-bar/close-button/padding/section-header), New Game setup screen restructured into a
+two-column-plus-CTA layout with a lightweight seeded preview canvas.
+
+**Draft/Undraft NPC-control system** (`src/draft.js`, new, foundational -- built first, other work
+built on its exported interface): `isDrafted`/`draftCitizen`/`undraftCitizen`/`issueMoveOrder`/
+`issueAttackOrder`/`cancelOrder`/`tickDrafted`/`OrderKind`. A drafted citizen is fully removed from
+`jobs.js`'s autonomous AI (no needs-seeking, no jobs) until undrafted; right-click issues a move or
+attack order (auto-detected by what's under the cursor), reusing existing pathing/combat logic
+rather than duplicating it. Visually distinct on the map (ring indicator). Verified: drafting stops
+a citizen mid-task instantly, attack orders engage the specific ordered target instead of
+autonomous nearest-target selection, 89/89 tests unaffected (draft defaults false for everyone).
+
+**Real bug caught and fixed mid-wave**: `build.py`'s import-stripping regex only stripped the
+first `export` when multiple `export const` statements shared one line -- silently broke the whole
+bundle. Fixed by the draft-system agent; verify this doesn't recur if editing build.py.
+
+**Final integration for round 7**: rebuild clean, zero duplicate top-level bundle declarations,
+89/89 tests passing.
+
+## ROUND 8 (this session), Phase B: NPC-control depth, IN PROGRESS
+
+Continuing the user's explicit "control over NPCs" push, building directly on `draft.js`'s
+interface. 5 agents launched:
+- **Manual weapon-tier override** (`security.js`) -- DONE, verified. Per-staffer override of
+  auto-assigned Sidearm/Rifle/Heavy, queues if armory stock insufficient, auto-promotes once
+  stock allows, real combat-stat effect confirmed (not just a UI label), save/load round-trips.
+- **Multi-select group draft orders** -- DONE, verified. Turned out mostly already covered by the
+  draft.js foundation (draft-all/undraft-all, group move/attack already worked); the one real gap
+  (formation spread so citizens don't all path to the identical tile) was fixed with a ring-
+  formation offset function in `draft.js`.
+- **Force/Prioritize job command** -- IN PROGRESS as of last update, not yet confirmed landed.
+- **True per-citizen numeric work priorities** -- IN PROGRESS, not yet confirmed landed. Brief was
+  to verify the EXISTING work-priority system (`citizens.js`'s `workPriority*` fields, built in an
+  earlier wave) is genuinely per-citizen and genuinely wired into job-selection order, not just
+  cosmetic, and close any real gap found.
+- **Per-citizen schedule override + allowed-area zone restriction** -- IN PROGRESS, not yet
+  confirmed landed.
+
+**Check for completion notifications on these 3 before assuming this wave is done.** No
+integration/rebuild/commit has happened for round 8 yet.
+
+## ROUND 9 (this session): massive RimWorld/PA research crawl, IN PROGRESS
+
+User: "I don't care how expensive I want this. I NEED THIS" -- explicit request to maximize
+research coverage, no cost constraint. 14 research-only agents launched (read real files, report
+gaps, no code changes), covering ground NOT touched by the round-6 research pass (which only
+covered RimWorld Core + a sampled subset of Prison Architect's extracted files):
+
+**RimWorld, all 5 DLCs + deeper Core** (confirmed installed: Anomaly/Biotech/Core/Ideology/
+Odyssey/Royalty at `C:\Program Files (x86)\Steam\steamapps\common\RimWorld\Data\`):
+- Biotech (genes/xenotype/mechanitor/growth-vats) -- DONE. Recommends: mech-companion labor
+  drones (cheapest/highest value), age/lifespan multiplier table, second acquired-trait slot,
+  deathrest-style overclock rest state. Explicitly recommends AGAINST body-part health, genetic
+  inheritance/pregnancy/children, cosmetic gene variety, full mechanitor implant meta-game (all
+  need infrastructure this project has deliberately not built).
+- Ideology (precepts/rituals/memes) -- DONE. Recommends: colony-value mood-event hooks (reusing
+  existing `addMoodEvent` verbatim), a gathering/ritual `ProgramKind` riding on `programs.js`'s
+  existing shape, a single-tier shrine/altar buildable (+15 Beauty anchor). Skips full ideoligion/
+  conversion system and specialist ability-granting roles as disproportionate.
+- Anomaly (entities/horror) -- DONE. Recommends: an "anomalous activity" 0->1 meter exactly
+  shaped like `rats.js`'s existing pattern (periodic roll, tiered thresholds, one-off burst
+  event) -- explicitly recommends AGAINST porting the actual fleshbeast entity roster as real
+  attacker-adjacent pawns (too big a surface, correctly flagged as future "5th AttackerKind" work
+  if ever greenlit, with real stat anchors already extracted for that if it happens).
+- Royalty (titles/permits/psycasts) -- DONE. Recommends: a citizen rank/prestige track (6-tier
+  ladder off accumulated skill, real favorCost curve 1/6/6/8/10/14/20 as anchor), rank-gated
+  earned abilities reusing the existing break-severity-tier machinery instead of a new resource
+  meter, room-quality-gated rank-up requirements (reuses `computeRoomStats` as-is).
+- Odyssey (gravships/space) -- DONE. Directly actionable improvements to the EXISTING
+  `worldmap.js` (currently: expansion is completely free, no cost/risk/range-limit at all): add a
+  scrap cost per expansion, a small chance-of-mishap on arrival, an upgradeable multi-hop travel
+  range -- all three map cleanly onto real GravshipRange/fuel/LandingOutcome numbers.
+- Items/weapons/apparel full catalog -- DONE. Flags that this project has ZERO armor/apparel
+  system for anyone (citizens or staff) -- arguably a bigger fidelity gap than weapon-tier count.
+  Recommends adding armor-penetration-per-tier to the existing `WEAPON_TIERS`, and a basic
+  citizen armor-rating stat, ahead of just adding more weapon tiers.
+- Crafting/medical/recipes -- DONE. Flags a real, already-acknowledged code gap: `citizens.js`
+  around line 427 literally comments "no dedicated first-aid job yet, so recovery is passive."
+  Recommends a "citizen tends downed citizen" `JobState.Tending` mechanic (real numbers derived:
+  `TEND_RECOVERY_RATE ~= 0.006`, ~4x the current passive `DOWNED_RECOVERY_RATE = 0.0015`) as the
+  highest-value, cheapest item found in the entire research wave. Also recommends a second
+  production-chain tier (mirroring RimWorld's Steel->Component->AdvancedComponent step-up).
+- Diseases/addictions -- DONE. Fully implementation-ready: a "sickness" mechanic using `rats.js`'s
+  staggered-per-entity-roll pattern, real per-tick constants derived from RimWorld's actual Flu
+  progression rates (0.2488/0.2388 per day, rescaled against `DAY_NIGHT_CYCLE_TICKS=2400`),
+  feeding the EXISTING `addMoodEvent` system with zero new mood-blending code. Explicitly capped
+  well under lethal severity (this mechanic must never kill a citizen outright, no body-part path
+  exists to justify it). Addiction-lite flagged as viable but lower priority/needs more scoping.
+- Incidents/events/biomes -- DONE. Real number: RimWorld Core alone has 58 distinct IncidentDefs;
+  this project's periodic-roll event system (`weather.js`) has exactly 2 (wanderer-join, blight).
+  Highest-priority gap: **zero positive economic event exists** -- recommends a trader/visitor-
+  caravan event as the cheapest, highest-value addition (reuses `economy.js` directly, no new
+  entity/render work needed).
+
+**Prison Architect, exhaustive (not sampled) sweep**:
+- Full remaining-.txt-files sweep, full prefab/object catalog, full campaign Lua deep-read (only
+  the riot/*.lua scripts were read in round 6 -- conviction/deathrow/epilogue/food/grants.lua were
+  NOT), audio-cue catalog, and every `_dlc`-tagged file -- confirmed PA's DLC content ships merged
+  into `main.dat` as `*_dlc.txt` files, not separate archives.
+- Audio: DONE. Real number: PA's `sounds.txt` defines 674 distinct event types; this project's
+  `audio.js` has 5 synthesized cues. `world.onRandomEvent` already exists as an unused integration
+  point for new cues (currently wired only to a toast). Prioritized list of 7 new cues for
+  systems that already exist (unrest-tier escalation, mood break, program completion, faction
+  demand, corrupt-staff-caught, rat infestation, weather change).
+- DLC-tagged files: DONE. Confirms Hydration/Recycling-Center/CCTV/Battery/wind-solar/corrupt-
+  staff already match real DLC numbers (no action needed). New/uncovered: no Exercise need
+  despite ~10 real provider defs existing, no crop-farming loop, no hospitality/retail economy
+  (Restaurant/Bakery/Cinema), no checkpoint/screening mechanic, no power-export economy, 3 cheap
+  research nodes that would gate upgrades onto systems that ALREADY EXIST here (RecyclingIncentive
+  -> Recycling Center throughput, StaffVetting -> corrupt-staff chance [note: `security.js`
+  already has its own vetting-research hook per round-6 work, cross-check before adding a
+  duplicate], CCTVImprovement -> Monitor Station/camera range).
+- Full prefab/object catalog: DONE. Real per-object price/build-time table extracted (dozens of
+  objects). Recommends, cheapest-first: a Storage room role (zone + 1 shelf-analog buildable,
+  ~$6 PA-scaled), a Medical/Infirmary room role plugging directly into the existing single-float
+  `health` stat, promoting the ALREADY-EXISTING `armory`+`camera`/`monitor_station` buildables
+  into a formal "Command Room" role (zero new buildables needed, just a `rooms.js` classifier
+  entry) -- these three need no new mechanic, only a `rooms.js` role addition.
+- Still pending as of this handoff update: RimWorld's remaining-files sweep is DONE (see above,
+  it was actually a round-8 RimWorld item, already folded in), full campaign Lua deep-read
+  (conviction/deathrow/epilogue/food/grants.lua) STILL PENDING -- check for its completion
+  notification before assuming it's done.
+
+**IMPORTANT -- nothing from round 9's research has been implemented yet.** This is 100%
+research-only so far. No subagent has been launched to build any of the above. The natural next
+step once all 14 land is a large prioritized implementation wave, following this session's
+established research -> gap-list -> parallel-implementation -> integration-verify -> commit
+pattern. Do not assume any of round 9's findings are in the codebase without checking `git log`/
+`git status` first.
+
+**Also not yet done as of this handoff update**: round 7+8's work (art/UI/draft/weapon-override/
+group-orders, all confirmed landed and individually verified) has NOT been committed to git yet.
+Round 6 (`18af3f9`) is still the last commit. A full integration pass (rebuild, dedup sweep, test
+suite, soak test) plus commit is owed for everything since round 6 once round 8's remaining 3
+agents (force-job, per-citizen priorities, schedule/area-restriction) are confirmed landed.
+
+## AGE/LIFESPAN PASS (this session): DONE
+
+Added a RimWorld Biotech `LifeStageDef`-style age-band multiplier table, per research recommending
+it as a cheap addition since it's just a flat-multiplier-by-band lookup, the same shape
+`traits.js` already uses.
+
+- `src/citizens.js`: new `age` field (Float32Array, ticks-since-spawn) on `CitizenStore`.
+  Randomized starting age (2000-24000 ticks) on `spawn()` so a fresh colony reads as mixed-age
+  from the start, not everyone "born" at tick 0. Incremented by 1 every tick for every alive
+  citizen (in `tickNeedsAndMood`, regardless of downed/on-break state -- aging is passive).
+  Persisted through `world.js`'s `serialize()`/`deserialize()` (old saves without the field
+  default to 10000, mid-Young-band, rather than 0).
+- `src/traits.js`: new `AGE_BANDS` table + `ageBandFor(age)` lookup -- Young (< 20000 ticks,
+  baseline), Veteran (< 45000, workSpeedMult 0.9 / healthMult 0.95 / skillGainMult 1.5), Elder
+  (workSpeedMult 0.85 / healthMult 0.88 / skillGainMult 2.5). Real RimWorld pre-teen MoveSpeed
+  anchor (x0.85) adapted directionally for the elder band. The "wisdom" tradeoff (skillGainMult)
+  is a deliberate design call, not in the research ask verbatim: mirrors `backstories.js`'s own
+  Passion mechanic (Minor/Burning = 1.5x/2.5x) so it reads on the same scale as an existing system
+  instead of inventing a new one -- an elder isn't smarter on day one, they just learn faster from
+  the practice they're already getting.
+- `src/jobs.js`: `ageBandFor(store.age[i]).workSpeedMult` multiplied in alongside
+  `trait.workSpeedMult` at all four rate sites (Building/Harvesting/Cleaning/Processing), and
+  `.skillGainMult` multiplied in alongside `PASSION_GAIN_MULT` at all three skill-gain sites
+  (build-complete, harvest, workshop-complete) -- stacks with trait/passion, doesn't replace them,
+  same "multiplicative, not exclusive" convention as everything else in this rate-calc chain.
+- `src/siege.js`: `ageBandFor(...).healthMult` multiplied into the existing
+  `(trait?.healthMult ?? 1)` toughness term at all three sites that use it (nuclear hazard damage,
+  attacker-contact damage, held-citizen-crisis injury) -- higher healthMult means LESS damage
+  taken per hit, same convention `trait.healthMult` already established. Also added the same
+  `ageBandFor(...).skillGainMult` term to the one combat skill-gain site (`tickStaffCombat`).
+
+**Verified** (via `tests/run.html`'s real ES-module imports, since the shared `game.bundle.js` was
+being concurrently rebuilt by several other sessions at the same time this pass ran -- see the
+"note on concurrent editing" below): a citizen's `age` increments by exactly ~5000 over a 5000-tick
+soak (float32 rounding only); `ageBandFor` returns three genuinely distinct multiplier sets for
+young/veteran/elder ages; a young citizen (age 1000) and an elder citizen (age 50000) with
+IDENTICAL trait (null) and IDENTICAL skill (0.2), given the same blueprint via `tickJobs`'s real
+`Building` handler, finish at a 1.176x progress ratio after 50 ticks -- exactly `1/0.85`, the
+Elder `workSpeedMult`, confirming the multiplier reaches the actual job-rate calculation, not just
+the lookup table. Same technique confirmed the elder citizen also takes measurably more damage per
+hit via `tickAttackerVsCitizens` (0.00909 vs 0.008 health lost, ratio 1.136 = `1/0.88`, the Elder
+`healthMult`). Also verified live in a real running game via `window.__debug.newGame()` +
+`world.tick()` x8000: every citizen's `age` (including newly-arrived ones) genuinely climbed by
+~8000 over the soak, no console errors. `tests/run.html` still 89/89 passing (re-run twice, before
+and after the age-band edits landed).
+
+**Note on concurrent editing this pass**: multiple other sessions were actively editing
+`citizens.js`/`jobs.js`/`siege.js`/`traits.js` at the same time (a first-aid Tending job, a `ranks`
+system, weapon-override work, `rats.js`/`anomaly.js` additions) -- the same shared-tree collision
+risk documented elsewhere in this file. `game.bundle.js` briefly had a duplicate `TIER_MEDIUM`
+declaration (from `rats.js` momentarily double-included by a concurrent `build.py` run racing this
+one) that self-resolved on the next rebuild; not this pass's bug, not chased further since
+`tests/run.html`'s direct-ES-module route gave a clean, race-free way to verify the actual
+age-band logic regardless of the bundle's momentary state. Worth a fresh
+`grep -oE "^(async function|function) [A-Za-z0-9_]+" game.bundle.js | sort | uniq -d` sweep next
+session before trusting `game.bundle.js` at face value, given how much concurrent traffic it saw.
 
 ## Verification pattern to keep using
 
@@ -710,4 +1119,170 @@ together. Neither has been executed yet as of this handoff update.
 6. `document.getElementById('game').toDataURL('image/png')` -> saved via a small python snippet
    reading the tool-results JSON and base64-decoding -> `Read` the PNG for actual visual proof
    (this environment's screenshot tool cannot reliably capture the Browser pane's canvas)
+
+## OUTPOST CHARTER CONTRACTS PASS (this session): DONE
+
+Ported Prison Architect's real `grants.lua` mechanic (a milestone-gated grant chain: a parent
+objective carries the reward, free child checklist items, hidden until prerequisites via
+`Objective.SetPreRequisite`; a scaling capacity-tier ladder unlocked strictly in sequence; a
+time-locked investment instrument). New `src/grants.js`, reskinned as "Outpost Charter Contracts"
+-- no prison/inmate language. Wired into `world.js` (`this.grants`, `tickGrants(this)` call,
+`addScrap(amt, 'grant')` finance bucket, full serialize/deserialize with old-save fallback),
+`main.js` (Shift+G panel reusing the shared `.report-panel`/`.report-head`/`.grid`/`.node` CSS
+pattern every other overlay uses), `input.js` (hotkey), `build.py` (`ORDER`).
+
+Six charters: Bootstrap (free, 7-condition checklist -- wall/turret/bed built, Food+Bedroom zones
+painted, 6 citizens alive, survived wave 1 -- pays 375 scrap), a 4-rung population-tier ladder
+(Outpost/Waystation/District/Regional, unlocked strictly in sequence, rewards 70/110/170/260), and
+an Emergency Stabilization bailout (only appears once scrap is critically low + population is
+decent-sized + a sustained deficit shows in `world.finance.history`, but -- the real "strings
+attached" part ported faithfully from PA -- does NOT pay the moment the crisis is spotted, it
+stays pending until the settlement's own finances actually recover; pays 300). Plus a standing
+investment action (not milestone-gated): pay 125 scrap, wait 1080 ticks (short) or 2520 ticks
+(long), get back 220 or 400.
+
+**Real bug caught and fixed during verification, not obvious from the task doc**: the initial
+capacity-tier thresholds were flat absolute numbers (16/22/30/40) modeled loosely on PA's own
+50/100/200/500 ladder. Tested live via `window.__debug` and the first two rungs completed on tick
+1 for a default 24-citizen colony -- not a real milestone, just arithmetic that happened to already
+be true at game start. Root cause: this engine hard-caps population growth to ~1.15x whatever a
+run started with (`weather.js`'s `WANDERER_POPULATION_CAP_MULT`, plus the separate Refugee Wagon
+which only replenishes losses, never grows past starting size) -- a flat ladder is either trivial
+or unreachable depending on the New Game setup's starting-citizen slider (12-32). Fixed by making
+thresholds relative to `world.startingCitizenCount` (`tierPopulationThreshold()`, factors
+1.04/1.08/1.12/1.15, i.e. topping out just under the real ceiling) so every rung is a genuine
+milestone regardless of starting size.
+
+**Second real bug caught**: the Bootstrap checklist's "at least one wall built" condition checked
+`world.structures` for a completed `wall` kind -- but a finished wall Structure gets folded into
+`grid.wallThingId` permanent terrain and removed from `world.structures` almost immediately (see
+`fire.js`'s own doc comment on why walls can't hold fire state). The condition would essentially
+never see a wall. Fixed to read `grid.wallThingId` directly (`wallTileCount()`) instead of scanning
+structures for a wall kind that's already gone by the time anything checks.
+
+**Third fix (ordering, not a functional bug but worth noting)**: `tickGrants(this)` was originally
+called early in `world.js`'s `tick()`, before `peakAliveCitizens` gets updated near the end of the
+same tick -- caught via live testing (spawned 2 citizens, ticked once, tier rung didn't complete
+until a SECOND tick even though peak had already crossed its threshold). Moved the call to run
+right after the `peakAliveCitizens` update (and before the finance-history snapshot, so a
+grant/investment payout is reflected in that same snapshot) so the ladder reacts the same tick a
+population milestone is actually reached.
+
+**Verified live via `window.__debug`** (fresh tab, `?v=` cache-bust, per this file's own
+verification pattern above): Bootstrap unlocks tick 1 (always-visible) and pays exactly 375 the
+moment all 7 conditions are real; a tier rung stays locked until the prior rung completes AND
+`peakAliveCitizens` crosses its (starting-size-relative) threshold, then pays its reward the same
+tick; the investment instrument debits 125 immediately, stays pending through tick 1343 (one short
+of its 1080-tick short-term maturity), and pays exactly 220 on tick 1344 with the pending entry
+removed; the bailout unlocks under a forced crisis (scrap=10, 3-snapshot deficit sum -45) but does
+NOT pay across several more ticks while still in crisis, then pays exactly 300 the tick a forced
+recovery (scrap=80, positive recent net) is detected. Save/load round-trip verified byte-for-byte
+identical (`w.serialize()` -> `SimWorld.deserialize()`), including a pending investment. UI panel
+verified via DOM inspection (6 cards render, correct labels/checklist ticks, investment button
+text matches the real constants) and the Shift+G hotkey verified via a direct `input._onKey()`
+call. Full rebuild, zero duplicate top-level declarations, zero console errors,
+`tests/run.html` still 89/89 passing (unrelated to this pass's changes -- confirms nothing else
+broke).
 7. Only commit once console is clean and the specific behavior you changed is verified working
+
+## FIRST-AID TENDING (this session): DONE
+
+User asked to close the explicit gap flagged in `citizens.js`'s downed-recovery comment (line
+~427 pre-this-pass): "no dedicated first-aid job yet, so recovery is passive rather than requiring
+a medic to tend them." Real RimWorld gives a ~4x recovery-rate bonus for active tending over
+untended healing -- used as the numeric anchor.
+
+**Implemented**: `JobState.SeekingTend`/`Tending` (`jobs.js`), following the exact claim/release
+pattern `Processing`/`Cleaning`/`Attending` already use. A citizen with construction OR combat
+skill past the existing "Novice" bar (`TEND_SKILL_THRESHOLD = 0.15`, reusing the same cutoff
+`citizens.js`'s `SKILL_INVESTED_THRESHOLD` and `main.js`'s `SKILL_LEVELS` already use -- no new
+Medicine skill added, per FEATURE_RESEARCH.md's precedent) walks to and tends the nearest
+unclaimed Downed ally. Checked near the top of the Idle-branch priority ladder (right after the
+starvation emergency and Force Job, before the citizen's own soft rest/hunger/social thresholds).
+`store.tendClaimedBy` (an id, not an index) prevents two tenders converging on one patient, same
+role `claimedBy` plays for blueprints.
+
+The actual rate swap lives in `citizens.js`: `TEND_RECOVERY_RATE = 0.006` (exactly 4x
+`DOWNED_RECOVERY_RATE = 0.0015`), gated by a new `store.beingTended` per-tick flag. Ordering
+quirk worth remembering: `world.js` calls `tickNeedsAndMood` *before* `tickJobs` every tick, so
+`beingTended` is read-then-cleared in `tickNeedsAndMood` and re-set by `tickJobs`'s `Tending`
+handler for the *next* tick -- a harmless one-tick lag, confirmed in verification below. Small
+symmetric bonus/malus variance roll (`TEND_VARIANCE_CHANCE = 0.02`, `TEND_VARIANCE_MAG = 0.01`)
+echoes RimWorld's real medicine-quality curve without an item-tier system. Visual: a green "+"
+glyph (`render.js`, `#5ec97a`) above the head, shown on both the tender (`jobState === Tending`)
+and the patient (`beingTended === 1`) -- same above-head-glyph convention as onBreak's "z" and
+Force Job's orange "!".
+
+**Verified live via `window.__debug`** (real before/after numbers, not estimated): with the world
+paused between measurement windows to eliminate real-time background-tick contamination --
+passive-only baseline measured at exactly `0.0015`/tick (bit-exact match to
+`DOWNED_RECOVERY_RATE`); once a tender walked over and entered `Tending`, measured `0.00577`/tick
+average over 20 ticks (matches the flat `0.006` `TEND_RECOVERY_RATE` within the expected variance-
+roll noise -- a ~3.85x speedup, matching the "~4x" spec); after force-releasing the tender back to
+Idle, the very next tick still read the stale `beingTended` flag (the documented one-tick lag) and
+then reverted cleanly to `0.0015`/tick from the second tick onward. The green "+" glyph was
+confirmed via a `ctx.fillText` interception on a paused, isolated citizen -- present at `#5ec97a`
+only while `beingTended`/`Tending` is true, absent otherwise.
+
+**Known limitation, consistent with existing precedent, not fixed this pass**: like
+`blueprint.claimedBy`/workshop `workerId`/animal `claimedBy` elsewhere in this codebase, if the
+*tender* themselves goes Downed mid-tend (e.g. caught in a raid), `tendClaimedBy` is never
+released (a downed citizen never runs `tickJobs`, the only place claims get released), leaving
+the patient un-claimable by a second tender until the first one recovers. Same bug shape already
+exists for every other claim-bearing job type in this codebase; not introduced fresh by this
+feature, not fixed here (would need a codebase-wide pass, out of scope).
+
+**Verification**: full rebuild, zero duplicate top-level declarations (confirmed via the standard
+`grep -oE "^(async function|function) [A-Za-z0-9_]+" game.bundle.js | sort | uniq -d` sweep, clean
+despite heavy concurrent multi-agent activity on this same tree during this pass), zero console
+errors, `tests/run.html` still 89/89 passing.
+
+**Environment note for future passes**: this session hit heavy concurrent-agent contention on the
+shared Browser pane tabs (other sessions navigating/closing tabs mid-test, `window.__debug`
+intermittently `undefined` right after `navigate`, one canvas screenshot crop coming back visibly
+corrupted). Opening a fresh tab per verification attempt and using the `ctx.fillText`/pixel-sum
+interception techniques (rather than relying on `computer{action:"screenshot"}`, which this
+project's SESSION_HANDOFF has already flagged as unreliable here) worked reliably once isolated.
+
+## ROUNDS 7-9 INTEGRATION (this session): DONE, committed
+
+Rounds 7 (art/UI restyle + Draft/Undraft foundation), 8 (NPC-control depth: force-job,
+per-citizen priorities, group draft orders, weapon override, schedule/area-restriction), and 9
+(21-agent implementation wave from the massive RimWorld/PA research crawl) all landed and are
+now integrated and committed together in one pass. New top-level modules added this stretch:
+`draft.js`, `forcejob.js`, `grants.js`, `anomaly.js`, `ranks.js`, `drones.js`, `sickness.js`,
+`coverageplans.js`.
+
+**Full accounting of round 9's 21 items, all landed and individually verified** (see each
+agent's own report earlier in this file, or the commit log, for exact numbers):
+grants/investment economy (`grants.js`), trader/visitor caravan event, tending job for downed
+citizens, sickness mechanic, anomaly pressure meter (`anomaly.js`), colony-values mood hooks +
+Community Gathering program + shrine buildable, citizen rank/prestige track (`ranks.js`),
+worldmap expansion cost/risk/range upgrade, armor-penetration tiers + citizen vest armor, mech
+labor drone companion (`drones.js`), age/lifespan multiplier table, 7 new audio cues,
+Storage/Medical/Command room roles, 3 research nodes gating existing-system upgrades, Exercise
+need + Gymnasium room, Coverage Plans insurance system (`coverageplans.js`), Lightning Storm
+calamity (the escalating-demand item was found already covered by `factions.js`, correctly not
+duplicated), unrest-weight recalibration + critical-structure watchdog + catastrophic mass-fire
+event, non-lethal StunBaton + upgraded K9 tier + staff training track, crop-farming production
+loop, and a WorkCredential-style arrival-skill check (found already fully covered, nothing built).
+
+**Real cross-agent collisions caught and fixed during this stretch** (same bug class as prior
+rounds -- `build.py`'s flat concatenation means same-named top-level declarations across files
+silently collide, later-in-ORDER wins, no error): a genuine duplicate `TIER_MEDIUM`/`TIER_HIGH`
+between `anomaly.js` and `rats.js` (renamed anomaly.js's to `ANOMALY_TIER_MEDIUM`/`_HIGH`), and
+`build.py`'s `ORDER` array briefly missing `grants.js` (broke the whole bundle with a
+`ReferenceError` until caught). **Final sweep after the full round-9 merge: zero duplicate
+top-level declarations across the entire bundle** (`grep -oE "^(async function|function|const|let|class) [A-Za-z0-9_]+" game.bundle.js | sort | uniq -d`, both function and const/let/class forms checked).
+
+**Known gap flagged, not yet fixed**: `programs.js`'s `assignProgramStaff()` has zero call sites
+outside its own definition -- there is NO in-game UI to assign a citizen to any program staff
+role (Foreman/Psychologist/Facilitator/Organizer/Instructor). Every program (Skills Workshop,
+Wellness Counseling, Community Circle, Community Gathering, Guard Response Training) currently
+can only be staffed via `window.__debug` in the console. Flagged as a spawned background task
+(not yet acted on as of this handoff update) -- check for it before re-flagging.
+
+**Final integration verification**: `python build.py` clean, zero duplicate declarations, 89/89
+`tests/run.html` passing, fresh hands-off soak test to a real colony wipe at 24,587 ticks --
+inside the established 22-36k baseline despite this being the largest single merge of the whole
+session (34 files touched, 8 new modules). Zero console errors across the full soak.

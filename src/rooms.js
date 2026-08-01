@@ -88,6 +88,10 @@ const BEAUTY_BY_KIND = {
   bed: 1.5,        // functional but still a deliberate furnishing choice
   door: 0.5,       // mild positive -- a room with a proper door reads as "finished"
   wire: -0.5,      // exposed wiring, mildly utilitarian
+  shelf: -0.3,     // plain storage furniture -- mildly utilitarian, not as neutral as a door
+  medical_bed: 1.0, // functional furnishing like a plain bed, but clinical rather than cozy
+  fitness_station: 0.5, // exercise equipment -- a small deliberate positive, milder than a table/bed
+  armory: -1.5,    // racked weapons -- utilitarian, not as bad as a turret bolted to the floor
   turret: -2,      // a gun bolted to the floor of your room is not cozy
   fence: -1,
   trap: -2,
@@ -103,6 +107,14 @@ const BEAUTY_BY_KIND = {
   generator_wind: -1,    // a turbine outdoors is far less obtrusive than boxy generator housing
   generator_solar: -1,   // same -- a panel array reads as mild infrastructure, not an eyesore
   waste_storage: -4,     // hazardous-waste containment, definitionally ugly
+  // Shrine (RimWorld Ideology DLC's real altar buildable, economy.js's BUILD_COST.shrine): a
+  // single-tier, beauty-ONLY passive building -- this contribution is its entire function, unlike
+  // every other entry above which is a side-effect of a structure that does something else too.
+  // RimWorld's real altar Beauty value is +10..+30; +15 is the mid-point pick per the task brief,
+  // deliberately far above table's 2.5/bed's 1.5 -- a dedicated shrine is supposed to swing a
+  // room's beauty score hard, the same way it does in the source game (a single altar can carry
+  // an otherwise-plain room to "impressive" on its own).
+  shrine: 15,
 };
 
 const CLEANLINESS_POLLUTION_DIVISOR = 20; // world.pollution this high alone fully tanks cleanliness
@@ -146,12 +158,39 @@ const MESS_CLEANLINESS_WEIGHT = 1;     // mess subtracts 1:1 from the 0..1 clean
 //    rather than inventing an equipment requirement PA's real schema has but this port doesn't
 //    need. Named "Training Room" rather than "Workshop" to avoid colliding with the unrelated
 //    'workshop' materials-processing Structure kind elsewhere in this codebase.
+//  - Storage Room (new, PA full prefab/object catalog): needs a Storage zone AND at least 1
+//    shelf. No new mechanic for v1 -- see vehicles.js's tickVehicles for the one cheap hook that
+//    was added (a small haul-work-time bonus for garages sited near a validated Storage room).
+//  - Medical/Infirmary Room (new): needs a Medical zone AND at least 1 Medical Bed. Plugs
+//    directly into citizens.js's existing single-float `health` stat -- a downed citizen
+//    recovers health faster while inside a validated Medical room (see citizens.js's
+//    tickNeedsAndMood Downed branch). There's no dedicated Tending/SeekingTend job state in
+//    jobs.js yet (checked fresh -- citizens.js's own doc comment on DOWNED_RECOVERY_RATE already
+//    says "no dedicated first-aid job yet, so recovery is passive"), so the bonus applies
+//    passively based on room location rather than requiring an active tend job; wiring a real
+//    Tending job into this room role is the natural follow-up once that job state exists.
+//  - Command Room (new): promotes the already-existing armory + monitor_station buildables into
+//    a formal role -- needs a Command zone AND at least 1 armory AND at least 1 monitor_station
+//    (both, not either/or -- a "command room" that's missing either the weapons half or the
+//    surveillance half isn't really a command room). Zero new buildables; this is purely a
+//    classifier entry giving the pairing a real computeRoomStats quality-score payoff.
+//  - Gymnasium (new, PA needs.txt Exercise): needs a Gymnasium zone AND at least 1 Fitness
+//    Station (siege.js Structure kind 'fitness_station', see economy.js's BUILD_COST -- ONE
+//    consolidated buildable standing in for PA's whole real gym-equipment catalog). Same
+//    "zone + minimum furniture" gate as Bedroom/Dining/Storage/Medical above -- an unroofed
+//    Fitness Station still refills Exercise via jobs.js's Exercising job (the buildable itself is
+//    what a citizen needs to use), it just doesn't get the enclosed-room ROOM_REFILL_BONUS until
+//    both the zone and the station are in place.
 export const RoomRole = Object.freeze({
   None: 'none',
   Bedroom: 'bedroom',
   DiningRoom: 'dining',
   RecreationRoom: 'recreation',
   Training: 'training',
+  Storage: 'storage',
+  Medical: 'medical',
+  Command: 'command',
+  Gymnasium: 'gymnasium',
 });
 
 export const ROOM_ROLE_LABEL = {
@@ -160,21 +199,34 @@ export const ROOM_ROLE_LABEL = {
   [RoomRole.DiningRoom]: 'Dining Room',
   [RoomRole.RecreationRoom]: 'Recreation Room',
   [RoomRole.Training]: 'Training Room',
+  [RoomRole.Storage]: 'Storage Room',
+  [RoomRole.Medical]: 'Infirmary',
+  [RoomRole.Command]: 'Command Room',
+  [RoomRole.Gymnasium]: 'Gymnasium',
 };
 
 const BED_MIN = 1;
 const TABLE_MIN = 1;
+const SHELF_MIN = 1;
+const MEDICAL_BED_MIN = 1;
+const ARMORY_MIN = 1;
+const MONITOR_MIN = 1;
+const FITNESS_STATION_MIN = 1;
 
 // Which zone kind implies which candidate role, checked in this priority order when a room
 // happens to have more than one zone kind painted inside it (rare, but painting tools don't
 // stop a player from mixing zones in one enclosed space) -- Bedroom first since an unmade bed
 // is the highest-stakes miss (a citizen sleeping in the open loses the mood/refill bonus every
-// night), then Food, then Recreation.
+// night), then Food, then Recreation, then the newer roles.
 const ZONE_TO_ROLE = [
   [ZoneKind.Bedroom, RoomRole.Bedroom],
   [ZoneKind.Food, RoomRole.DiningRoom],
   [ZoneKind.Recreation, RoomRole.RecreationRoom],
   [ZoneKind.Training, RoomRole.Training],
+  [ZoneKind.Medical, RoomRole.Medical],
+  [ZoneKind.Command, RoomRole.Command],
+  [ZoneKind.Storage, RoomRole.Storage],
+  [ZoneKind.Gymnasium, RoomRole.Gymnasium],
 ];
 
 // Which need (jobs.js's JobState-adjacent "what is this citizen here to refill") a validated
@@ -184,23 +236,29 @@ export const ROLE_FOR_NEED = Object.freeze({
   hunger: RoomRole.DiningRoom,
   rest: RoomRole.Bedroom,
   social: RoomRole.RecreationRoom,
+  exercise: RoomRole.Gymnasium,
 });
 
 // Counts which ZoneKind cells appear inside a room. Small map, but a room can be large -- this
 // is O(room.size), fine at the "only recompute when structures/zones change" cadence below.
 function zoneCellCounts(room, grid, zones) {
-  const counts = { [ZoneKind.Bedroom]: 0, [ZoneKind.Food]: 0, [ZoneKind.Recreation]: 0, [ZoneKind.Training]: 0 };
+  const counts = {
+    [ZoneKind.Bedroom]: 0, [ZoneKind.Food]: 0, [ZoneKind.Recreation]: 0, [ZoneKind.Training]: 0,
+    [ZoneKind.Storage]: 0, [ZoneKind.Medical]: 0, [ZoneKind.Command]: 0, [ZoneKind.Gymnasium]: 0,
+  };
   for (const idx of room.cells) {
     const kind = zones.kind[idx];
-    if (kind === ZoneKind.Bedroom || kind === ZoneKind.Food || kind === ZoneKind.Recreation || kind === ZoneKind.Training) counts[kind]++;
+    if (kind in counts) counts[kind]++;
   }
   return counts;
 }
 
 // Classifies a single room's role given its zone coverage + furniture counts (bedCount/
-// tableCount, tallied by computeRoomStats below while it's already walking structures for
-// beauty). Returns { role, roleValid, missingRequirements }.
-function classifyRoomRole(room, grid, zones, bedCount, tableCount) {
+// tableCount/shelfCount/medicalBedCount/armoryCount/monitorCount/fitnessStationCount, tallied by
+// computeRoomStats below while it's already walking structures for beauty). Returns { role,
+// roleValid, missingRequirements }.
+function classifyRoomRole(room, grid, zones, counts) {
+  const { bedCount, tableCount, shelfCount, medicalBedCount, armoryCount, monitorCount, fitnessStationCount } = counts;
   const zoneCounts = zoneCellCounts(room, grid, zones);
   for (const [zoneKind, role] of ZONE_TO_ROLE) {
     if (zoneCounts[zoneKind] === 0) continue;
@@ -211,6 +269,24 @@ function classifyRoomRole(room, grid, zones, bedCount, tableCount) {
     if (role === RoomRole.DiningRoom) {
       const valid = tableCount >= TABLE_MIN;
       return { role, roleValid: valid, missingRequirements: valid ? [] : ['a table'], tableCount };
+    }
+    if (role === RoomRole.Storage) {
+      const valid = shelfCount >= SHELF_MIN;
+      return { role, roleValid: valid, missingRequirements: valid ? [] : ['a shelf'], shelfCount };
+    }
+    if (role === RoomRole.Medical) {
+      const valid = medicalBedCount >= MEDICAL_BED_MIN;
+      return { role, roleValid: valid, missingRequirements: valid ? [] : ['a medical bed'], medicalBedCount };
+    }
+    if (role === RoomRole.Command) {
+      const missing = [];
+      if (armoryCount < ARMORY_MIN) missing.push('an armory');
+      if (monitorCount < MONITOR_MIN) missing.push('a monitor station');
+      return { role, roleValid: missing.length === 0, missingRequirements: missing, armoryCount, monitorCount };
+    }
+    if (role === RoomRole.Gymnasium) {
+      const valid = fitnessStationCount >= FITNESS_STATION_MIN;
+      return { role, roleValid: valid, missingRequirements: valid ? [] : ['a fitness station'], fitnessStationCount };
     }
     if (role === RoomRole.RecreationRoom || role === RoomRole.Training) {
       return { role, roleValid: true, missingRequirements: [] };
@@ -231,6 +307,11 @@ export function computeRoomStats(rooms, grid, structures, world, zones) {
     let onFireInside = false;
     let bedCount = 0;
     let tableCount = 0;
+    let shelfCount = 0;
+    let medicalBedCount = 0;
+    let armoryCount = 0;
+    let monitorCount = 0;
+    let fitnessStationCount = 0;
 
     for (const s of structures) {
       if (s.destroyed || s.underConstruction) continue;
@@ -244,6 +325,11 @@ export function computeRoomStats(rooms, grid, structures, world, zones) {
       if (s.onFire) onFireInside = true;
       if (s.kind === 'bed') bedCount++;
       if (s.kind === 'table') tableCount++;
+      if (s.kind === 'shelf') shelfCount++;
+      if (s.kind === 'medical_bed') medicalBedCount++;
+      if (s.kind === 'armory') armoryCount++;
+      if (s.kind === 'monitor_station') monitorCount++;
+      if (s.kind === 'fitness_station') fitnessStationCount++;
     }
 
     // Mess accumulation (see MESS_* doc comment above) -- ambient trickle always applies, plus a
@@ -281,12 +367,19 @@ export function computeRoomStats(rooms, grid, structures, world, zones) {
     room.quality = clamp01(0.5 + beauty * 0.05 + (impressiveness - 0.5) * 0.2) * cleanliness;
 
     if (zones) {
-      const classified = classifyRoomRole(room, grid, zones, bedCount, tableCount);
+      const classified = classifyRoomRole(room, grid, zones, {
+        bedCount, tableCount, shelfCount, medicalBedCount, armoryCount, monitorCount, fitnessStationCount,
+      });
       room.role = classified.role;
       room.roleValid = classified.roleValid;
       room.missingRequirements = classified.missingRequirements;
       room.bedCount = bedCount;
       room.tableCount = tableCount;
+      room.shelfCount = shelfCount;
+      room.medicalBedCount = medicalBedCount;
+      room.armoryCount = armoryCount;
+      room.monitorCount = monitorCount;
+      room.fitnessStationCount = fitnessStationCount;
     } else {
       room.role = RoomRole.None;
       room.roleValid = false;

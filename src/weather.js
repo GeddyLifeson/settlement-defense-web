@@ -8,8 +8,9 @@
 // optional-callback pattern as onBuildComplete/onWaveIncoming) so main.js can also surface them
 // as a toast.
 import { roomContaining } from './rooms.js';
-import { HUNGER_DECAY, REST_DECAY } from './citizens.js';
+import { HUNGER_DECAY, REST_DECAY, CitizenFlags } from './citizens.js';
 import { isFlammable, igniteStructure } from './fire.js';
+import { TRADER_DISCOUNT_PCT, TRADER_VOUCHER_USES, TRADER_WINDOW_TICKS } from './economy.js';
 
 // Fog/Snow (real accuracy/move-speed modifiers) and Thunderstorm (Dry/Rainy split) added per
 // RimWorld's actual WeatherDefs/Weathers.xml data -- see weatherAccuracyMult/weatherMoveSpeedMult
@@ -239,12 +240,21 @@ export function tickThunderstorm(world) {
 // pass -- it would need a new attacker-adjacent entity type wired through siege.js/render.js,
 // which is a much bigger surface than a numeric-knob event, and this pass prioritized doing a
 // solid job on the other two over a half-built third. Left as a natural follow-up.
+//
+// Trader caravan (real RimWorld TraderCaravanArrival/VisitorGroup IncidentDefs, baseChance 4 --
+// see FEATURE_RESEARCH.md) added as this event system's first genuinely POSITIVE economic entry;
+// wanderer-joins is a population boost but not an economy one, and blight is purely negative --
+// there was previously zero "good news" economic event. Same numeric-knob shape as
+// tryBlightEvent (inverted: grant instead of destroy), no new entity/sprite/pathing needed. The
+// actual discount math lives in economy.js (buildCost/spend) since that's the real point of sale.
 
 const EVENT_CHECK_INTERVAL = 500; // ticks between event rolls
 const EVENT_CHANCE = 0.06; // odds per check that *some* event fires -- rare, not spammy
 const EVENT_WEIGHTS = [
   ['wanderer', 1],
   ['blight', 1],
+  ['trader', 1],
+  ['massfire', 0.3], // deliberately the rarest -- see tryMassFireEvent below, a genuine catastrophe tier
 ];
 
 export function tickRandomEvents(world) {
@@ -260,7 +270,9 @@ export function tickRandomEvents(world) {
   }
 
   if (kind === 'wanderer') tryWandererEvent(world);
-  else tryBlightEvent(world);
+  else if (kind === 'blight') tryBlightEvent(world);
+  else if (kind === 'massfire') tryMassFireEvent(world);
+  else tryTraderEvent(world);
 }
 
 /** Spawns a new citizen near the settlement center using an unused name from the shared name
@@ -320,4 +332,214 @@ export function tryBlightEvent(world) {
   if (world.milestoneLog.length > 20) world.milestoneLog.shift();
   world.onRandomEvent?.(text);
   return true;
+}
+
+/** Grants a temporary discounted-build voucher (economy.js's buildCost/spend actually apply the
+ *  discount at point-of-sale): the next TRADER_VOUCHER_USES buildable purchases within
+ *  TRADER_WINDOW_TICKS cost TRADER_DISCOUNT_PCT less scrap. Re-rolling this event while one is
+ *  already active just refreshes both the use-count and the window (no stacking discount %) --
+ *  same "replace, don't stack" shape as re-rolling weather itself. Always succeeds (no
+ *  candidate-availability gate like wanderer/blight have), matching real RimWorld's caravan
+ *  events not requiring any colony precondition. */
+export function tryTraderEvent(world) {
+  world._traderVoucherUses = TRADER_VOUCHER_USES;
+  world._traderVoucherExpireTick = world.currentTick + TRADER_WINDOW_TICKS;
+
+  const text = `A trader caravan arrives -- next ${TRADER_VOUCHER_USES} buildables are ` +
+    `${Math.round(TRADER_DISCOUNT_PCT * 100)}% off for a limited time`;
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+  return true;
+}
+
+// ---------------------------------------------------------------- mass-fire calamity
+// Real Prison Architect calamity: a scripted MASS fire event -- an instant, multi-source
+// outbreak (several simultaneous ignitions clustered around a few points), demanding an
+// emergency response, distinct from fire.js's existing gradual model (tickFireIgnition rolls one
+// spark off a generator; tickFire then spreads it slowly, one neighbor at a time, on a 30-tick
+// check interval). This event bypasses both of those and ignites a whole cluster at once via the
+// SAME igniteStructure/FLAMMABLE_KINDS primitives fire.js already exposes -- no parallel fire
+// system, just a different, rarer, more severe trigger path into the one that already exists
+// (once lit, these structures burn down and can still spread further through tickFire exactly
+// like any other fire -- this event only owns the initial catastrophic outbreak, not the
+// aftermath). Wired into the existing weighted event-roll (tickRandomEvents above) rather than a
+// bespoke timer, same "one event system, more entries" shape as wanderer/blight/trader.
+const MASS_FIRE_MIN_TARGETS = 2;    // below this there isn't enough kindling to read as "catastrophic" -- fizzles
+const MASS_FIRE_MAX_TARGETS = 5;    // "up to several simultaneous ignitions", per the real calamity's scripted burst
+const MASS_FIRE_CLUSTER_RADIUS = 6; // grid cells -- deliberately much wider than fire.js's own SPREAD_RADIUS=1.6
+                                     // single-neighbor reach, so this reads as "a cluster catching at once", not
+                                     // just a fast-forwarded version of the ordinary spread roll
+
+/** Ignites up to MASS_FIRE_MAX_TARGETS flammable structures at once, clustered around a random
+ *  anchor point, rather than fire.js's usual single-spark-then-slow-spread. Returns true if the
+ *  event actually caught (false if there wasn't enough flammable kindling on the map right now to
+ *  form a real cluster -- same fail-open shape as tryBlightEvent/tryWandererEvent above, so a
+ *  colony with little flammable furniture just skips this roll rather than firing a degenerate
+ *  one-structure "mass" fire). */
+export function tryMassFireEvent(world) {
+  const candidates = world.structures.filter(
+    (s) => isFlammable(s.kind) && !s.destroyed && !s.underConstruction && !s.onFire
+  );
+  if (candidates.length < MASS_FIRE_MIN_TARGETS) return false;
+
+  const anchor = candidates[Math.floor(world.rng() * candidates.length)];
+  const byDistance = candidates
+    .map((s) => ({ s, d: Math.hypot(s.x - anchor.x, s.y - anchor.y) }))
+    .filter(({ s, d }) => s === anchor || d <= MASS_FIRE_CLUSTER_RADIUS)
+    .sort((a, b) => a.d - b.d);
+  if (byDistance.length < MASS_FIRE_MIN_TARGETS) return false;
+
+  const targetCount = Math.min(MASS_FIRE_MAX_TARGETS, byDistance.length);
+  for (let k = 0; k < targetCount; k++) igniteStructure(byDistance[k].s);
+
+  const text = `A catastrophic fire breaks out -- ${targetCount} structures are ablaze at once, emergency response needed`;
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+  return true;
+}
+
+// ---------------------------------------------------------------- lightning storm calamity
+// Real Prison Architect calamity_settings.txt "Lightning Storm" -- a genuinely different mechanic
+// from RimWorld's thunderstorm weather above (tickThunderstorm), which only rolls ONE interval-
+// based strike that can ignite a single flammable structure. The real PA calamity instead keeps
+// rolling independent strike chances against three real target tiers for as long as the storm
+// lasts: citizens caught outdoors, power-network structures, and bare ground -- tiered roughly
+// 1/4/8% per the task brief. A Lightning Rod buildable (economy.js's BUILD_COST.lightning_rod,
+// drawn in render.js) is the real PA-style mitigation item: 85% effective at deflecting a strike
+// for any target within its protection radius. That same radius also halves this calamity's own
+// movement-speed penalty ("gritted" = inside a rod's radius) -- one footprint serving both jobs,
+// not two separate area concepts to track.
+//
+// Rides the same ThunderstormDry/ThunderstormRainy weather states tickThunderstorm already gates
+// on (both are real "lightning storm" weather in the source data this project ports from) rather
+// than adding a third, parallel weather kind -- but everything below is its own distinct system,
+// called separately from world.js, with its own numbers and its own consequences.
+export const LIGHTNING_ROD_RADIUS = 4; // grid cells -- same order of magnitude as FLOODLIGHT_RANGE (siege.js)
+export const LIGHTNING_ROD_MITIGATION = 0.85; // real PA-scale mitigation: 85% reduction to strike chance
+export const LIGHTNING_STRIKE_CHANCE_CITIZEN = 0.01;   // 1% -- citizens are the rarest, most protected target
+export const LIGHTNING_STRIKE_CHANCE_STRUCTURE = 0.04; // 4% -- power-network structures (generator/wire/battery/...)
+export const LIGHTNING_STRIKE_CHANCE_GROUND = 0.08;    // 8% -- bare ground, harmless but the most frequent roll
+const LIGHTNING_STRIKE_INTERVAL_TICKS = 20; // rolled every ~2s at 10Hz, not every single tick -- an ongoing
+                                             // hazard for as long as the storm lasts, not instant chaos on start
+const LIGHTNING_CITIZEN_DAMAGE = 0.35; // real, substantial (comparable to a couple of stacked combat hits --
+                                        // see siege.js's per-shot damage constants) but not a guaranteed kill
+const LIGHTNING_STRUCTURE_DAMAGE = 0.5; // half health off a hit power structure -- can chain to destroy on a second strike
+export const LIGHTNING_STORM_MOVE_PENALTY = 0.3; // 30% slower while a storm is active, ungritted
+export const LIGHTNING_STORM_MOVE_PENALTY_GRITTED = LIGHTNING_STORM_MOVE_PENALTY / 2; // halved near a Lightning Rod
+
+function isPowerStructureKind(kind) {
+  return kind === 'wire' || kind === 'battery' || kind === 'power_switch' || kind.startsWith('generator');
+}
+
+function liveLightningRods(world) {
+  return world.structures.filter(s => s.kind === 'lightning_rod' && !s.destroyed && !s.underConstruction);
+}
+
+function nearestLightningRodDist(rods, x, y) {
+  let best = Infinity;
+  for (const r of rods) {
+    const d = Math.hypot(r.x - x, r.y - y);
+    if (d < best) best = d;
+  }
+  return best;
+}
+
+function pushLightningMilestone(world, text) {
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+}
+
+/** True while ThunderstormDry/Rainy is active -- the same weather gate tickThunderstorm above
+ *  uses, so the Lightning Storm calamity is understood as riding that same real-world weather
+ *  state, just with its own distinct per-tick strike/movement mechanics layered on top. */
+export function isLightningStormActive(world) {
+  return world.weather === WeatherKind.ThunderstormDry || world.weather === WeatherKind.ThunderstormRainy;
+}
+
+/** True if (x,y) is within a completed Lightning Rod's protection radius -- "gritted", per the
+ *  file header, for both strike mitigation and the halved movement penalty. */
+export function isGrittedAt(world, x, y) {
+  const rods = liveLightningRods(world);
+  if (rods.length === 0) return false;
+  return nearestLightningRodDist(rods, x, y) <= LIGHTNING_ROD_RADIUS;
+}
+
+/** Per-citizen movement-speed multiplier during an active lightning storm -- 1 (no effect) if no
+ *  storm is active, otherwise the real penalty above, halved for a gritted citizen. Same
+ *  per-citizen-callback shape as isHeatwaveSlowdownActive's use in world.js's tickWander call
+ *  (positional, not a flat map-wide scalar like Rain's WEATHER_MOVE_SPEED). */
+export function lightningStormMoveMult(world, x, y) {
+  if (!isLightningStormActive(world)) return 1;
+  const penalty = isGrittedAt(world, x, y) ? LIGHTNING_STORM_MOVE_PENALTY_GRITTED : LIGHTNING_STORM_MOVE_PENALTY;
+  return 1 - penalty;
+}
+
+/** Rolls the three real per-interval strike tiers (citizen/power-structure/ground) while a
+ *  lightning storm is active. Call once per tick from SimWorld.tick(), alongside tickThunderstorm
+ *  -- deliberately a separate function/system (see file header) since PA's real Lightning Storm
+ *  calamity and RimWorld's thunderstorm weather are two distinct source mechanics being ported
+ *  side by side rather than merged into one. */
+export function tickLightningStorm(world) {
+  if (!isLightningStormActive(world)) return;
+  if (world.currentTick % LIGHTNING_STRIKE_INTERVAL_TICKS !== 0) return;
+
+  const rods = liveLightningRods(world);
+
+  // Citizen tier: only outdoor, alive, not-downed citizens are eligible -- a roof is real shelter,
+  // same "indoors matters" logic as Cold/Heatwave's tickWeatherCitizenEffects above.
+  if (world.rng() < LIGHTNING_STRIKE_CHANCE_CITIZEN) {
+    const store = world.citizens;
+    const candidates = [];
+    for (let i = 0; i < store.count; i++) {
+      if (!store.isAliveAt(i) || store.isDownedAt(i)) continue;
+      if (roomContaining(world.rooms, world.grid, store.x[i], store.y[i])) continue; // sheltered indoors
+      candidates.push(i);
+    }
+    if (candidates.length > 0) {
+      const i = candidates[Math.floor(world.rng() * candidates.length)];
+      const mitigated = rods.length > 0
+        && nearestLightningRodDist(rods, store.x[i], store.y[i]) <= LIGHTNING_ROD_RADIUS
+        && world.rng() < LIGHTNING_ROD_MITIGATION;
+      if (!mitigated) {
+        const healthMult = store.trait[i]?.healthMult ?? 1;
+        store.health[i] = Math.max(0, store.health[i] - LIGHTNING_CITIZEN_DAMAGE / healthMult);
+        if (store.health[i] <= 0.05) store.flags[i] |= CitizenFlags.Downed;
+        pushLightningMilestone(world, `Lightning strikes ${store.name[i]}`);
+      } else {
+        pushLightningMilestone(world, `Lightning strikes near ${store.name[i]} -- a Lightning Rod draws it off harmlessly`);
+      }
+    }
+  }
+
+  // Power-structure tier: any live generator/wire/battery/power_switch (power.js's own
+  // conductor/source set, mirrored here via isPowerStructureKind) -- excludes lightning_rod
+  // itself, which is a passive mitigation item, not a "power-network" structure.
+  if (world.rng() < LIGHTNING_STRIKE_CHANCE_STRUCTURE) {
+    const candidates = world.structures.filter(s =>
+      isPowerStructureKind(s.kind) && !s.destroyed && !s.underConstruction);
+    if (candidates.length > 0) {
+      const s = candidates[Math.floor(world.rng() * candidates.length)];
+      const mitigated = rods.length > 0
+        && nearestLightningRodDist(rods, s.x, s.y) <= LIGHTNING_ROD_RADIUS
+        && world.rng() < LIGHTNING_ROD_MITIGATION;
+      if (!mitigated) {
+        s.health = Math.max(0, s.health - LIGHTNING_STRUCTURE_DAMAGE);
+        if (s.health <= 0) s.destroyed = true;
+        const label = s.kind.replace(/_/g, ' ');
+        pushLightningMilestone(world, s.destroyed ? `Lightning destroys a ${label}` : `Lightning strikes a ${label}`);
+      } else {
+        pushLightningMilestone(world, 'Lightning strikes near the power grid -- a Lightning Rod draws it off harmlessly');
+      }
+    }
+  }
+
+  // Ground tier: real PA ground strikes are the highest-chance, lowest-consequence tier --
+  // logged flavor only, nothing damaged. No Lightning Rod check needed since there's no
+  // consequence to mitigate.
+  if (world.rng() < LIGHTNING_STRIKE_CHANCE_GROUND) {
+    pushLightningMilestone(world, 'Lightning strikes open ground');
+  }
 }
