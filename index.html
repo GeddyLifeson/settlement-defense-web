@@ -310,6 +310,27 @@
      convention as .active on the topbar's mute/pause buttons elsewhere in this stylesheet. */
   #inspector .draft-btn.active { background: #4fd1ff; color: #0c1a1f; }
 
+  /* Scavenged Augments (augments.js) -- one row per AUGMENTS entry, each a name/cost header line
+     plus a real upside/tradeoff readout and a Purchase button, same "always show why" convention
+     as the weapon-tier row above. .installed marks an already-owned augment (dimmed, button
+     hidden); the Purchase button itself disables (native `disabled`, title explains why) when the
+     citizen can't afford it or slots are full, same pattern as insp-rankup-btn. */
+  #inspector .aug-row {
+    border: 1px solid var(--panel-border); border-radius: 5px; padding: 6px 8px; margin-bottom: 6px;
+    background: #241f1c;
+  }
+  #inspector .aug-row.installed { opacity: 0.6; background: #1c2a20; border-color: #4a7a5a; }
+  #inspector .aug-row-head { display: flex; justify-content: space-between; font-size: 12px; font-weight: 600; }
+  #inspector .aug-row-upside { font-size: 11px; color: #7fd0a0; margin-top: 2px; }
+  #inspector .aug-row-tradeoff { font-size: 11px; color: #e0a860; margin-top: 1px; }
+  #inspector .aug-row button {
+    margin-top: 6px; width: 100%;
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 5px; padding: 5px 8px; font-size: 12px; cursor: pointer;
+  }
+  #inspector .aug-row button:hover:not(:disabled) { background: #3a342f; }
+  #inspector .aug-row button:disabled { opacity: 0.5; cursor: not-allowed; }
+
   /* ---- Work Priorities panel ---- Same full-screen dimmed .box.panel convention as #research. */
   #workprio {
     position: fixed; inset: 0; background: rgba(0,0,0,0.78);
@@ -365,6 +386,17 @@
   }
   #eventlog .entry { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #eventlog .entry:last-child { color: var(--text); }
+
+  /* ---- Tainted supply delivery banner (supplies.js) ---- */
+  #supply-alert {
+    position: fixed; left: 50%; top: 70px; transform: translateX(-50%);
+    display: flex; align-items: center; gap: 10px;
+    padding: 7px 14px; font-size: 12.5px; color: var(--text);
+    border: 1px solid var(--danger); border-radius: 6px;
+  }
+  #supply-alert.hidden { display: none; }
+  #supply-alert button { font-size: 12px; padding: 3px 10px; }
+  #supply-alert button.hidden { display: none; }
 
   /* ---- Toast ---- */
   #toast {
@@ -990,6 +1022,34 @@
   }
   #titlescreen .setup-actions button.primary:hover { filter: brightness(1.1); }
 
+  /* ---- Customize Starting Colonists (#colonist-setup) ----
+     Third sibling box inside #titlescreen (see the HTML comment at its definition) -- reuses
+     #titlescreen's own .box/.setup-head/.setup-actions rules above for its outer chrome, and the
+     same .grid/.node card-shape convention #research/#programs/#grants use for report-panel
+     overlays elsewhere in this file (re-scoped under #colonist-setup since, per this codebase's
+     established precedent, each overlay scopes that pattern separately rather than sharing one
+     global class). */
+  #titlescreen #colonist-setup { width: min(900px, 96vw); }
+  #colonist-setup .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 2px; }
+  @media (max-width: 700px) { #colonist-setup .grid { grid-template-columns: 1fr; } }
+  #colonist-setup .node {
+    background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
+    padding: 9px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 6px;
+  }
+  #colonist-setup .node .cname-input {
+    width: 100%; background: #1a1815; color: var(--text); border: 1px solid var(--panel-border);
+    border-radius: 4px; padding: 5px 7px; font-size: 12.5px; font-weight: 600; font-family: inherit;
+  }
+  #colonist-setup .node .cname-input:focus { outline: none; border-color: var(--accent); }
+  #colonist-setup .node .backstory { font-size: 10.5px; color: var(--text-dim); line-height: 1.35; }
+  #colonist-setup .node .trait { font-size: 11px; color: var(--accent); font-weight: 600; }
+  #colonist-setup .node .skills { font-size: 10.5px; color: var(--text-dim); }
+  #colonist-setup .node .reroll-btn {
+    background: #2c2825; color: var(--text); border: 1px solid var(--panel-border); border-radius: 4px;
+    padding: 5px 7px; font-size: 11px; cursor: pointer; margin-top: auto;
+  }
+  #colonist-setup .node .reroll-btn:hover { background: #3a342f; }
+
   /* Single point of control for "no game is running yet": every piece of in-game UI is hidden
      while <body> carries .pregame, so nothing has to be individually toggled at handoff time. */
   body.pregame #game,
@@ -1128,6 +1188,13 @@
   <div class="stat-group stat-secondary">
     <div class="stat" title="Hostile attackers currently alive on the map"><span class="icon" id="stat-attackers-icon"></span><span class="val" id="stat-attackers">0</span></div>
     <div class="stat" title="Current wave number"><span class="icon" id="stat-wave-icon"></span><span class="val" id="stat-wave">0</span></div>
+    <!-- Ammo (this session's ammo/suppression pass): plain unicode glyph, not a registered
+         assets.js TOPBAR_ICONS SVG like the other stats above -- kept intentionally lightweight
+         since this is a single new stat, not a whole icon-set addition. Turns amber/red via the
+         .low/.danger classes toggled in main.js's updateTopbar() when the stockpile runs low. -->
+    <div class="stat" title="Ammo -- Armories produce and store it; each shot from a turret/guard/sniper/tesla spends some. An empty stockpile doesn't disable a defender outright, it degrades them to a weaker fallback (melee for staff, a heavily-penalized 'dry-firing' shot for turrets/tesla) until resupplied.">
+      <span class="icon">&#128299;</span><span class="val" id="stat-ammo">0/0</span>
+    </div>
     <div class="stat hidden" id="stat-unrest-wrap" title="Colony-wide unrest -- rises when a large share of citizens are struggling at once (OnBreak or low Wellbeing); a sustained crisis applies a real work-speed penalty to the whole settlement until conditions recover">
       <span class="icon" id="stat-unrest-icon"></span><span class="val" id="stat-unrest">0%</span>
     </div>
@@ -1276,6 +1343,18 @@
     </div>
   </div>
 
+  <!-- Scavenged Augments (augments.js) -- PURCHASED with scrap (unlike Rank above, which is
+       earned via accumulated skill), one-time per citizen per augment slot, capped at
+       AUGMENT_SLOT_CAP (2). Every augment carries a real permanent tradeoff, not just an upside --
+       insp-augments-list always shows the full cost/effect/tradeoff readout before purchase
+       (main.js's renderInspectorAugments), same "always show why" convention as the Rank Up
+       button above. Row dims/disables once installed, already-full, or unaffordable. -->
+  <div class="insp-section" id="insp-augments-section">
+    <div class="insp-section-head">Augments</div>
+    <div class="skill-line" id="insp-augments-summary"></div>
+    <div id="insp-augments-list"></div>
+  </div>
+
   <div class="insp-section" id="insp-room-section">
     <div class="insp-section-head">Room</div>
     <div class="subtitle" id="insp-room-role" title="Room stats where this citizen currently stands (RimWorld-style beauty/cleanliness/impressiveness labels, cosmetic flavor text next to the raw numbers)"></div>
@@ -1308,6 +1387,15 @@
 </div>
 
 <div id="eventlog" class="panel"></div>
+
+<!-- Tainted supply delivery (supplies.js) -- player-facing "dispose of the bad batch" / "search
+     and recover" objectives, see main.js's updateSupplyAlert. Hidden by default; only shown while
+     an action is actually available, unlike #toast/#achievement-toast which auto-dismiss. -->
+<div id="supply-alert" class="panel hidden">
+  <span id="supply-alert-text"></span>
+  <button id="supply-inspect-btn" class="hidden">Inspect &amp; Dispose</button>
+  <button id="supply-search-btn" class="hidden">Search &amp; Recover</button>
+</div>
 
 <div id="toast"></div>
 <div id="autosave-indicator"></div>
@@ -1745,6 +1833,35 @@
 
     <div class="setup-actions">
       <button id="btn-setup-back" type="button">Back</button>
+      <span class="spacer"></span>
+      <button id="btn-setup-customize" type="button">👥 Customize Starting Colonists</button>
+    </div>
+  </div>
+
+  <!-- Customize Starting Colonists (optional, skippable pre-start step -- see main.js's
+       showColonistSetup/renderColonistGrid). Third sibling box in #titlescreen, same "exactly one
+       box visible at a time" convention #title-main/#title-setup already use above; reached from
+       #title-setup's own action row and returns there via Back, or hands off straight into
+       beginSettlement() via either footer button below. Shows the SAME roll every
+       CitizenStore.spawn() call already produces (randomTrait/randomBackstory/randomPassions),
+       just surfaced before the settlement exists rather than hidden inside it. -->
+  <div class="box panel hidden" id="colonist-setup">
+    <div class="setup-head">
+      <div>
+        <h2>Starting Colonists</h2>
+        <div class="setup-sub">
+          Your settlement's opening roster, rolled with the exact same backstory/trait system every
+          citizen uses for the rest of the run. Re-roll anyone you don't like, or rename them --
+          skill values themselves can't be set directly, only re-rolled from the same pool.
+        </div>
+      </div>
+    </div>
+    <div class="grid" id="colonist-setup-grid"></div>
+    <div class="setup-actions">
+      <button id="btn-colonist-back" type="button">◀ Back</button>
+      <span class="spacer"></span>
+      <button id="btn-colonist-randomize-all" type="button">🎲 Randomize All &amp; Continue</button>
+      <button id="btn-colonist-confirm" class="primary" type="button">Confirm &amp; Start ▶</button>
     </div>
   </div>
 </div>

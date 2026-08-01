@@ -6,13 +6,14 @@
 // clearly against the ground, and zone/room tints rather than photographic texture.
 import { StaffRoleKind, TerrainKind } from './core.js';
 import { ZONE_COLOR, ZoneKind } from './zones.js';
-import { JobState, WorkCategory, FARM_CYCLE_TICKS } from './jobs.js';
+import { JobState, WorkCategory, FARM_CYCLE_TICKS, CINEMA_SHOWTIME_INTERVAL_TICKS } from './jobs.js';
 import { isTileEnergized, isSegmentOverloadedAt, BATTERY_STORED_MAX } from './power.js';
-import { isTileWatered } from './water.js';
+import { isTileWatered, isWateredAt } from './water.js';
 import { isNuclearContained, NUCLEAR_HAZARD_RADIUS } from './siege.js';
 import { roomContaining, ROOM_ROLE_LABEL, RoomRole } from './rooms.js';
 import { drawSprite } from './assets.js';
 import { OrderKind } from './draft.js';
+import { CLIQUES } from './factions.js';
 
 // Parses either '#rrggbb' or 'rgb(a)(...)' into an [r,g,b] triple -- shade()/desaturate() need to
 // compose (desaturate's rgb(...) output can be fed back into shade() for a highlight, e.g.
@@ -43,6 +44,10 @@ const CELL = 24; // px per grid cell at zoom 1
 // Bumped from the old rgba(20,16,12,0.75) toward near-opaque true near-black (style brief item 3)
 // -- crisper silhouette separation at small sprite size, kept neutral rather than warm-tinted.
 const OUTLINE = 'rgba(10,10,12,0.95)';
+// Cinema (jobs.js's tickCinemas): how many ticks after a showtime the screen keeps its bright
+// "actively airing" glow before fading back to a dim idle tint -- purely cosmetic, doesn't affect
+// the real refill logic (which is a single instant at the exact showtime tick, see tickCinemas).
+const CINEMA_SHOWING_GLOW_TICKS = 20;
 
 // Style-brief item 1: baseline material colors desaturated ~15-25% off their original punchy
 // values (computed by hand from the pre-brief hex constants). Full saturation is reserved for
@@ -256,6 +261,7 @@ export class Renderer {
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
     this._drawGround(world);
     this._drawZones(world);
+    this._drawFactionTerritory(world);
     this._drawAllowedArea(world, input);
     this._drawResourceNodes(world);
     this._drawNuclearHazards(world);
@@ -368,7 +374,12 @@ export class Renderer {
 
   // RimWorld/Prison Architect-style rubber-band select: only ever active with the Select tool
   // (armed in InputController._onDown, see input.js), a dashed rectangle from drag-start to the
-  // live cursor position so the player can see what they're about to sweep up.
+  // live cursor position so the player can see what they're about to sweep up. Alt+drag switches
+  // input.js's own gesture into mass-designation mode (forcejob.js, see input.js's
+  // _massDesignate) instead of citizen-select -- colored orange here to match forcejob's own
+  // pending-order glyph (`#ffb020`, the "!" above a citizen's head with a pending Force Job) so
+  // the player reads "this drag means Force Job" at a glance, distinct from the default cyan
+  // citizen-select box.
   _drawMarquee(input) {
     if (!input.marqueeActive) return;
     const dx = input.marqueeEndWorldX - input.marqueeStartWorldX;
@@ -380,8 +391,13 @@ export class Renderer {
     const x = Math.min(x0, x1), y = Math.min(y0, y1);
     const w = Math.abs(x1 - x0), h = Math.abs(y1 - y0);
     ctx.save();
-    ctx.fillStyle = 'rgba(127,215,255,0.12)';
-    ctx.strokeStyle = '#7fd7ff';
+    if (input._marqueeDesignate) {
+      ctx.fillStyle = 'rgba(255,176,32,0.14)';
+      ctx.strokeStyle = '#ffb020';
+    } else {
+      ctx.fillStyle = 'rgba(127,215,255,0.12)';
+      ctx.strokeStyle = '#7fd7ff';
+    }
     ctx.lineWidth = 1.5;
     ctx.setLineDash([5, 4]);
     ctx.fillRect(x, y, w, h);
@@ -426,6 +442,61 @@ export class Renderer {
       }
     }
     ctx.setLineDash([]); // don't leak the dash pattern into unrelated strokes drawn after this
+  }
+
+  // Clique territory / graffiti overlay (factions.js's tickTerritory) -- a claimed room's cells
+  // get a persistent tint in that clique's own CLIQUES[].color, same per-cell fill+border
+  // language _drawAllowedArea below already uses for a different "this area means something"
+  // overlay. room.territoryClique is only ever set on world.rooms entries (rooms.js's
+  // detectRooms), so this is a cheap iterate-claimed-rooms-only pass, not a full grid scan like
+  // _drawZones/_drawAllowedArea have to do (zones/allowed-area are per-cell state; a room's
+  // claim is one flag on the room object covering its whole cell set).
+  _drawFactionTerritory(world) {
+    if (!world.rooms || world.rooms.length === 0) return;
+    const ctx = this.ctx;
+    const size = CELL * this.zoom;
+    const gw = world.grid.width;
+    for (const room of world.rooms) {
+      if (!room.territoryClique) continue;
+      const clique = CLIQUES.find(c => c.id === room.territoryClique);
+      if (!clique) continue;
+      const [r, g, b] = parseColor(clique.color);
+      ctx.fillStyle = `rgba(${r},${g},${b},0.18)`;
+      ctx.strokeStyle = `rgba(${r},${g},${b},0.65)`;
+      ctx.lineWidth = Math.max(1, size * 0.05);
+      ctx.setLineDash(this.highContrast ? [size * 0.15, size * 0.1] : []);
+      for (const idx of room.cells) {
+        const x = idx % gw, y = Math.floor(idx / gw);
+        const [px, py] = this.worldToScreen(x, y);
+        ctx.fillRect(px, py, size + 1, size + 1);
+        // Graffiti glyph: a small scrawled X per cell, cheap stand-in for hand-authored tag art
+        // (this codebase's no-AI-art rule means every visual is Canvas-drawn primitives or
+        // hand-authored SVG, same as everywhere else -- a scrawled mark is an honest fit for
+        // "graffiti" at this sprite scale). Only drawn once per room (its first cell) rather than
+        // once per cell, so a large claimed room doesn't turn into a wall of X's.
+        if (idx === room.cells.values().next().value) {
+          ctx.beginPath();
+          ctx.moveTo(px + size * 0.3, py + size * 0.3);
+          ctx.lineTo(px + size * 0.7, py + size * 0.7);
+          ctx.moveTo(px + size * 0.7, py + size * 0.3);
+          ctx.lineTo(px + size * 0.3, py + size * 0.7);
+          ctx.stroke();
+        }
+      }
+      // Border: only on edges touching a non-member cell, same "outline the region, not every
+      // tile" convention _drawZones uses.
+      ctx.beginPath();
+      for (const idx of room.cells) {
+        const x = idx % gw, y = Math.floor(idx / gw);
+        const [px, py] = this.worldToScreen(x, y);
+        if (!room.cells.has(idx - gw) || y === 0) { ctx.moveTo(px, py); ctx.lineTo(px + size, py); }
+        if (!room.cells.has(idx + gw) || y === world.grid.height - 1) { ctx.moveTo(px, py + size); ctx.lineTo(px + size, py + size); }
+        if (!room.cells.has(idx - 1) || x === 0) { ctx.moveTo(px, py); ctx.lineTo(px, py + size); }
+        if (!room.cells.has(idx + 1) || x === gw - 1) { ctx.moveTo(px + size, py); ctx.lineTo(px + size, py + size); }
+      }
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
   }
 
   // Allowed Area restriction overlay (RimWorld Restrict-tab style, citizens.js's allowedAreaMask)
@@ -914,6 +985,7 @@ export class Renderer {
     this._structuresForPower = world.structures; // read back by the 'wire' shape for its lit/dark tint
     this._currentWeather = world.weather; // read back by the 'lightning_rod' shape for its storm-active radius ring
     this._droneQueueLength = world.droneFabricationQueue?.length || 0; // read back by the 'fabrication_bay' shape for its work-light pulse
+    this._lastTick = world.currentTick; // read back by the 'cinema' shape for its active-showing glow
     for (const s of world.structures) {
       if (s.destroyed && s.kind === 'trap') continue; // traps vanish once triggered
       const [sx, sy] = this.worldToScreen(s.x, s.y);
@@ -1108,6 +1180,50 @@ export class Renderer {
       ctx.strokeRect(sx + size * 0.22, sy - size * 0.22, size * 0.14, size * 0.44);
       return;
     }
+    if (s.kind === 'shower') {
+      // Hygiene need's refill fixture (citizens.js's HYGIENE_DECAY, jobs.js's findNearestShower/
+      // JobState.Bathing) -- left as a Canvas primitive, no new SVG template, same "no new mechanic
+      // beyond the buildable itself" v1 scope as fitness_station/shelf/medical_bed above. Drawn as
+      // a showerhead (a post + a fanned nozzle) with a few drip lines that only appear while it's
+      // actually connected to the water grid (water.js's isWateredAt) -- reusing
+      // this._structuresForPower (set once per frame in _drawStructures, holds world.structures
+      // despite the power-focused name, same reuse the 'pipe'/'pump' shapes below already make) so
+      // the real plumbing dependency reads visually, not just mechanically: an unconnected Shower
+      // looks visibly dry and grey, the same "dim/dark when not functional" language the pipe/pump
+      // shapes already use for their own frozen/disconnected states.
+      const connected = !s.destroyed && !s.underConstruction && isWateredAt(this._structuresForPower || [], s.x, s.y);
+      const fill = s.destroyed ? 'rgba(80,80,80,0.4)' : connected ? '#6fa8c9' : '#5a6570';
+      ctx.strokeStyle = fill;
+      ctx.lineWidth = Math.max(2, size * 0.09);
+      ctx.beginPath();
+      ctx.moveTo(sx, sy + size * 0.32);
+      ctx.lineTo(sx, sy - size * 0.12);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - size * 0.12);
+      ctx.lineTo(sx - size * 0.24, sy - size * 0.3);
+      ctx.stroke();
+      ctx.fillStyle = fill;
+      ctx.beginPath();
+      ctx.ellipse(sx - size * 0.24, sy - size * 0.3, size * 0.16, size * 0.08, -0.4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = Math.max(1, size * 0.04);
+      ctx.beginPath();
+      ctx.ellipse(sx - size * 0.24, sy - size * 0.3, size * 0.16, size * 0.08, -0.4, 0, Math.PI * 2);
+      ctx.stroke();
+      if (connected) {
+        ctx.strokeStyle = 'rgba(120,190,230,0.8)';
+        ctx.lineWidth = Math.max(1, size * 0.03);
+        for (const dx of [-0.32, -0.24, -0.16]) {
+          ctx.beginPath();
+          ctx.moveTo(sx + dx * size, sy - size * 0.18);
+          ctx.lineTo(sx + dx * size, sy - size * 0.02);
+          ctx.stroke();
+        }
+      }
+      return;
+    }
     if (s.kind === 'farm_plot') {
       // Farm Plot (research.js's Agronomy node, jobs.js's Farming job): left as a Canvas
       // primitive, no new SVG template, same "no new mechanic beyond the buildable itself" v1
@@ -1143,6 +1259,39 @@ export class Renderer {
           ctx.arc(sx, sy + size * 0.28 - sproutH, size * 0.07, 0, Math.PI * 2);
           ctx.fill();
         }
+      }
+      ctx.strokeStyle = OUTLINE;
+      return;
+    }
+    if (s.kind === 'restaurant') {
+      // Restaurant (PA real Restaurant+Bakery retail-income analog, see jobs.js's Restaurant
+      // job): left as a Canvas primitive, no new SVG template, same v1 scope as farm_plot/
+      // workshop above -- a squat counter with a striped awning (a "storefront" read at a
+      // glance), dimmed/awning-down when unstaffed (s.workerId) so the player can see at a
+      // glance it needs a worker, same "read the staffing state at a glance" idea as
+      // workshop/farm_plot/monitor_station. Warm red/cream retail palette, deliberately distinct
+      // from workshop's cool industrial gray-blue and farm_plot's earthy soil brown.
+      const staffed = s.workerId != null;
+      const counter = s.destroyed ? 'rgba(90,70,60,0.4)' : staffed ? '#c9a876' : '#8a7355';
+      const awning = s.destroyed ? 'rgba(90,50,50,0.4)' : staffed ? '#b23f3f' : '#6e3535';
+      ctx.fillStyle = counter;
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.02, size * 0.8, size * 0.4);
+      ctx.strokeRect(sx - size * 0.4, sy - size * 0.02, size * 0.8, size * 0.4);
+      // Striped awning above the counter -- alternating awning/cream stripes, same "storefront"
+      // silhouette a real restaurant/bakery counter reads as at a glance.
+      const stripeW = size * 0.16;
+      ctx.strokeStyle = OUTLINE;
+      for (let sxOff = -size * 0.44, idx = 0; sxOff < size * 0.44; sxOff += stripeW, idx++) {
+        ctx.fillStyle = idx % 2 === 0 ? awning : '#e8dcc4';
+        ctx.fillRect(sx + sxOff, sy - size * 0.4, stripeW, size * 0.4);
+      }
+      ctx.strokeRect(sx - size * 0.44, sy - size * 0.4, size * 0.88, size * 0.4);
+      if (staffed && !s.destroyed) {
+        // Lit "OPEN" sign dot while a citizen is actively staffing it -- pulses gently, same
+        // visual language as workshop's own work-light.
+        const pulse = 0.55 + 0.35 * Math.sin(Date.now() / 220);
+        ctx.fillStyle = `rgba(255,210,120,${pulse})`;
+        ctx.beginPath(); ctx.arc(sx, sy + size * 0.18, size * 0.07, 0, Math.PI * 2); ctx.fill();
       }
       ctx.strokeStyle = OUTLINE;
       return;
@@ -1386,6 +1535,52 @@ export class Renderer {
       ctx.fill();
       return;
     }
+    if (s.kind === 'power_exporter') {
+      // Power Exporter (power.js's tickPowerExporters, real PA DLC Transformer/PowerExportMeter/
+      // QuickConnect mechanic): a squat transformer-pylon silhouette -- two stacked coil rings on
+      // a base -- with a small upward scrap-arrow glyph that ONLY lights up while `s._exportRate`
+      // (stamped fresh every tick by tickPowerExporters, never a cached/lagging value) is actually
+      // > 0. Dull steel when built but not currently trickling (unpowered, or a downstream
+      // consumer is eating the segment's whole surplus this tick) so a glance at the icon tells
+      // the player whether it's doing anything RIGHT NOW, not just whether it's built -- same
+      // "state, not existence" reasoning as power_switch's on/off lever above.
+      const live = !s.destroyed && !s.underConstruction;
+      const exporting = live && (s._exportRate || 0) > 0;
+      const casing = live ? '#4a5560' : 'rgba(74,85,96,0.6)';
+      const w = size * 0.5, h = size * 0.62;
+      ctx.fillStyle = casing;
+      ctx.fillRect(sx - w / 2, sy - size * 0.06, w, h * 0.55); // base
+      ctx.strokeRect(sx - w / 2, sy - size * 0.06, w, h * 0.55);
+      if (live) {
+        ctx.fillStyle = shade(casing, 0.22);
+        ctx.fillRect(sx - w / 2 + size * 0.04, sy - size * 0.02, w * 0.4, size * 0.08);
+      }
+      // Two stacked coil rings -- the transformer-silhouette cue, tinted green while exporting.
+      ctx.strokeStyle = exporting ? '#6ba852' : (live ? OUTLINE : 'rgba(122,122,122,0.6)');
+      ctx.lineWidth = Math.max(1.5, size * 0.07);
+      for (const ry of [sy - size * 0.16, sy + size * 0.06]) {
+        ctx.beginPath();
+        ctx.arc(sx, ry, size * 0.15, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      // Upward scrap-export arrow -- only drawn while genuinely exporting this tick, pulsing off
+      // the wall clock (same pattern as the overload-warning ring above) so it stays visible even
+      // while the sim is paused.
+      if (exporting) {
+        const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 220);
+        ctx.save();
+        ctx.globalAlpha = 0.55 + 0.45 * pulse;
+        ctx.fillStyle = '#e0a336';
+        ctx.beginPath();
+        ctx.moveTo(sx, sy - size * 0.52);
+        ctx.lineTo(sx - size * 0.09, sy - size * 0.32);
+        ctx.lineTo(sx + size * 0.09, sy - size * 0.32);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
+      }
+      return;
+    }
     if (s.kind === 'shrine') {
       // Shrine (RimWorld Ideology DLC's real altar buildable, see assets.js's 'shrine' template /
       // rooms.js's BEAUTY_BY_KIND.shrine) -- a beauty-only passive building, no functional state
@@ -1411,6 +1606,36 @@ export class Renderer {
         ctx.fillStyle = '#e2c168';
         ctx.beginPath(); ctx.arc(sx, sy - size * 0.15, size * 0.1, 0, Math.PI * 2); ctx.fill();
       }
+      return;
+    }
+    if (s.kind === 'cinema') {
+      // Cinema (real PA DLC prefab catalog's WatchCinema provider, see jobs.js's tickCinemas):
+      // left as a Canvas primitive, no new SVG template, same "no new mechanic beyond the
+      // buildable itself" v1 scope as fitness_station/shrine/farm_plot above. Drawn as a small
+      // projector screen on a stand -- a flat panel (the "screen") with a marquee strip on top,
+      // reading distinctly from bed/table's flat furniture silhouettes. The screen glows/pulses
+      // gently on the tick a showing is actively airing (currentTick % CINEMA_SHOWTIME_INTERVAL_
+      // TICKS near 0, read off this._lastTick set at the top of the render loop) so the player
+      // can see at a glance when the broadcast is live, same "read the active state at a glance"
+      // idea as workshop's staffed work-light pulse.
+      const frame = '#5a4a38';
+      const screenBase = s.destroyed ? 'rgba(60,60,64,0.4)' : '#2b2f36';
+      ctx.fillStyle = frame;
+      ctx.fillRect(sx - size * 0.42, sy - size * 0.44, size * 0.84, size * 0.14); // marquee strip
+      ctx.strokeRect(sx - size * 0.42, sy - size * 0.44, size * 0.84, size * 0.14);
+      ctx.fillStyle = screenBase;
+      ctx.fillRect(sx - size * 0.38, sy - size * 0.28, size * 0.76, size * 0.5); // screen panel
+      ctx.strokeRect(sx - size * 0.38, sy - size * 0.28, size * 0.76, size * 0.5);
+      if (!s.destroyed && !s.underConstruction) {
+        const ticksSinceShow = (this._lastTick ?? 0) % CINEMA_SHOWTIME_INTERVAL_TICKS;
+        const airing = ticksSinceShow < CINEMA_SHOWING_GLOW_TICKS;
+        const glow = airing ? (0.5 + 0.4 * Math.sin(Date.now() / 150)) : 0.18;
+        ctx.fillStyle = `rgba(120,190,235,${glow})`;
+        ctx.fillRect(sx - size * 0.32, sy - size * 0.22, size * 0.64, size * 0.38);
+      }
+      ctx.fillStyle = shade(frame, -0.25);
+      ctx.fillRect(sx - size * 0.08, sy + size * 0.22, size * 0.16, size * 0.12); // stand base
+      ctx.strokeStyle = OUTLINE;
       return;
     }
     if (s.kind === 'pump') {
@@ -1815,6 +2040,44 @@ export class Renderer {
           ctx.beginPath(); ctx.arc(sx + size * 0.24, sy - size * 0.24, size * 0.08, 0, Math.PI * 2); ctx.fill();
         }
       }
+      return;
+    }
+    if (s.kind === 'checkpoint') {
+      // Plain Canvas primitive (same "cheap, no new SVG asset needed" precedent as rat_trap/
+      // lightning_rod/fabrication_bay above): a small booth with a black-and-yellow striped boom
+      // barrier, real PA DLC ScannerMachine/CheckPoint's screening-chokepoint read, reskinned with
+      // zero carceral framing. Faint radius ring shown while active -- same "show the coverage
+      // you're paying for" idea as floodlight's always-on glow and lightning_rod's storm-only ring
+      // -- so the player can see security.js/factions.js's real CHECKPOINT_RADIUS at a glance.
+      if (!s.destroyed) {
+        ctx.strokeStyle = 'rgba(230,200,90,0.18)';
+        ctx.lineWidth = Math.max(1, size * 0.04);
+        ctx.beginPath(); ctx.arc(sx, sy, size * 1.75, 0, Math.PI * 2); ctx.stroke();
+      }
+      const boothFill = s.destroyed ? 'rgba(80,78,72,0.5)' : '#5c5850';
+      ctx.fillStyle = boothFill;
+      ctx.fillRect(sx - size * 0.3, sy - size * 0.1, size * 0.3, size * 0.5);
+      ctx.strokeRect(sx - size * 0.3, sy - size * 0.1, size * 0.3, size * 0.5);
+      if (!s.destroyed) {
+        ctx.fillStyle = shade(boothFill, 0.3);
+        ctx.beginPath();
+        ctx.moveTo(sx - size * 0.3, sy - size * 0.1);
+        ctx.lineTo(sx - size * 0.08, sy - size * 0.1);
+        ctx.lineTo(sx - size * 0.3, sy + size * 0.08);
+        ctx.closePath(); ctx.fill();
+      }
+      // Striped boom bar, angled up (raised/idle) -- distinct from fence's flat horizontal line.
+      ctx.save();
+      ctx.translate(sx - size * 0.12, sy + size * 0.1);
+      ctx.rotate(-0.55);
+      const barLen = size * 0.75;
+      const stripes = 4;
+      for (let i = 0; i < stripes; i++) {
+        ctx.fillStyle = s.destroyed ? 'rgba(90,80,40,0.4)' : (i % 2 === 0 ? '#d8c24a' : '#2b2b28');
+        ctx.fillRect((i / stripes) * barLen, -size * 0.05, barLen / stripes, size * 0.1);
+      }
+      ctx.strokeRect(0, -size * 0.05, barLen, size * 0.1);
+      ctx.restore();
       return;
     }
     // turret (default)

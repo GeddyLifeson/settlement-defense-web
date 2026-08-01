@@ -6,7 +6,7 @@
 // don't all roll on the exact same tick, and mood integration reuses citizens.js's addMoodEvent
 // (the same stacking/decaying "Thought" mechanic every other mood event in this project already
 // uses) rather than a parallel mood-blending mechanic.
-import { addMoodEvent } from './citizens.js';
+import { addMoodEvent, HYGIENE_SICK_THRESHOLD, HYGIENE_SICK_CHANCE_MULT } from './citizens.js';
 import { DAY_NIGHT_CYCLE_TICKS } from './schedule.js';
 
 export const SICKNESS_CHECK_INTERVAL = 50; // per-citizen onset-roll/mood-refresh cadence -- keep in sync
@@ -69,7 +69,12 @@ export function tickSickness(world) {
 
     if (!store.isSickAt(i)) {
       if (!onStaggerCheck) continue;
-      if (world.rng() < SICKNESS_CHANCE) {
+      // Hygiene consequence (citizens.js's HYGIENE_SICK_THRESHOLD/HYGIENE_SICK_CHANCE_MULT, the
+      // real "poor hygiene has real consequences" hookup the new Hygiene need calls for): a
+      // citizen who's gone unwashed multiplies their own onset roll for this check, rather than
+      // inventing a parallel penalty system -- reuses this exact mechanic, doesn't reskin it.
+      const hygieneMult = (store.hygiene?.[i] ?? 1) < HYGIENE_SICK_THRESHOLD ? HYGIENE_SICK_CHANCE_MULT : 1;
+      if (world.rng() < SICKNESS_CHANCE * hygieneMult) {
         store.sickSeverity[i] = Math.min(SICKNESS_MAX_SEVERITY, SICKNESS_WORSEN_PER_TICK * DAY_NIGHT_CYCLE_TICKS);
         refreshSickMood(store, i, world.currentTick);
       }

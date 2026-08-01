@@ -14,9 +14,13 @@ import { checkTameAchievement } from './metaprogress.js';
 import { breakRateMultFor, needsThrottleMultFor, addMoodEvent } from './citizens.js';
 import { ageBandFor } from './traits.js';
 import { rankWorkSpeedMultFor } from './ranks.js';
+import { augmentWorkSpeedMultFor, augmentSocialGainMultFor } from './augments.js';
 import { sickRateMultFor } from './sickness.js';
+import { dependencyRateMultFor } from './supplies.js';
+import { epidemicMoveMultFor } from './epidemic.js';
 import { findJoinableSite, applyAttendingTick, completeSession, roomPostFor, isSiteStaffed, PROGRAM_DEFS } from './programs.js';
 import { tryClaimForcedJob } from './forcejob.js';
+import { hazardRefillMult } from './weather.js';
 
 const ROOM_REFILL_BONUS = 1.3; // RimWorld/PA-style: an actually-enclosed room works better than open ground
 // Water grid payoff (water.js): a Food or Recreation zone tile fed by a pump/pipe run refills
@@ -80,6 +84,24 @@ export const JobState = Object.freeze({
   // FARM_YIELD_PER_CYCLE below and tryClaimFarming/findNearestFarmPlot.
   SeekingFarm: 25,
   Farming: 26,
+  // Restaurant (siege.js Structure kind 'restaurant', economy.js's BUILD_COST.restaurant): a
+  // consolidated stand-in for Prison Architect's real Restaurant+Bakery retail-income mechanic --
+  // "visitor traffic" isn't modeled as its own entity system here (would need a parallel
+  // pathing/spawn pipeline for a purely cosmetic payoff), so the income is generated directly by a
+  // staffed citizen instead, same single-worker staffed-station shape as SeekingWorkshop/
+  // SeekingFarm above. Like Farming (and unlike Processing), it needs no raw-material input to
+  // start a cycle -- just an idle citizen and real tend-time, see RESTAURANT_CYCLE_TICKS/
+  // RESTAURANT_YIELD_PER_CYCLE below and tryClaimRestaurant/findNearestRestaurant.
+  SeekingRestaurant: 27,
+  Restaurant: 28,
+  // Hygiene (citizens.js's HYGIENE_DECAY, RimWorld QoL-mod-style hygiene need): a citizen with low
+  // Hygiene walks directly to the new Shower buildable (siege.js Structure kind 'shower'), same
+  // Seeking*/active-job pair shape as Exercise/SeekingExercise above -- but with a real plumbing
+  // dependency Exercise doesn't have: findNearestShower only ever targets a Shower that's actually
+  // connected to the water grid (water.js's isWateredAt), and the Bathing state below re-checks
+  // that connection every tick it's in use, so an unplumbed Shower never refills Hygiene at all.
+  SeekingHygiene: 29,
+  Bathing: 30,
 });
 
 // Work Priorities (RimWorld Work-tab-style, see citizens.js's hasWorkPriorities/workPriority*
@@ -131,6 +153,10 @@ const SEEK_REST_THRESHOLD = 0.4;
 // Hunger/Rest" per the task brief, and Rest is this codebase's closest existing precedent for a
 // need with no schedule-block bias of its own.
 const SEEK_EXERCISE_THRESHOLD = 0.4;
+// Hygiene (see citizens.js's HYGIENE_DECAY): same threshold as Rest/Exercise -- matching this
+// codebase's existing "similar magnitude, similar threshold" precedent rather than inventing a
+// distinct number for a need that decays at the same rate.
+const SEEK_HYGIENE_THRESHOLD = 0.4;
 const SATISFIED_THRESHOLD = 0.85;
 
 // Duty Roster scheduling (see schedule.js) biases which need-thresholds apply this tick --
@@ -229,6 +255,73 @@ export const FARM_CYCLE_TICKS = 60;      // ticks of active tending to complete 
 export const FARM_YIELD_PER_CYCLE = 6;   // food/scrap-equivalent resource paid out per completed cycle
 const FARM_SKILL_GAIN = 0.008;           // construction-skill trickle while tending, same family as HARVEST_SKILL_GAIN
 
+// Restaurant (siege.js Structure kind 'restaurant'): same single-worker staffed-cycle shape as
+// Farm Plot immediately above (reuses Structure's generic `_workTimer` field), tuned to a shorter
+// cycle / smaller per-cycle payout than farming -- retail income is meant to read as a "steady
+// trickle" rather than a periodic lump, and this is a standing income source with no separate
+// research gate (unlike Farm Plot's Agronomy requirement), so it's deliberately not the single
+// biggest per-worker payout in the economy.
+export const RESTAURANT_CYCLE_TICKS = 40;      // ticks of active staffing to complete one service cycle
+export const RESTAURANT_YIELD_PER_CYCLE = 3;   // scrap paid out per completed cycle -- "visitor traffic" retail income
+const RESTAURANT_SKILL_GAIN = 0.006;           // construction-skill trickle while staffing, same family as FARM_SKILL_GAIN
+
+// Cinema (siege.js Structure kind 'cinema', economy.js's BUILD_COST.cinema -- real Prison
+// Architect DLC prefab data: WatchCinema provider, -5.0 Recreation + -1.0 Freedom-equivalent
+// per use, BroadcastRange 10). Deliberately NOT a single-occupant zone-tile refill like
+// bed/table/fitness_station above, and NOT a staffed retail cycle like Restaurant above --
+// it's a group-broadcast building, same "every target in range, not one nearest target"
+// mechanism siege.js's Tesla Coil already established for combat (TESLA_RANGE, the
+// chains-to-every-attacker-in-range loop in tickTurrets). tickCinemas below is that same
+// range-iteration pattern applied to citizens instead of attackers: no zone tile to path to,
+// no worker to staff it, just "stand within range while it's showing and get refilled" --
+// reused wholesale rather than inventing a second broadcast mechanism from scratch.
+// CINEMA_RANGE: the real BroadcastRange stat (10), used directly -- this project's grid
+// (64x64, see grid.js) is the same order of magnitude as the tile-scale every other range
+// constant here already assumes (TESLA_RANGE 4.5, watchtower/floodlight radii in the
+// single-digit-to-low-teens range), so no rescale is needed, unlike e.g. impressiveness
+// labels elsewhere that DO need a scale factor onto a different numeric range.
+export const CINEMA_RANGE = 10;
+// A "showing" is a discrete broadcast event (mirrors WatchCinema's "per use" framing, and
+// Tesla's own discrete per-activation-not-continuous shape) rather than a continuous trickle --
+// every citizen in range at showtime gets refilled together, which is also what makes the
+// "simultaneous, not nearest-only" behavior directly observable via before/after need snapshots.
+export const CINEMA_SHOWTIME_INTERVAL_TICKS = 300; // ~30s at 10Hz between showings
+// Real -5.0 Recreation per use (Sims-style 0..100 need scale) rescaled onto this project's 0..1
+// Social need: 5/100 = 0.05 would barely register against SOCIAL_DECAY's ~0.0004/tick trickle
+// over a 300-tick gap (~0.12 lost between showings), so scaled up proportionally to actually
+// matter at this project's own numeric scale, same "keep the real ratio, not the raw number"
+// approach FARM_YIELD_PER_CYCLE/RESTAURANT_YIELD_PER_CYCLE already took for their own real-data
+// anchors above.
+export const CINEMA_SOCIAL_REFILL = 0.3;
+// Real -1.0 Freedom-equivalent per use: no Freedom need exists in this codebase, so the closest
+// honest analogue is a small direct mood nudge (same "translate to the nearest existing axis"
+// call rooms.js's shrine/Beauty and citizens.js's Ideology precept work already made) via the
+// existing addMoodEvent system rather than inventing a second need.
+const CINEMA_MOOD_MAGNITUDE = 0.04;
+const CINEMA_MOOD_DURATION_TICKS = 400;
+
+// Broadcasts a "showing" to every citizen within CINEMA_RANGE of every active (built, not
+// destroyed/under-construction) Cinema once every CINEMA_SHOWTIME_INTERVAL_TICKS -- called once
+// per world tick from world.js, same call shape as siege.js's tickTurrets. Deliberately does NOT
+// gate on jobState/allowedCheck/room role the way the zone-refill paths in tickJobs below do: a
+// broadcast building's whole point (and the real DLC stat's point) is that a citizen doesn't have
+// to interrupt what they're doing and path to a specific tile, they just have to be standing
+// somewhere nearby when it airs -- so a citizen mid-Harvesting or mid-Building still benefits.
+export function tickCinemas(structures, store, currentTick) {
+  for (const s of structures) {
+    if (s.kind !== 'cinema' || s.destroyed || s.underConstruction) continue;
+    if (currentTick % CINEMA_SHOWTIME_INTERVAL_TICKS !== 0) continue;
+    for (let i = 0; i < store.count; i++) {
+      if (!store.isAliveAt(i)) continue;
+      if (Math.hypot(store.x[i] - s.x, store.y[i] - s.y) > CINEMA_RANGE) continue;
+      store.social[i] = Math.min(1, store.social[i] + CINEMA_SOCIAL_REFILL);
+      addMoodEvent(store, i, currentTick, {
+        magnitude: CINEMA_MOOD_MAGNITUDE, durationTicks: CINEMA_MOOD_DURATION_TICKS, stackKey: 'cinemaShowing',
+      });
+    }
+  }
+}
+
 // First-aid tending (JobState.SeekingTend/Tending, see citizens.js's TEND_RECOVERY_RATE). No
 // dedicated Medicine skill exists in this codebase and FEATURE_RESEARCH.md's precedent (see
 // jobs.js's own Taming comment above) is not to add one just for a single job type -- construction
@@ -283,6 +376,9 @@ export function releaseCurrentJobClaim(store, i, idOf) {
   } else if (state === JobState.SeekingFarm || state === JobState.Farming) {
     const plot = store._jobRef?.[i];
     if (plot && plot.workerId === idOf(i)) plot.workerId = null;
+  } else if (state === JobState.SeekingRestaurant || state === JobState.Restaurant) {
+    const station = store._jobRef?.[i];
+    if (station && station.workerId === idOf(i)) station.workerId = null;
   }
   // Harvesting/SeekingScrap/SeekingVehicle/Cleaning/SeekingClean/Idle/Eating/Sleeping/
   // Recreating/Driving have no claim to release (findNearestNode/findUndrivenVehicle/
@@ -371,6 +467,19 @@ function tryClaimFarming(store, i, structures, idOf, isAllowed) {
   return true;
 }
 
+// Restaurant (see findNearestRestaurant/RESTAURANT_CYCLE_TICKS above): same "no input-on-hand
+// gate" shape as tryClaimFarming -- an unstaffed Restaurant is worth walking to purely because an
+// idle citizen can staff it, no scrap needs to be banked first (unlike tryClaimProcessing).
+function tryClaimRestaurant(store, i, structures, idOf, isAllowed) {
+  const station = findNearestRestaurant(structures, store.x[i], store.y[i], isAllowed);
+  if (!station) return false;
+  station.workerId = idOf(i);
+  store.jobState[i] = JobState.SeekingRestaurant;
+  store.targetX[i] = station.x; store.targetY[i] = station.y;
+  store._jobRef[i] = station;
+  return true;
+}
+
 // Every claim lambda now takes an extra trailing isAllowed arg (the citizen's per-tick Allowed
 // Area check built in tickJobs, see its own doc comment) and threads it straight through to its
 // finder -- null for every citizen with no restriction painted, which every finder treats as "no
@@ -451,6 +560,20 @@ function findNearestFarmPlot(structures, x, y, isAllowed = null) {
   return best;
 }
 
+// Restaurant (siege.js Structure kind 'restaurant'): single-worker exclusivity, same shape as
+// findNearestFarmPlot/findNearestWorkshop above -- one citizen staffs one Restaurant at a time.
+function findNearestRestaurant(structures, x, y, isAllowed = null) {
+  let best = null, bestDist = Infinity;
+  for (const s of structures) {
+    if (s.kind !== 'restaurant' || s.destroyed || s.underConstruction) continue;
+    if (s.workerId != null) continue; // already staffed
+    if (isAllowed && !isAllowed(s.x, s.y)) continue;
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  return best;
+}
+
 // No staffing exclusivity, deliberately -- unlike findNearestWorkshop above (single-worker
 // 'workshop' station), a Fitness Station is closer in spirit to a zone tile: any number of
 // citizens can use it to refill Exercise at once, matching how zones.nearestOfKind never gates on
@@ -459,6 +582,25 @@ function findNearestFitnessStation(structures, x, y, isAllowed = null) {
   let best = null, bestDist = Infinity;
   for (const s of structures) {
     if (s.kind !== 'fitness_station' || s.destroyed || s.underConstruction) continue;
+    if (isAllowed && !isAllowed(s.x, s.y)) continue;
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  return best;
+}
+
+// Shower (siege.js Structure kind 'shower', economy.js's BUILD_COST.shower): same no-staffing-
+// exclusivity shape as findNearestFitnessStation above, but with a real, load-bearing extra gate --
+// isWateredAt(structures, s.x, s.y) -- so a Shower with no live pipe/pump run to it is never even
+// offered as a destination, the same way a garage with no built vehicle isn't offered by
+// findUndrivenVehicle. This is the actual "plumbing dependency, not a flat furniture piece"
+// requirement: a colony with Showers built but no water grid just never sends anyone to use them,
+// same "not yet functional, so not yet a job" precedent every other gated finder in this file sets.
+function findNearestShower(structures, x, y, isAllowed = null) {
+  let best = null, bestDist = Infinity;
+  for (const s of structures) {
+    if (s.kind !== 'shower' || s.destroyed || s.underConstruction) continue;
+    if (!isWateredAt(structures, s.x, s.y)) continue; // not connected to the water grid -- inert
     if (isAllowed && !isAllowed(s.x, s.y)) continue;
     const d = Math.hypot(s.x - x, s.y - y);
     if (d < bestDist) { bestDist = d; best = s; }
@@ -557,7 +699,8 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         || interruptible === JobState.SeekingAnimal || interruptible === JobState.Taming
         || interruptible === JobState.SeekingWorkshop || interruptible === JobState.Processing
         || interruptible === JobState.SeekingProgram || interruptible === JobState.Attending
-        || interruptible === JobState.SeekingFarm || interruptible === JobState.Farming) {
+        || interruptible === JobState.SeekingFarm || interruptible === JobState.Farming
+        || interruptible === JobState.SeekingRestaurant || interruptible === JobState.Restaurant) {
         releaseCurrentJobClaim(store, i, idOf);
       }
     }
@@ -662,6 +805,22 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         }
       }
 
+      // Hygiene (citizens.js's HYGIENE_DECAY, RimWorld QoL-mod-style hygiene need): same tier as
+      // Exercise right above it -- targets the Shower buildable directly (findNearestShower)
+      // rather than a zone tile. findNearestShower already filters to only water-connected Showers
+      // (see that function's doc comment), so this naturally no-ops (falls through, same as no
+      // Fitness Station built yet) if the colony has no Shower at all, or has Showers but none of
+      // them are actually plumbed -- a citizen simply never seeks out a non-functional Shower.
+      if (store.hygiene[i] < SEEK_HYGIENE_THRESHOLD) {
+        const shower = findNearestShower(structures, store.x[i], store.y[i], allowedCheck);
+        if (shower) {
+          store.jobState[i] = JobState.SeekingHygiene;
+          store.targetX[i] = shower.x; store.targetY[i] = shower.y;
+          store._jobRef[i] = shower;
+          continue;
+        }
+      }
+
       // Work Priorities override (RimWorld Work-tab-style, see citizens.js's hasWorkPriorities/
       // workPriority* fields and main.js's Work Priorities panel). Only a citizen the player has
       // actually opened that panel for takes this branch; everyone else falls through to the
@@ -708,6 +867,13 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // below do, same "not yet buildable, so not yet a job" precedent as everything else this
       // ladder gates on the buildable actually existing.
       if (tryClaimFarming(store, i, structures, idOf, allowedCheck)) continue;
+
+      // Restaurant (see RESTAURANT_CYCLE_TICKS above): checked right after Farming, same "a built
+      // staffed producer beats going to fetch more raw material" logic and same v1 scope note --
+      // not yet part of the Work Priorities system, so only legacy fixed-ladder citizens reach
+      // this branch (a citizen with a custom priority order set never reaches this line, see the
+      // `continue` a few lines above).
+      if (tryClaimRestaurant(store, i, structures, idOf, allowedCheck)) continue;
 
       // Driving a built truck is checked before manual harvesting -- one haul cycle moves far
       // more scrap than one citizen picking at a node by hand, so an idle truck should win the
@@ -775,7 +941,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       || state === JobState.SeekingBuild || state === JobState.SeekingScrap || state === JobState.SeekingVehicle
       || state === JobState.SeekingAnimal || state === JobState.SeekingClean || state === JobState.SeekingWorkshop
       || state === JobState.SeekingProgram || state === JobState.SeekingTend || state === JobState.SeekingExercise
-      || state === JobState.SeekingFarm) {
+      || state === JobState.SeekingFarm || state === JobState.SeekingRestaurant || state === JobState.SeekingHygiene) {
       const dx = store.targetX[i] - store.x[i];
       const dy = store.targetY[i] - store.y[i];
       const dist = Math.hypot(dx, dy);
@@ -824,6 +990,12 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
           store.jobState[i] = JobState.Farming;
           continue;
         }
+        if (state === JobState.SeekingRestaurant) {
+          const station = store._jobRef[i];
+          if (station.workerId !== idOf(i)) { store.jobState[i] = JobState.Idle; continue; } // beaten to it
+          store.jobState[i] = JobState.Restaurant;
+          continue;
+        }
         if (state === JobState.SeekingProgram) {
           const site = store._jobRef[i];
           const def = PROGRAM_DEFS[site.kind];
@@ -845,10 +1017,11 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
           : state === JobState.SeekingRec ? JobState.Recreating
           : state === JobState.SeekingBuild ? JobState.Building
           : state === JobState.SeekingExercise ? JobState.Exercising
+          : state === JobState.SeekingHygiene ? JobState.Bathing
           : JobState.Harvesting;
       } else {
         const speed = JOB_SPEED * (store.trait[i]?.speedMult ?? 1) * breakRateMultFor(store, i)
-          * unrestRateMultFor(world) * arrivalMishapRateMultFor(world);
+          * unrestRateMultFor(world) * arrivalMishapRateMultFor(world) * epidemicMoveMultFor(store, i);
         store.x[i] += (dx / dist) * speed;
         store.y[i] += (dy / dist) * speed;
       }
@@ -868,7 +1041,10 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // to drain directly, so the honest portable stand-in is a temporary hit to how fast the
       // Food zone actually refills hunger after each ethanol haul completes.
       const ethanolMult = world.ethanolPenaltyTimer > 0 ? ETHANOL_FOOD_REFILL_MULT : 1;
-      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus * waterBonus * ethanolMult);
+      // Toxic-fallout hazard (weather.js, real ToxicFallout/VolcanicWinter-style rare map-wide
+      // condition): 1 (no effect) unless it's currently active, same "read fresh every tick"
+      // shape as roomBonus/waterBonus/ethanolMult above.
+      store.hunger[i] = Math.min(1, store.hunger[i] + REFILL_RATE * roomBonus * waterBonus * ethanolMult * hazardRefillMult(world));
       if (store.hunger[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
@@ -878,7 +1054,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // Same role gate as Eating above: only a validated Bedroom (Bedroom zone + >=1 bed) gets
       // the enclosed-room refill bonus -- four walls around an empty Bedroom zone is not a bed.
       const roomBonus = (sleepRoom && sleepRoom.role === RoomRole.Bedroom && sleepRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
-      store.rest[i] = Math.min(1, store.rest[i] + REFILL_RATE * roomBonus);
+      store.rest[i] = Math.min(1, store.rest[i] + REFILL_RATE * roomBonus * hazardRefillMult(world));
       if (store.rest[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
@@ -890,7 +1066,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // excludes an enclosed room with no Recreation zone at all from getting the bonus.
       const roomBonus = (recRoom && recRoom.role === RoomRole.RecreationRoom && recRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
       const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
-      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * waterBonus * (store.trait[i]?.socialGainMult ?? 1));
+      store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * waterBonus * (store.trait[i]?.socialGainMult ?? 1) * augmentSocialGainMultFor(store, i) * hazardRefillMult(world));
       if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
@@ -907,8 +1083,28 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // buildable itself is what's required, matching "a citizen actually uses the Fitness
       // Station"), just at the baseline rate rather than the enclosed-room bonus rate.
       const roomBonus = (exRoom && exRoom.role === RoomRole.Gymnasium && exRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
-      store.exercise[i] = Math.min(1, store.exercise[i] + REFILL_RATE * roomBonus);
+      store.exercise[i] = Math.min(1, store.exercise[i] + REFILL_RATE * roomBonus * hazardRefillMult(world));
       if (store.exercise[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
+      continue;
+    }
+
+    if (state === JobState.Bathing) {
+      // Defensive bail, same shape as Exercising's destroyed-station check above -- a Shower can
+      // be destroyed mid-use.
+      const shower = store._jobRef?.[i];
+      if (!shower || shower.destroyed || shower.underConstruction) { store.jobState[i] = JobState.Idle; continue; }
+      // The REAL plumbing dependency: re-checked every tick, not just at claim time -- a pump can
+      // be destroyed, a segment cut, or (weather.js's Cold snap, see water.js's tickPipeFreezing)
+      // a pipe can freeze solid WHILE a citizen is mid-shower. An unconnected Shower simply does
+      // not refill Hygiene at all -- no partial credit, no fallback rate, matching "a Shower with
+      // no water connection shouldn't work" exactly. Citizen just stands there idly using it until
+      // either it refills (connected) or they give up and go back to Idle next tick (unconnected).
+      if (!isWateredAt(structures, shower.x, shower.y)) { store.jobState[i] = JobState.Idle; continue; }
+      // No dedicated Bathroom room role exists yet (see rooms.js's RoomRole -- Gymnasium is the
+      // newest one), so this simply refills at the baseline rate every un-roled use case gets,
+      // same as Eating/Sleeping/Recreating/Exercising's own un-roled fallback.
+      store.hygiene[i] = Math.min(1, store.hygiene[i] + REFILL_RATE * hazardRefillMult(world));
+      if (store.hygiene[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
 
@@ -919,7 +1115,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // work-speed factors -- urgently hungry/tired citizens build measurably slower even before
       // they're miserable enough to actually go on break.
       const buildRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i);
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
       // bp.buildWorkMult (siege.js's Structure, per-kind construction work) slows the flat
       // BUILD_RATE down for pricier buildings -- default 1 covers any pre-existing structure
       // from a save saved before this field existed.
@@ -941,7 +1137,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       const node = store._jobRef?.[i];
       if (!node || node.depleted) { store.jobState[i] = JobState.Idle; continue; }
       const harvestRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i);
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
       const take = Math.min(HARVEST_RATE * harvestRateMult, node.amount);
       node.amount -= take;
       onScrapGain?.(take);
@@ -970,7 +1166,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // (detectRooms rebuilds this.rooms, see world.js) -- same defensive bail as Building's
       // destroyed-blueprint check and Harvesting's depleted-node check above.
       if (!room || !world.rooms.includes(room)) { store.jobState[i] = JobState.Idle; continue; }
-      const cleanRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world) * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i);
+      const cleanRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world) * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i);
       room.mess = Math.max(0, (room.mess || 0) - CLEAN_RATE * cleanRateMult);
       if (room.mess <= 0) store.jobState[i] = JobState.Idle;
       continue;
@@ -1025,7 +1221,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         station._workTimer = WORKSHOP_PROCESS_TICKS;
       }
       const processRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i);
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
       station._workTimer -= processRateMult;
       if (station._workTimer <= 0) {
         station._workTimer = 0;
@@ -1052,7 +1248,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // accrues real time toward the next cycle, using Structure's generic `_workTimer` field the
       // same way 'workshop' does for its own work-in-progress countdown.
       const farmRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i);
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
       plot._workTimer = (plot._workTimer || 0) + farmRateMult;
       if (plot._workTimer >= FARM_CYCLE_TICKS) {
         plot._workTimer = 0;
@@ -1063,6 +1259,35 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         // not a one-shot claim like a blueprint or a single workshop unit.
         world.addScrap(FARM_YIELD_PER_CYCLE, 'farm');
         store.skillConstruction[i] += FARM_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
+      }
+      continue;
+    }
+
+    if (state === JobState.Restaurant) {
+      const station = store._jobRef?.[i];
+      // Defensive bail, same shape as Farming's destroyed-plot check above -- a Restaurant can be
+      // destroyed mid-shift, or (defensively) end up staffed by someone else if state ever gets
+      // out of sync.
+      if (!station || station.destroyed || station.underConstruction || station.workerId !== idOf(i)) {
+        store.jobState[i] = JobState.Idle;
+        continue;
+      }
+      // No raw-input gate here either, deliberately -- retail income comes from "visitor traffic"
+      // paying the staffed citizen directly, not from any stock this settlement has to feed in
+      // (that's what distinguishes this from Processing's raw-scrap-in chain). Reuses Structure's
+      // generic `_workTimer` field, same as workshop/farm_plot's own work-in-progress countdown.
+      const restaurantRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
+      station._workTimer = (station._workTimer || 0) + restaurantRateMult;
+      if (station._workTimer >= RESTAURANT_CYCLE_TICKS) {
+        station._workTimer = 0;
+        // Paid out as scrap under its own 'restaurant' finance category (world.js's addScrap) --
+        // a genuinely distinct income bucket from farmScrap/processingScrap, not folded into
+        // either. The worker stays assigned into the next cycle, same standing-job precedent as
+        // Farm Plot -- a Restaurant isn't a one-shot claim like a blueprint or a single workshop
+        // unit.
+        world.addScrap(RESTAURANT_YIELD_PER_CYCLE, 'restaurant');
+        store.skillConstruction[i] += RESTAURANT_SKILL_GAIN * PASSION_GAIN_MULT[store.passionConstruction[i]] * ageBandFor(store.age[i]).skillGainMult;
       }
       continue;
     }

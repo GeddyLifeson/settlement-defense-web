@@ -4,14 +4,15 @@ import { makeRng, AggressionPreset, StaffRoleKind } from './core.js';
 import { SettlementGrid } from './grid.js';
 import { CitizenStore, tickNeedsAndMood, tickWander, CitizenFlags, addMoodEvent } from './citizens.js';
 import { JobState } from './jobs.js';
-import { StaffRoster, tickStaffDuty, tickStaffOffDuty, tickDogs, maybeSpawnWildAnimal, tickWildAnimals, tickDogBreeding, tickArmoryIssuance, tickStaffCorruption, tickStaffTraining, upgradeDog } from './security.js';
+import { StaffRoster, tickStaffDuty, tickStaffOffDuty, tickDogs, maybeSpawnWildAnimal, tickWildAnimals, tickDogBreeding, tickArmoryIssuance, tickStaffCorruption, tickStaffTraining, upgradeDog, tickAmmoProduction, AMMO_BASE_CAPACITY } from './security.js';
 import {
   AttackerStore, Structure, WaveSpawner, tickAttackers, tickTurrets,
   tickAttackerVsCitizens, tickStaffCombat, tickNuclearHazard, isNuclearContained,
   NUCLEAR_WASTE_RATE, ArrivalMethod, maybeTriggerHeldCitizenCrisis, tickHeldCitizenCrisis,
+  tickSuppression,
 } from './siege.js';
 import { ZoneGrid, ZoneKind } from './zones.js';
-import { tickJobs, isOnJob } from './jobs.js';
+import { tickJobs, isOnJob, tickCinemas } from './jobs.js';
 import { tickDrones, tickDroneFabrication, Drone, bumpDroneIdCounter } from './drones.js';
 import { tickDrafted } from './draft.js';
 import { RelationshipWeb } from './relationships.js';
@@ -21,22 +22,26 @@ import { scatterNodes, maybeSpawnNode, ResourceNode } from './resources.js';
 import { tickVehicles, spawnParkedVehicle, parseGarageKind } from './vehicles.js';
 import { detectRooms, roomContaining, computeRoomStats } from './rooms.js';
 import { isWateredAt } from './water.js';
-import { isWindSited, hasPoweredBonus, isSegmentOverloadedAt, overloadedSupplyKeys, OVERLOAD_FIRE_CHANCE_PER_TICK, tickBatteries } from './power.js';
+import { isWindSited, hasPoweredBonus, isSegmentOverloadedAt, overloadedSupplyKeys, OVERLOAD_FIRE_CHANCE_PER_TICK, tickBatteries, tickPowerExporters } from './power.js';
 import { tickFireIgnition, tickFire, igniteStructure, FIRE_SPREAD_DIFFICULTY_MULT } from './fire.js';
 import { DAY_NIGHT_CYCLE_TICKS } from './schedule.js';
 import { FactionState, tickFactions, serializeFactions, deserializeFactions } from './factions.js';
 import { tickWorldMap } from './worldmap.js';
 import { createResearchState, tickResearch, serializeResearch, deserializeResearch, isNodeUnlocked } from './research.js';
-import { initWeather, tickWeather, tickRandomEvents, tickThunderstorm, weatherWanderSpeedMult, weatherAccuracyMult, weatherMoveSpeedMult, isHeatwaveSlowdownActive, HEATWAVE_WANDER_SPEED_MULT, tickLightningStorm, lightningStormMoveMult } from './weather.js';
+import { initWeather, tickWeather, tickRandomEvents, tickThunderstorm, weatherWanderSpeedMult, weatherAccuracyMult, weatherMoveSpeedMult, isHeatwaveSlowdownActive, HEATWAVE_WANDER_SPEED_MULT, tickLightningStorm, lightningStormMoveMult, tickHazardCondition } from './weather.js';
 import { computeGrading, GRADING_INTERVAL_TICKS } from './grading.js';
 import { canAfford, spend } from './economy.js'; // buyVest below -- see citizens.js's hasVest field
+import { tryBuyAugment } from './augments.js'; // buyAugment below -- see citizens.js's augmentMask field
 import { checkWaveAchievements, checkPopulationAchievement, recordGameEnd } from './metaprogress.js';
 import { initRats, tickRatInfestation, tickRats, Rat } from './rats.js';
 import { tickSickness } from './sickness.js';
+import { initEpidemic, tickEpidemic, epidemicMoveMultFor } from './epidemic.js';
 import { initAnomaly, tickAnomalyPressure, tickAnomalyEvents } from './anomaly.js';
 import { tickPipeFreezing } from './water.js';
 import { syncProgramSites } from './programs.js';
 import { createGrantState, tickGrants, serializeGrants, deserializeGrants } from './grants.js';
+import { initSupplies, tickSupplyDelivery, tickDependency, inspectDelivery, searchDelivery, forceTaintedDelivery } from './supplies.js';
+import { securityResponseAccuracyMult, tickSecurityResponse } from './coverageplans.js';
 
 // Exported: weather.js's wanderer-joins event draws from this same pool (via world._namePool)
 // rather than importing it directly, to avoid a circular import (world.js already imports
@@ -154,6 +159,17 @@ export class SimWorld {
     this._prevOverloadedSupply = new Set();
     this.pollution = 0; // SEA:R's signature mechanic -- unmanaged waste makes waves worse, see director.js
     this.nuclearWaste = 0; // separate hazard resource from a nuclear generator, see siege.js's NUCLEAR_* comment
+    // Ammo economy (this session's ammo/suppression pass -- see security.js's tickAmmoProduction/
+    // AMMO_* doc comment for the full design reasoning): a single global stockpile, same "one
+    // running total" shape as scrap/pollution/nuclearWaste above, replenished by built Armories
+    // (tickAmmoProduction, called in tick() below) and spent by tickTurrets/tickStaffCombat via
+    // this.consumeAmmo(). Starts FULL at the zero-Armory base capacity (not some arbitrary number
+    // that could exceed it) -- tickAmmoProduction clamps world.ammo to world.ammoCapacity every
+    // tick, so seeding this any higher than AMMO_BASE_CAPACITY would just get silently clamped
+    // back down on the very first tick, which is exactly the real bug this comment is warning the
+    // next editor away from re-introducing (caught live in this pass's own soak-test verification).
+    this.ammoCapacity = AMMO_BASE_CAPACITY;
+    this.ammo = AMMO_BASE_CAPACITY;
     this.ethanolPenaltyTimer = 0; // ethanol-fuel truck tradeoff (vehicles.js) -- counts down after a haul, halving Food zone refill meanwhile
     this.storyteller = 'Cassandra'; // Cassandra | Phoebe | Randy, see director.js STORYTELLERS
     this.rooms = []; // enclosed-room flood-fill, see rooms.js -- recomputed only when walls change
@@ -177,6 +193,10 @@ export class SimWorld {
     // Coverage Plans (coverageplans.js): set of purchased plan kinds, one-time economy-sink
     // buildable-discount + threshold-gated call-in bundles. Empty Set is the fresh-colony default.
     this.coveragePlans = new Set();
+    // Security Response Plan's tactical-reinforcement call-in: ticks remaining on its temporary
+    // turret/staff accuracy-boost window (0 = inactive). Owned here rather than in
+    // coverageplans.js since every other per-tick countdown in this project lives on `this`.
+    this._securityResponseTicksLeft = 0;
 
     // Per-run counters feeding metaprogress.js's cross-run lifetime stats (see that module's
     // header comment) -- purely additive bookkeeping here, this world instance dies at
@@ -203,8 +223,10 @@ export class SimWorld {
       conquestScrap: 0,   // held-region supply lines trickling scrap in (worldmap.js)
       processingScrap: 0, // net of the 'workshop' Processing job's raw-in/Components-out chain (jobs.js)
       farmScrap: 0,       // 'farm_plot' Farming job's per-cycle payout (jobs.js, research.js's Agronomy node)
+      restaurantScrap: 0, // 'restaurant' Restaurant job's per-cycle retail-income payout (jobs.js)
       factionScrap: 0,    // rewards from satisfied clique demands (factions.js)
       grantScrap: 0,      // Outpost Charter Contract payouts + matured investments (grants.js)
+      powerExportScrap: 0, // passive Power Exporter trickle off genuine grid surplus (power.js's tickPowerExporters)
       otherScrap: 0,      // catch-all for any future/uncategorized income source
       buildSpend: 0,      // total scrap spent on construction (economy.js spend())
       history: [],        // rolling snapshots of net scrap change, one per FINANCE_SNAPSHOT_INTERVAL
@@ -323,7 +345,9 @@ export class SimWorld {
     for (let x = 22; x <= 25; x++) for (let y = 22; y <= 23; y++) this.zones.set(x, y, ZoneKind.Training);
 
     initRats(this); // rats.js -- infestation level/rat pool, see that file's header comment
+    initEpidemic(this); // epidemic.js -- proximity-spread outbreak state, see that file's header comment
     initAnomaly(this); // anomaly.js -- colony-wide anomaly pressure meter, see that file's header comment
+    initSupplies(this); // supplies.js -- tainted-delivery investigation state, see that file's header comment
 
     this.resourceNodes = scatterNodes(this.grid, this.rng, 16, 14, this.width / 2, this.height / 2);
     this.vehicles = [];
@@ -373,11 +397,26 @@ export class SimWorld {
       else if (kind === 'conquest') this.finance.conquestScrap += amount;
       else if (kind === 'processing') this.finance.processingScrap += amount;
       else if (kind === 'farm') this.finance.farmScrap += amount;
+      else if (kind === 'restaurant') this.finance.restaurantScrap += amount;
       else if (kind === 'faction') this.finance.factionScrap += amount;
       else if (kind === 'grant') this.finance.grantScrap += amount;
+      else if (kind === 'powerExport') this.finance.powerExportScrap += amount;
       else this.finance.otherScrap += amount;
       this.scrapEarnedThisRun += amount; // metaprogress.js's lifetime scrap-earned stat, see recordGameEnd()
     }
+  }
+
+  // Ammo economy (this session's pass, see the constructor's this.ammo comment + security.js's
+  // tickAmmoProduction doc comment): the ONLY place anything ever subtracts from this.ammo --
+  // siege.js's tickTurrets/tickStaffCombat are passed this bound as their consumeAmmo callback,
+  // and only ever call it once they've already confirmed (via the read-only `ammo` number they're
+  // also passed) that the stockpile covers the shot, so the `< amount` guard below is a safety net,
+  // not the primary gate. Clamped at 0 rather than allowed to go negative, same convention as every
+  // other single-running-total resource in this file.
+  consumeAmmo(amount) {
+    if (this.ammo < amount) return false;
+    this.ammo = Math.max(0, this.ammo - amount);
+    return true;
   }
 
   // Vest purchase (economy.js BUILD_COST.vest, citizens.js's hasVest flag, siege.js's
@@ -400,6 +439,44 @@ export class SimWorld {
     this.milestoneLog.push({ tick: this.currentTick, text });
     if (this.milestoneLog.length > 20) this.milestoneLog.shift();
     return { ok: true };
+  }
+
+  // Scavenged Augment purchase (augments.js -- see that file's header for how this is distinct
+  // from ranks.js's earned rank ladder). Resolves citizenId -> store index the same way buyVest
+  // above does, then delegates the actual gate-check/spend/install to augments.js's
+  // tryBuyAugment (canBuyAugment re-checked inside it, not just trusted from a stale UI paint --
+  // same convention as ranks.js's tryRankUp). Returns { ok: true, def } or { ok: false, reason }.
+  buyAugment(citizenId, augId) {
+    let idx = -1;
+    for (let i = 0; i < this.citizens.count; i++) {
+      if (this.citizens.id[i] === citizenId) { idx = i; break; }
+    }
+    if (idx < 0) return { ok: false, reason: 'invalid' };
+    const result = tryBuyAugment(this.citizens, idx, augId, this);
+    if (result.ok) {
+      const text = `${this.citizens.name[idx]} was fitted with a ${result.def.name}`;
+      this.milestoneLog.push({ tick: this.currentTick, text });
+      if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    }
+    return result;
+  }
+
+  // Tainted supply delivery (supplies.js -- ported from Prison Architect's real contraband.lua):
+  // player-facing "dispose of the bad batch" / "search and recover" objectives. Bare references to
+  // the module-level supplies.js imports of the same name -- same "class method body has no
+  // implicit binding to its own name" precedent as upgradeDog below, verified working in this
+  // codebase's bundled build already. Returns { ok, reason, ...detail }.
+  inspectDelivery() {
+    return inspectDelivery(this);
+  }
+  searchDelivery() {
+    return searchDelivery(this);
+  }
+  // Debug/testing hook only (window.__debug.getWorld().forceTaintedDelivery()) -- bypasses the
+  // delivery timer and TAINT_CHANCE roll to force one right now, same "force it and verify"
+  // convention as mutating STORYTELLERS.Cassandra.doubleChance live from the console.
+  forceTaintedDelivery() {
+    return forceTaintedDelivery(this);
   }
 
   // Upgraded K9 tier (security.js's K9_UPGRADE_*/upgradeDog -- real PA RobotDog anchor). Looks up
@@ -655,6 +732,11 @@ export class SimWorld {
     tickStaffTraining(this, (i) => this.idOf(i));
     tickJobs(this.citizens, this.zones, (i) => this.isStaffOnDutyAt(i), this.structures, this.resourceNodes,
       (i) => this.idOf(i), (amt) => this.addScrap(amt, 'harvest'), this);
+    // Cinema broadcast (jobs.js's tickCinemas, PA DLC prefab data's real WatchCinema provider):
+    // group-refills Social for every citizen within CINEMA_RANGE at once, same range-iteration
+    // shape as siege.js's tickTurrets Tesla chain -- run right after tickJobs so it sees this
+    // tick's freshly-updated citizen positions, same ordering rationale as tickFactions below.
+    tickCinemas(this.structures, this.citizens, this.currentTick);
     // Citizen cliques + faction demands (factions.js): reads this tick's freshly-updated jobState
     // (demand progress counts real JobState.Recreating transitions from tickJobs just above), and
     // runs before _updateUnrest() at the end of tick() so an unmet-demand unrest bump this tick is
@@ -665,6 +747,10 @@ export class SimWorld {
     // just re-derive every tick rather than hooking build-complete/destroy events -- a built or
     // destroyed Armory (and a freshly-assigned Guard/Sniper) all propagate within one tick.
     tickArmoryIssuance(this.roster, this.structures);
+    // Ammo economy (security.js's tickAmmoProduction, see this.ammo's constructor doc comment):
+    // same "cheap, just re-derive every tick" placement as armory issuance right above it, which
+    // it's read alongside anyway (both scan this.structures for built Armories).
+    tickAmmoProduction(this);
     // Corrupt/bribable staff (security.js's tickStaffCorruption, reskinned Prison Architect
     // "Crooked Guards"): cheap (roster-size loop, same order as armory issuance above) so it just
     // runs every tick rather than hooking specific staff-assignment call sites.
@@ -693,7 +779,11 @@ export class SimWorld {
           ? (roomContaining(this.rooms, this.grid, this.citizens.x[i], this.citizens.y[i]) ? 1 : HEATWAVE_WANDER_SPEED_MULT)
           : 1;
         const lightning = lightningStormMoveMult(this, this.citizens.x[i], this.citizens.y[i]);
-        return heat * lightning;
+        // Epidemic Mid-stage movement-speed cut (epidemic.js, real PA tropicalfever_settings.txt
+        // 40% penalty) -- idle wander needs its own hookup here since jobs.js's JOB_SPEED chain
+        // only covers citizens actively seeking a job target, not the "nothing to do" wander path.
+        const epidemic = epidemicMoveMultFor(this.citizens, i);
+        return heat * lightning * epidemic;
       },
       // Allowed Area restriction (citizens.js's isInAllowedArea) -- an idle citizen's random
       // wander target has to be gated the same as every jobs.js-driven target, or a restricted
@@ -725,6 +815,12 @@ export class SimWorld {
     // rolls against citizens/power-structures/ground. Runs right after tickThunderstorm since both
     // read the same weather gate and this tick's just-updated weather state.
     tickLightningStorm(this);
+    // Toxic-fallout hazard (weather.js's tickHazardCondition, real ToxicFallout/VolcanicWinter-
+    // style rare, long-refire-gap, late-game-gated map-wide condition -- distinct system from the
+    // weather states above, see that function's header comment): advances/ends an active hazard
+    // or rolls a new one. Runs alongside the other weather/event systems; its own effect
+    // (hazardRefillMult) is read directly by jobs.js's REFILL_RATE call sites, not applied here.
+    tickHazardCondition(this);
     // Cold-weather pipe freezing (water.js): runs right after tickWeather so it reads this tick's
     // freshly-updated weather/_weatherStreakTicks, same ordering reasoning as tickThunderstorm above.
     tickPipeFreezing(this);
@@ -740,6 +836,19 @@ export class SimWorld {
     // Sickness (sickness.js -- real RimWorld Flu day-rates, rescaled): staggered per-citizen
     // onset roll + progression, same "cheap periodic-roll system" grouping as rats just above.
     tickSickness(this);
+
+    // Epidemic (epidemic.js -- real Prison Architect tropicalfever_settings.txt data): a
+    // population-gated, proximity-spread outbreak, deliberately a different/worse/rarer mechanic
+    // than sickness.js just above (see that file's header comment for the full contrast). Runs
+    // right after tickSickness, same "cheap periodic-roll system" grouping.
+    tickEpidemic(this);
+
+    // Tainted supply delivery (supplies.js -- ported from Prison Architect's real contraband.lua,
+    // see that file's header comment): delivery timer/detection-window/spread state machine, then
+    // per-citizen dependency decay + mood refresh for anyone already affected. Same "cheap
+    // periodic-roll system" grouping as sickness/epidemic just above.
+    tickSupplyDelivery(this);
+    tickDependency(this);
 
     // Anomaly pressure (anomaly.js -- see that file's header comment): a colony-wide 0->1 meter,
     // gated on colonyStrength/pollution (director.js's existing hazard-scaling pattern, reused as
@@ -840,6 +949,13 @@ export class SimWorld {
     // same tick, not one tick late.
     tickBatteries(this.structures);
 
+    // Power Exporter (power.js's tickPowerExporters, PA DLC Transformer/PowerExportMeter idea):
+    // converts genuine spare segment capacity (same raw surplus number the battery charge check
+    // above just used) into a slow scrap trickle. Runs right after batteries for the same reason --
+    // reads this tick's real surplus fresh, never a stale/cached number -- and strictly before the
+    // overload check below since it never contributes load of its own to that calculation.
+    tickPowerExporters(this.structures, (amt) => this.addScrap(amt, 'powerExport'));
+
     // Power grid overload (Prison Architect's overload/explosion-risk mechanic, power.js): too
     // many powered turrets/tesla/watchtowers wired to too few/weak generators strains a segment.
     // hasPoweredBonus (siege.js's turret/tesla boost, watchtower's warning-window boost above)
@@ -889,12 +1005,23 @@ export class SimWorld {
     // symmetrically -- turret/guard/sniper fire AND attacker hits vs citizens all roll against
     // this same accuracy multiplier, and attacker approach speed reads the same move-speed
     // multiplier citizen wander already used (see the Rain call above).
-    const combatAccuracy = weatherAccuracyMult(this.weather);
+    // Security Response Plan's tactical-reinforcement call-in (coverageplans.js): a temporary,
+    // defender-only accuracy boost folded into the exact same choke point weather's accuracy
+    // penalty already uses -- turret/staff fire gets it, attacker-vs-citizen fire does NOT (see
+    // tickAttackers below, which is never passed combatAccuracy), so this is a real one-sided
+    // player buff, not a symmetric map-wide modifier like weather's.
+    tickSecurityResponse(this);
+    const combatAccuracy = weatherAccuracyMult(this.weather) * securityResponseAccuracyMult(this);
     const combatMoveSpeed = weatherMoveSpeedMult(this.weather);
     tickAttackers(this.attackers, this.structures, this.grid, this.width / 2, this.height / 2, this.citizens,
       (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.(), combatMoveSpeed, this.rng);
-    tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt, 'kill'), (s) => this.onTurretFire?.(s), () => this.onKill?.(), this.rng, combatAccuracy);
-    tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.(), this.rng, combatAccuracy);
+    // Suppression (siege.js's tickSuppression, see its doc comment): re-derived off THIS tick's
+    // freshly-updated attacker positions (tickAttackers just ran above), before tickTurrets/
+    // tickStaffCombat read it back out for their own accuracy this same tick -- a turret/guard's
+    // suppression this tick already reflects who's swarming it right now, not last tick's picture.
+    tickSuppression(this.structures, this.attackers, this.citizens);
+    tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt, 'kill'), (s) => this.onTurretFire?.(s), () => this.onKill?.(), this.rng, combatAccuracy, this.ammo, (amt) => this.consumeAmmo(amt));
+    tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.(), this.rng, combatAccuracy, this.ammo, (amt) => this.consumeAmmo(amt));
     // Drafted citizens (draft.js -- RimWorld-style manual control): owns ALL movement/combat for
     // any citizen currently flagged Drafted (citizens.js's CitizenFlags.Drafted). Placed right
     // after tickStaffCombat so a drafted attack order resolves in the same "who fought this tick"
@@ -1090,7 +1217,8 @@ export class SimWorld {
     if (this.currentTick % FINANCE_SNAPSHOT_INTERVAL === 0) {
       const totalIncome = this.finance.killScrap + this.finance.harvestScrap + this.finance.haulScrap +
         this.finance.recyclingScrap + this.finance.conquestScrap + this.finance.processingScrap +
-        this.finance.farmScrap + this.finance.grantScrap + this.finance.otherScrap;
+        this.finance.farmScrap + this.finance.restaurantScrap + this.finance.grantScrap +
+        this.finance.powerExportScrap + this.finance.otherScrap;
       const totalExpense = this.finance.buildSpend;
       const net = (totalIncome - this._financeLastIncome) - (totalExpense - this._financeLastExpense);
       this.finance.history.push({ tick: this.currentTick, net, scrap: Math.round(this.scrap) });
@@ -1117,6 +1245,12 @@ export class SimWorld {
       finance: this.finance,
       startingCitizenCount: this.startingCitizenCount, nextRefugeeNameIndex: this._nextRefugeeNameIndex,
       pollution: this.pollution, nuclearWaste: this.nuclearWaste, ethanolPenaltyTimer: this.ethanolPenaltyTimer,
+      // Ammo economy (this session's pass, see this.ammo's constructor doc comment) -- a real,
+      // meaningful running total worth persisting, same as pollution/nuclearWaste just above.
+      // ammoCapacity isn't strictly necessary to persist (tickAmmoProduction re-derives it fresh
+      // every tick from the live Armory count regardless), but it's cheap and avoids a one-tick
+      // "capacity briefly reads as the base default" flash right after a load, before tick() runs.
+      ammo: this.ammo, ammoCapacity: this.ammoCapacity,
       storyteller: this.storyteller, timeOfDay: this.timeOfDay,
       unrestLevel: this.unrestLevel, unrestActive: this.unrestActive, unrestAboveTicks: this._unrestAboveTicks,
       unrestTier: this.unrestTier, unrestTier2AboveTicks: this._unrestTier2AboveTicks,
@@ -1129,6 +1263,7 @@ export class SimWorld {
       // discount/call-in logic itself is all derived live from COVERAGE_PLAN_DEFS + real world
       // state, nothing else to persist.
       coveragePlans: Array.from(this.coveragePlans || []),
+      securityResponseTicksLeft: this._securityResponseTicksLeft,
       heldCitizenEvent: this.heldCitizenEvent, heldCitizenCooldownUntil: this._heldCitizenCooldownUntil,
       peakAliveCitizens: this.peakAliveCitizens, attackersKilled: this.attackersKilled, scrapEarnedThisRun: this.scrapEarnedThisRun,
       research: serializeResearch(this.research),
@@ -1153,6 +1288,14 @@ export class SimWorld {
         // Sickness (sickness.js) -- real, meaningful state (unlike _sickOffset, which is just
         // stagger noise re-derivable on load), so it's worth persisting.
         sickSeverity: Array.from(this.citizens.sickSeverity.slice(0, this.citizens.count)),
+        // Tainted-supply dependency (supplies.js) -- real, meaningful state, same round-trip
+        // reasoning as sickSeverity just above (unlike _taintOffset, pure stagger noise).
+        dependencySeverity: Array.from(this.citizens.dependencySeverity.slice(0, this.citizens.count)),
+        // Epidemic (epidemic.js) -- real, meaningful state (unlike _epidemicOffset, pure stagger
+        // noise re-derivable on load), same round-trip reasoning as sickSeverity above.
+        epidemicStage: Array.from(this.citizens.epidemicStage.slice(0, this.citizens.count)),
+        epidemicStageTicks: Array.from(this.citizens.epidemicStageTicks.slice(0, this.citizens.count)),
+        epidemicImmuneUntil: Array.from(this.citizens.epidemicImmuneUntil.slice(0, this.citizens.count)),
         mood: Array.from(this.citizens.mood.slice(0, this.citizens.count)),
         health: Array.from(this.citizens.health.slice(0, this.citizens.count)),
         alive: Array.from(this.citizens.alive.slice(0, this.citizens.count)),
@@ -1161,6 +1304,9 @@ export class SimWorld {
         skillConstruction: Array.from(this.citizens.skillConstruction.slice(0, this.citizens.count)),
         // Citizen Rank (ranks.js) -- plain tier index, same round-trip pattern as skillCombat above.
         citizenRank: Array.from(this.citizens.citizenRank.slice(0, this.citizens.count)),
+        // Scavenged Augments (augments.js) -- plain installed-set bitmask, same round-trip
+        // pattern as citizenRank above (a real, player-paid-for purchase, worth persisting).
+        augmentMask: Array.from(this.citizens.augmentMask.slice(0, this.citizens.count)),
         trait: this.citizens.trait.slice(0, this.citizens.count).map(t => t?.name ?? null),
       },
       roster: Array.from(this.roster._roleById.entries()).map(([id, kind]) => ({
@@ -1213,10 +1359,20 @@ export class SimWorld {
       ratInfestation: this.ratInfestation || 0,
       ratsCaught: this.ratsCaught || 0,
       rats: (this.rats || []).map(r => ({ x: r.x, y: r.y })),
+      // Epidemic (epidemic.js): just the outbreak-gap bookkeeping -- epidemicActive itself is
+      // re-derived from the per-citizen epidemicStage array the moment tickEpidemic next runs, so
+      // it isn't worth persisting separately (same "derived, not stored" precedent this codebase
+      // already applies to plenty of per-tick-recomputed flags).
+      epidemicLastEndTick: this._epidemicLastEndTick,
       // Anomaly pressure (anomaly.js): a plain float + a tier label, no entity list to round-trip
       // (unlike rats above) -- the burst-flavor-window fields are intentionally NOT persisted, same
       // "resume as if just-passed" acceptance as the vehicle mid-haul note above.
       anomalyPressure: this.anomalyPressure || 0,
+      // Tainted supply delivery (supplies.js) -- the whole investigation-state object round-trips
+      // as plain JSON (no live references inside it), same "just persist the object" simplicity as
+      // world.finance/world.heldCitizenEvent elsewhere in this file.
+      supplyDelivery: this.supplyDelivery || null,
+      nextDeliveryTick: this._nextDeliveryTick || 0,
       // targetNode isn't serialized (it's a live reference into resourceNodes) -- a vehicle
       // mid-haul on save resumes as if just-departed rather than mid-route. Acceptable: it's a
       // few seconds of game time, not a correctness bug like the duplicate-vehicle-on-load one
@@ -1249,11 +1405,19 @@ export class SimWorld {
       w.finance = { ...w.finance, ...json.finance };
       const totalIncome = w.finance.killScrap + w.finance.harvestScrap + w.finance.haulScrap +
         w.finance.recyclingScrap + w.finance.conquestScrap + w.finance.processingScrap +
-        w.finance.farmScrap + w.finance.grantScrap + w.finance.otherScrap;
+        w.finance.farmScrap + w.finance.restaurantScrap + w.finance.grantScrap +
+        w.finance.powerExportScrap + w.finance.otherScrap;
       w._financeLastIncome = totalIncome;
       w._financeLastExpense = w.finance.buildSpend;
     }
     w.pollution = json.pollution || 0;
+    // Ammo economy -- pre-existing saves have no `ammo` key, so this falls back to the
+    // constructor's already-set starting reserve (60) rather than 0, same "old save loads with the
+    // new system just not-yet-active, not punitively empty" convention as every other resource
+    // added later in this project (see research/grants/factions deserialize below for the same
+    // pattern).
+    w.ammo = json.ammo != null ? json.ammo : w.ammo;
+    w.ammoCapacity = json.ammoCapacity || w.ammoCapacity;
     w.nuclearWaste = json.nuclearWaste || 0;
     w.ethanolPenaltyTimer = json.ethanolPenaltyTimer || 0;
     w.unrestLevel = json.unrestLevel || 0;
@@ -1273,6 +1437,7 @@ export class SimWorld {
     // falls back to the constructor's already-set empty Set, same convention as every other
     // system added later in this project.
     if (json.coveragePlans) w.coveragePlans = new Set(json.coveragePlans);
+    w._securityResponseTicksLeft = json.securityResponseTicksLeft || 0;
     // Held-citizen crisis (siege.js) -- pre-existing saves have no `heldCitizenEvent` key, so this
     // falls back to the same inactive default the constructor already sets, same convention as
     // every other system added later in this project.
@@ -1323,6 +1488,20 @@ export class SimWorld {
       // every loaded citizen pinned at the array's zero-init default (which would re-sync every
       // loaded citizen's onset-roll tick, defeating the point of staggering).
       w.citizens._sickOffset[i] = i % 50;
+      // Pre-supplies saves have no `dependencySeverity` key -- default to 0 (unaffected), same
+      // convention as sickSeverity above. _taintOffset is pure stagger noise, same non-serialized
+      // re-derivation as _sickOffset just above (keep the modulus in sync with supplies.js's
+      // DEPENDENCY_CHECK_INTERVAL).
+      w.citizens.dependencySeverity[i] = c.dependencySeverity ? c.dependencySeverity[i] : 0;
+      w.citizens._taintOffset[i] = i % 300;
+      // Pre-epidemic saves have no `epidemicStage` key -- default to 0 (healthy, no active case),
+      // same convention as sickSeverity/dependencySeverity above. _epidemicOffset is pure stagger
+      // noise, same non-serialized re-derivation as _sickOffset/_taintOffset just above (keep the
+      // modulus in sync with epidemic.js's EPIDEMIC_CHECK_INTERVAL).
+      w.citizens.epidemicStage[i] = c.epidemicStage ? c.epidemicStage[i] : 0;
+      w.citizens.epidemicStageTicks[i] = c.epidemicStageTicks ? c.epidemicStageTicks[i] : 0;
+      w.citizens.epidemicImmuneUntil[i] = c.epidemicImmuneUntil ? c.epidemicImmuneUntil[i] : 0;
+      w.citizens._epidemicOffset[i] = i % 40;
       w.citizens.mood[i] = c.mood[i]; w.citizens.health[i] = c.health[i]; w.citizens.alive[i] = c.alive[i];
       w.citizens.flags[i] = c.flags ? c.flags[i] : 0;
       w.citizens.skillCombat[i] = c.skillCombat ? c.skillCombat[i] : 0;
@@ -1331,6 +1510,9 @@ export class SimWorld {
       // "old save loads with the new system just not-yet-active" convention as every other
       // system added later in this project (see e.g. c.age/c.hydration fallbacks above).
       w.citizens.citizenRank[i] = c.citizenRank ? c.citizenRank[i] : 0;
+      // Pre-augment saves have no `augmentMask` key -- default to 0 (no augments installed), same
+      // "old save loads with the new system just not-yet-active" convention as citizenRank above.
+      w.citizens.augmentMask[i] = c.augmentMask ? c.augmentMask[i] : 0;
       w.citizens.trait[i] = c.trait && c.trait[i] ? TRAITS.find(t => t.name === c.trait[i]) : null;
     }
     w.roster = new (Object.getPrototypeOf(w.roster).constructor)();
@@ -1394,10 +1576,23 @@ export class SimWorld {
     if (json.rats) {
       w.rats = json.rats.map((r, idx) => Object.assign(new Rat(r.x, r.y, idx % 30), { x: r.x, y: r.y }));
     }
+    // Epidemic (epidemic.js) -- pre-existing saves have no `epidemicLastEndTick` key, and
+    // initEpidemic() (already called inside the SimWorld constructor above) already left it at
+    // -EPIDEMIC_MIN_GAP_TICKS (gate-open default), same "old save loads with no problem yet"
+    // convention as rats/anomaly above. epidemicActive is deliberately NOT restored here -- it's
+    // re-derived from the per-citizen epidemicStage array the moment tickEpidemic next runs (see
+    // the serialize() doc comment above).
+    if (json.epidemicLastEndTick != null) w._epidemicLastEndTick = json.epidemicLastEndTick;
     // Anomaly pressure (anomaly.js) -- pre-existing saves have no `anomalyPressure` key, and
     // initAnomaly() (already called inside the SimWorld constructor above) already left it at 0,
     // same "old save loads with no problem yet" convention as rats above.
     if (json.anomalyPressure != null) w.anomalyPressure = json.anomalyPressure;
+    // Tainted supply delivery (supplies.js) -- pre-existing saves have no `supplyDelivery` key,
+    // and initSupplies() (already called inside the SimWorld constructor above) already left it at
+    // its fresh-colony default (null, no delivery pending), same "old save loads with no problem
+    // yet" convention as rats/anomaly above.
+    if (json.supplyDelivery !== undefined) w.supplyDelivery = json.supplyDelivery;
+    if (json.nextDeliveryTick != null) w._nextDeliveryTick = json.nextDeliveryTick;
     return w;
   }
 }

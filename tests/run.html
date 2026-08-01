@@ -3,6 +3,18 @@
 <head>
 <meta charset="UTF-8">
 <title>Settlement Defense -- Automated Test Suite</title>
+<script>
+  // Self-heal the exact caching trap this file's own dynamic imports had to be fixed for (see the
+  // comments in the module script below, and SESSION_HANDOFF.md): a bare navigation to this page's
+  // URL has no cache-buster of its own, so the browser could silently keep serving a stale copy of
+  // THIS document -- meaning even a perfectly cache-busted import loop inside it never runs, because
+  // the page containing that loop was never re-fetched in the first place. If we don't already carry
+  // our own freshness marker, redirect once to a URL that does; the marker's presence is what stops
+  // this from looping.
+  if (!location.search.includes('_fresh=')) {
+    location.replace(location.pathname + '?_fresh=' + Date.now());
+  }
+</script>
 <style>
   body { font-family: system-ui, sans-serif; background: #111; color: #eee; padding: 1.5rem; }
   h1 { font-size: 1.2rem; }
@@ -25,15 +37,32 @@
 <div id="results">Running...</div>
 
 <script type="module">
+  // harness.js MUST be imported with this exact bare specifier, not cache-busted -- every test
+  // file below also does `import ... from './harness.js'` with the same bare specifier (their own
+  // internal imports are unaffected by any query string used to fetch the test file itself), and
+  // ES modules cache by exact specifier string. Cache-busting this one line would silently split
+  // harness.js into two separate module instances -- this file's and the test files' -- each with
+  // its own independent `results` array, breaking renderSummary silently (it would just see an
+  // empty array from a copy nothing ever pushed to). Learned this the hard way while fixing the
+  // real bug below: only cache-bust the test files themselves, never their shared harness.
   import { renderSummary } from './harness.js';
+
+  // Cache-bust the actual test files with a real per-load timestamp -- a `?v=` on run.html's own
+  // URL never touches these separate module-fetch cache entries, so the browser could silently
+  // keep re-running stale test-file content indefinitely regardless of how this page was
+  // navigated to. Same root-cause class as index.html's game.bundle.js caching bug (see
+  // SESSION_HANDOFF.md) -- this is the second place it was found and fixed this session.
+  const cacheBust = '?t=' + Date.now();
+  const freshImport = (path) => import(path + cacheBust);
 
   // Each import below runs its section()/assert() calls as a side effect at module-evaluation
   // time, pushing into the shared `results` array in harness.js. Importing them in sequence
   // (via top-level await on the dynamic import) guarantees they've all finished before we render.
-  await import('./citizens.test.js');
-  await import('./rooms.test.js');
-  await import('./siege.test.js');
-  await import('./vehicles.test.js');
+  await freshImport('./citizens.test.js');
+  await freshImport('./rooms.test.js');
+  await freshImport('./siege.test.js');
+  await freshImport('./vehicles.test.js');
+  await freshImport('./augments.test.js');
 
   document.getElementById('results').textContent = '';
   renderSummary('results');

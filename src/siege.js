@@ -7,6 +7,7 @@ import { PASSION_GAIN_MULT } from './backstories.js';
 import { ageBandFor } from './traits.js';
 import { WEAPON_TIERS } from './security.js';
 import { rankHealthMultFor } from './ranks.js';
+import { augmentHealthMultFor, augmentDamageMultFor } from './augments.js';
 
 // ---------------------------------------------------------------- enemy archetypes
 // RimWorld/SEA:R-style raider roster: every attacker used to be identical except for a flat
@@ -320,12 +321,22 @@ export class Structure {
                       // 'generator_nuclear' | 'waste_storage' | 'generator_coal' | 'generator_wind' |
                       // 'generator_solar' | 'battery' | 'power_switch' (SEA:R multi-source power
                       // economy, see power.js's isSource) | 'workshop' (Prison Architect
-                      // materials-chain analog, see jobs.js's Processing job)
+                      // materials-chain analog, see jobs.js's Processing job) | 'restaurant'
+                      // (Prison Architect Restaurant+Bakery retail-income analog, see jobs.js's
+                      // Restaurant job -- reuses this same workerId/_workTimer staffed-station pair)
     this.x = x; this.y = y;
     this.health = kind === 'fence' ? 0.6 : 1;
     this.destroyed = false;
     this.cooldown = 0;
     this.triggered = false; // traps: single-use
+    // Suppression + out-of-ammo fallback (this session's ammo/suppression pass, see the doc
+    // comments on tickSuppression/AMMO_PER_SHOT_TURRET near GUARD_RANGE above) -- only ever
+    // meaningfully mutated for 'turret'/'tesla' kinds, but harmless (and simpler than a kind-gated
+    // allocation) to carry on every Structure the same way `cooldown` already is. Neither is
+    // persisted in world.js's serialize() -- transient combat state, same convention `cooldown`
+    // itself already follows (a reload resumes as if the defender had a clean moment, not mid-burst).
+    this.suppression = 0;
+    this.outOfAmmo = false;
     // 'workshop' staffing (see jobs.js's Processing job, mirrors vehicles.js's Vehicle.driverId):
     // citizen id currently working this station, or null if unstaffed. Unused by other kinds.
     this.workerId = null;
@@ -599,6 +610,86 @@ export const SNIPER_RANGE = 9;
 export const SNIPER_DAMAGE = 0.12;
 export const SNIPER_COOLDOWN = 10; // exported for draft.js, see GUARD_* comment above
 
+// ---------------------------------------------------------------- ammo (this session's pass)
+// Design call, documented per the task brief: a single global stockpile (world.ammo/
+// world.ammoCapacity, see world.js's tickAmmoProduction import from security.js) rather than a
+// per-turret/per-guard inventory. Reasoning: this project's Armory system already issues weapon
+// TIERS roster-wide off a single armory-count-derived rung (security.js's tickArmoryIssuance),
+// not a per-unit inventory -- a global ammo pool is the same shape of abstraction, consistent with
+// how the rest of this game's "one shared stockpile" economy already works (scrap, pollution,
+// nuclear waste, research points are all single running totals, never per-building ledgers).
+// A dedicated resource distinct from scrap keeps ammo scarcity its own tactical pressure instead
+// of just "spend scrap on bullets" -- see security.js's AMMO_PRODUCTION_PER_ARMORY for how the
+// Armory buildable actually replenishes it.
+export const AMMO_PER_SHOT_GUARD = 1;
+export const AMMO_PER_SHOT_SNIPER = 2;   // bigger, longer-range rounds cost more per shot
+export const AMMO_PER_SHOT_TURRET = 1;
+export const AMMO_PER_SHOT_TESLA = 1.5;  // consumed once per activation (it chains to every
+                                          // attacker in range that tick), not once per target --
+                                          // a crowd-control shot is one battery discharge, not N
+
+// Fallback ("dry") stats when the ammo stockpile can't cover a shot's cost -- not a full disable
+// (the task explicitly calls that out): a Guard/Sniper falls back to a close-range melee scuffle
+// (short reach, reduced damage, low penetration, and -- the whole point -- costs no ammo, so a
+// stockpile-starved defender still contributes SOMETHING rather than standing there uselessly);
+// a turret/tesla can't melee (it's mechanical), so its fallback is a heavily accuracy- and
+// damage-penalized "dry-firing/sparking" shot that also costs no ammo. See tickStaffCombat/
+// tickTurrets below for exactly where these apply.
+export const GUARD_FALLBACK_RANGE = 1.4; // real melee reach, in ATTACKER_CONTACT_RANGE's neighborhood
+export const GUARD_FALLBACK_DAMAGE_MULT = 0.35; // fists/knife vs. a loaded sidearm
+export const GUARD_FALLBACK_PENETRATION = 5;
+export const TURRET_FALLBACK_ACCURACY_MULT = 0.2; // jammed/dry-firing -- still occasionally connects
+export const TURRET_FALLBACK_DAMAGE_MULT = 0.4;
+
+// ---------------------------------------------------------------- suppression (this session's pass)
+// Genuinely new tactical texture per the task brief, distinct from just "chip away at health":
+// sustained incoming fire on a single defender builds a 0-1 suppression value (citizens.suppression
+// for Guards/Snipers/any citizen actually getting hit, Structure.suppression for turret/tesla) that
+// multiplies down their own accuracy -- a turret/guard getting swarmed measurably starts missing
+// more, and recovers on its own once the attention moves elsewhere or the attackers are cleared.
+// Two different real "incoming fire" signals feed it, since turrets never take literal damage from
+// attackers in this engine's combat model (attackers only chip fences/hit citizens, see
+// tickAttackers/tickAttackerVsCitizens): a citizen's suppression rises on an actual landed hit
+// against them (tickAttackerVsCitizens increments it directly, see that function below); a turret/
+// tesla's suppression rises from sustained attacker presence within its own engagement range
+// (tickSuppression below) -- being swarmed by multiple hostiles at close range is the turret's
+// analog of "under fire" even though this game has no turret-HP-vs-attacker-damage system to hook
+// a literal hit-counter into.
+export const SUPPRESSION_GAIN_PER_HIT = 0.32;             // citizen actually hit this tick
+export const SUPPRESSION_GAIN_PER_ATTACKER_IN_RANGE = 0.05; // per live attacker in a turret/tesla's range, per tick
+export const SUPPRESSION_DECAY_PER_TICK = 0.01;           // ~100 ticks (~10s at 10Hz) to fully recover from max during a real lull
+export const SUPPRESSION_MAX_ACCURACY_PENALTY = 0.65;     // at suppression=1, accuracy is multiplied by (1-0.65)=0.35
+
+// Shared accuracy-penalty curve, used by both tickTurrets (structure.suppression) and
+// tickStaffCombat (citizens.suppression[i]) so the two systems can't drift out of sync.
+export function suppressionAccuracyMult(suppression) {
+  return 1 - Math.min(1, Math.max(0, suppression)) * SUPPRESSION_MAX_ACCURACY_PENALTY;
+}
+
+// Called once per world tick (world.js), after tickAttackers so a turret/tesla's range check sees
+// this tick's freshly-updated attacker positions. Decays every tracked defender's suppression
+// first (so it can't decay AND gain within the same tick in the wrong order relative to a fresh
+// hit -- citizen suppression's fresh-hit gain happens later this same tick, inside
+// tickAttackerVsCitizens, which correctly lands on top of this tick's decayed baseline), then
+// re-derives turret/tesla suppression from live attacker proximity.
+export function tickSuppression(structures, attackers, citizens) {
+  for (const s of structures) {
+    if (s.kind !== 'turret' && s.kind !== 'tesla') continue;
+    if (s.destroyed || s.underConstruction) { s.suppression = 0; continue; }
+    s.suppression = Math.max(0, (s.suppression || 0) - SUPPRESSION_DECAY_PER_TICK);
+    const range = s.kind === 'tesla' ? TESLA_RANGE : TURRET_RANGE;
+    let inRange = 0;
+    for (let i = 0; i < attackers.count; i++) {
+      if (!attackers.isAliveAt(i)) continue;
+      if (Math.hypot(attackers.x[i] - s.x, attackers.y[i] - s.y) <= range) inRange++;
+    }
+    if (inRange > 0) s.suppression = Math.min(1, s.suppression + inRange * SUPPRESSION_GAIN_PER_ATTACKER_IN_RANGE);
+  }
+  for (let c = 0; c < citizens.count; c++) {
+    citizens.suppression[c] = Math.max(0, citizens.suppression[c] - SUPPRESSION_DECAY_PER_TICK);
+  }
+}
+
 // Tesla coil (SEA:R): weaker per-hit than a plain turret but chains to every attacker in range
 // each activation -- a crowd-control pick over a single-target DPS pick, not a strict upgrade.
 const TESLA_RANGE = 4.5; const TESLA_DAMAGE = 0.12; const TESLA_COOLDOWN_TICKS = 14;
@@ -655,7 +746,7 @@ export function tickNuclearHazard(structures, citizens) {
         citizens.alive[c] = 0;
         continue;
       }
-      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c);
+      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c) * augmentHealthMultFor(citizens, c);
       citizens.health[c] -= NUCLEAR_HAZARD_CITIZEN_DAMAGE / healthMult;
       if (citizens.health[c] <= 0) {
         citizens.health[c] = 0.05;
@@ -746,7 +837,15 @@ function findBlockingFence(structures, x, y) {
 // -- the turret/tesla still fires and goes on cooldown on a miss (a shot was taken), it just
 // doesn't connect, same as a real gun firing into fog. Both default to always-hit so every
 // pre-existing call site (tests, console pokes) is unaffected.
-export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng = Math.random, accuracyMult = 1) {
+// ammo/consumeAmmo (this session's ammo pass, see AMMO_PER_SHOT_TURRET/AMMO_PER_SHOT_TESLA and
+// TURRET_FALLBACK_*'s doc comments above): `ammo` is the settlement's CURRENT stockpile (a plain
+// number, not a callback -- read-only here, so tickTurrets can decide up front whether this
+// activation can afford a real shot before it commits to firing), `consumeAmmo(amount)` is only
+// actually invoked once a shot is genuinely taken (a target was found this tick) and only when
+// the stockpile covered it -- a turret that finds no target never touches ammo at all, same as
+// before this feature existed. Both default (Infinity / null) to "always has ammo, nothing to
+// consume", so every pre-existing call site (tests, console pokes) keeps its exact old behavior.
+export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng = Math.random, accuracyMult = 1, ammo = Infinity, consumeAmmo = null) {
   for (const s of structures) {
     if (s.kind !== 'turret' && s.kind !== 'tesla') continue;
     if (s.destroyed || s.underConstruction) continue;
@@ -754,12 +853,21 @@ export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng 
 
     const powered = isPoweredBonus(structures, s.x, s.y);
     const isTesla = s.kind === 'tesla';
+    // Range is NOT ammo-gated -- a mechanical turret's traverse/targeting doesn't shrink when it
+    // runs dry, only the shot it actually puts out does (see damage/accuracy below).
     const range = (isTesla ? TESLA_RANGE : TURRET_RANGE) * (powered ? POWERED_RANGE_MULT : 1);
-    const damage = (isTesla ? TESLA_DAMAGE : TURRET_DAMAGE) * (powered ? POWERED_DAMAGE_MULT : 1);
+    const baseDamage = (isTesla ? TESLA_DAMAGE : TURRET_DAMAGE) * (powered ? POWERED_DAMAGE_MULT : 1);
     // Tesla coils are the Energy source (armor-piercing, the answer to a Boss); plain turrets
     // are Kinetic (great against unarmored Skirmishers, poor against a Brute's plate).
     const dtype = isTesla ? DamageType.Energy : DamageType.Kinetic;
     const penetration = isTesla ? TESLA_PENETRATION : TURRET_PENETRATION;
+    // Suppression (see tickSuppression above): concentrated attacker presence in this turret's own
+    // range degrades its own accuracy, on top of whatever the ammo state does.
+    const supMult = suppressionAccuracyMult(s.suppression || 0);
+    const ammoPerShot = isTesla ? AMMO_PER_SHOT_TESLA : AMMO_PER_SHOT_TURRET;
+    const hasAmmo = ammo >= ammoPerShot;
+    const damage = hasAmmo ? baseDamage : baseDamage * TURRET_FALLBACK_DAMAGE_MULT;
+    const effAccuracy = (hasAmmo ? accuracyMult : accuracyMult * TURRET_FALLBACK_ACCURACY_MULT) * supMult;
 
     if (isTesla) {
       // Chains to every attacker in range instead of picking one -- Tesla's SEA:R niche is
@@ -771,9 +879,14 @@ export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng 
         if (!attackers.isAliveAt(i)) continue;
         if (Math.hypot(attackers.x[i] - s.x, attackers.y[i] - s.y) > range) continue;
         hitAny = true;
-        if (rollsHit(rng, accuracyMult) && damageAttacker(attackers, i, damage, dtype, penetration, rng)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
+        if (rollsHit(rng, effAccuracy) && damageAttacker(attackers, i, damage, dtype, penetration, rng)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
       }
-      if (hitAny) { s.cooldown = TESLA_COOLDOWN_TICKS; onFire?.(s); }
+      if (hitAny) {
+        s.cooldown = TESLA_COOLDOWN_TICKS;
+        onFire?.(s);
+        s.outOfAmmo = !hasAmmo;
+        if (hasAmmo) consumeAmmo?.(ammoPerShot); // one battery discharge per activation, not per chained target
+      }
       continue;
     }
 
@@ -781,7 +894,9 @@ export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng 
     if (bestI >= 0) {
       s.cooldown = TURRET_COOLDOWN_TICKS;
       onFire?.(s);
-      if (rollsHit(rng, accuracyMult) && damageAttacker(attackers, bestI, damage, dtype, penetration, rng)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
+      s.outOfAmmo = !hasAmmo;
+      if (hasAmmo) consumeAmmo?.(ammoPerShot);
+      if (rollsHit(rng, effAccuracy) && damageAttacker(attackers, bestI, damage, dtype, penetration, rng)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
     }
   }
 }
@@ -834,6 +949,12 @@ export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math
       if (Math.hypot(attackers.x[i] - citizens.x[c], attackers.y[i] - citizens.y[c]) > reach) continue;
       if (!rollsHit(rng, accuracyMult)) continue;
       onContact?.(citizens.x[c], citizens.y[c]);
+      // Suppression (see tickSuppression's doc comment above): a landed hit, hostile or lethal or
+      // not, is real sustained incoming fire against this specific citizen -- builds their
+      // suppression directly (read back out by tickStaffCombat below for a Guard/Sniper's own
+      // return-fire accuracy). Every citizen carries this field, not just staff, matching the
+      // "(or citizen)" scope note in the task brief even though only staff currently act on it.
+      citizens.suppression[c] = Math.min(1, (citizens.suppression[c] || 0) + SUPPRESSION_GAIN_PER_HIT);
 
       if (citizens.isDownedAt(c)) {
         const dx = citizens.x[c], dy = citizens.y[c];
@@ -843,7 +964,7 @@ export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math
         continue;
       }
 
-      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c);
+      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c) * augmentHealthMultFor(citizens, c);
       const baseDamage = (ATTACKER_CITIZEN_DAMAGE * arch.damageMult) / healthMult;
       // Vest armor (see the "citizen armor (Vest)" section above) -- citizens.hasVest is a plain
       // Uint8Array duck-typed off the passed-in store, same access pattern as citizens.trait just
@@ -868,7 +989,12 @@ export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math
 // goes on cooldown on a miss, just doesn't connect. Skill gain only happens on a confirmed kill,
 // which already requires a hit, so a foggy/rainy stretch also slows skill progression a little,
 // same knock-on realism as RimWorld's own accuracy modifier. Defaults to always-hit.
-export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKill, rng = Math.random, accuracyMult = 1) {
+// ammo/consumeAmmo (this session's ammo pass): same shape/defaults as tickTurrets above -- `ammo`
+// is the settlement's current stockpile (read-only, used to decide up front which range/stats this
+// tick's shot uses), `consumeAmmo(amount)` only actually fires once a real target was found and the
+// stockpile covered the cost. Defaults (Infinity / null) keep every pre-existing call site
+// unaffected.
+export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKill, rng = Math.random, accuracyMult = 1, ammo = Infinity, consumeAmmo = null) {
   for (let i = 0; i < citizens.count; i++) {
     if (!citizens.isAliveAt(i)) continue;
     if (citizens.isDownedAt(i)) continue; // downed guards/snipers can't fight back
@@ -884,34 +1010,56 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKi
     // role's baseline stats -- Sidearm is 1x everywhere (identical to the old flat constants) for
     // any guard/sniper nobody's built an Armory for yet.
     const tier = WEAPON_TIERS[roster.weaponOf(idOf(i))] || WEAPON_TIERS.Sidearm;
-    const range = (kind === 'Sniper' ? SNIPER_RANGE : GUARD_RANGE) * tier.rangeMult;
-    const damage = (kind === 'Sniper' ? SNIPER_DAMAGE : GUARD_DAMAGE) * tier.damageMult;
-    const cooldown = Math.round((kind === 'Sniper' ? SNIPER_COOLDOWN : GUARD_COOLDOWN) * tier.cooldownMult);
+    // Suppression (see tickSuppression's doc comment above) -- read once, applied to whichever
+    // branch below actually takes a shot (lethal or non-lethal).
+    const supMult = suppressionAccuracyMult(citizens.suppression[i] || 0);
+
+    // Stun Baton (security.js WeaponTier.StunBaton): a melee tool already -- the ammo mechanic
+    // deliberately doesn't touch it (see AMMO_PER_SHOT_GUARD's doc comment), so this branch is
+    // unchanged from before this feature existed except for the added suppression multiplier.
+    if (tier.nonLethal) {
+      const range = (kind === 'Sniper' ? SNIPER_RANGE : GUARD_RANGE) * tier.rangeMult;
+      const targetI = nearestAliveAttacker(attackers, citizens.x[i], citizens.y[i], range);
+      if (targetI >= 0) {
+        citizens._staffCooldown[i] = Math.round((kind === 'Sniper' ? SNIPER_COOLDOWN : GUARD_COOLDOWN) * tier.cooldownMult);
+        if (rollsHit(rng, accuracyMult * supMult) && attackers.isAliveAt(targetI) && rng() < tier.stunChance) {
+          applyStun(attackers, targetI, tier.stunDurationTicks);
+        }
+      }
+      continue;
+    }
+
+    // Ammo fallback (see GUARD_FALLBACK_*'s doc comment above): checked BEFORE searching for a
+    // target, since a dry weapon's much shorter melee range changes who's even in reach -- an
+    // out-of-ammo guard shouldn't "snipe" a target 3+ tiles away with a fallback stat block that's
+    // supposed to represent a close-quarters scuffle.
+    const ammoPerShot = kind === 'Sniper' ? AMMO_PER_SHOT_SNIPER : AMMO_PER_SHOT_GUARD;
+    const hasAmmo = ammo >= ammoPerShot;
+    citizens.outOfAmmo[i] = hasAmmo ? 0 : 1;
+
+    const baseDamage = kind === 'Sniper' ? SNIPER_DAMAGE : GUARD_DAMAGE;
+    const range = hasAmmo ? (kind === 'Sniper' ? SNIPER_RANGE : GUARD_RANGE) * tier.rangeMult : GUARD_FALLBACK_RANGE;
+    const damage = (hasAmmo ? baseDamage * tier.damageMult : baseDamage * GUARD_FALLBACK_DAMAGE_MULT) * augmentDamageMultFor(citizens, i);
+    const cooldown = Math.round((kind === 'Sniper' ? SNIPER_COOLDOWN : GUARD_COOLDOWN) * (hasAmmo ? tier.cooldownMult : 1));
     // Guards carry conventional sidearms (Kinetic); snipers carry the long-range armor-piercing
-    // rifle (Energy), so a sniper line is the personnel answer to Brutes/Bosses.
-    const dtype = kind === 'Sniper' ? DamageType.Energy : DamageType.Kinetic;
+    // rifle (Energy), so a sniper line is the personnel answer to Brutes/Bosses. A dry-fallback
+    // melee scuffle is Kinetic regardless of role -- it's fists/a knife either way, not the
+    // sniper's rifle anymore.
+    const dtype = hasAmmo && kind === 'Sniper' ? DamageType.Energy : DamageType.Kinetic;
     // Weapon-tier penetration bonus (security.js WEAPON_TIERS.penetrationBonus) stacks on top of
     // the role's baseline -- Sidearm's +0 keeps this byte-for-byte identical to the pre-tier
-    // constant for anyone nobody's built an Armory for yet.
-    const penetration = (kind === 'Sniper' ? SNIPER_PENETRATION : GUARD_PENETRATION) + (tier.penetrationBonus || 0);
+    // constant for anyone nobody's built an Armory for yet, when ammo is available.
+    const penetration = hasAmmo ? (kind === 'Sniper' ? SNIPER_PENETRATION : GUARD_PENETRATION) + (tier.penetrationBonus || 0) : GUARD_FALLBACK_PENETRATION;
 
     const targetI = nearestAliveAttacker(attackers, citizens.x[i], citizens.y[i], range);
     if (targetI >= 0) {
       citizens._staffCooldown[i] = cooldown;
-      // Non-lethal (Stun Baton, security.js WEAPON_TIERS.StunBaton): skip damageAttacker
-      // entirely -- a real percentage chance (tier.stunChance) to incapacitate rather than a
-      // damage roll, distinct from every other tier's lethal outcome. Same weather-scaled hit
-      // roll gates whether the swing connects at all (a miss is a miss regardless of what the
-      // weapon does on a hit); the stunChance roll only happens once it does. No scrap/kill/skill
-      // reward -- there's no kill to reward, matching "distinct from the lethal tiers" rather
-      // than a strictly-better freebie.
-      if (tier.nonLethal) {
-        if (rollsHit(rng, accuracyMult) && attackers.isAliveAt(targetI) && rng() < tier.stunChance) {
-          applyStun(attackers, targetI, tier.stunDurationTicks);
-        }
-        continue;
-      }
-      if (rollsHit(rng, accuracyMult) && damageAttacker(attackers, targetI, damage, dtype, penetration, rng)) {
+      const landed = rollsHit(rng, accuracyMult * supMult);
+      // Ammo is spent on pulling the trigger (a real shot was taken), not just on a confirmed hit
+      // -- same "a shot was fired" framing tickTurrets already uses for its own cooldown. A dry
+      // fallback melee swing costs nothing (there's no ammo left to spend).
+      if (hasAmmo) consumeAmmo?.(ammoPerShot);
+      if (landed && damageAttacker(attackers, targetI, damage, dtype, penetration, rng)) {
         citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]] * ageBandFor(citizens.age[i]).skillGainMult;
         onScrap?.(SCRAP_PER_KILL);
         onKill?.();
@@ -1046,7 +1194,7 @@ export function tickHeldCitizenCrisis(world) {
   if (!responded) {
     // No timely response -- this beat escalates with a real injury (not just a scare), matching
     // "some beats end safely, some don't" rather than a single binary check deciding everything.
-    const healthMult = (store.trait[idx]?.healthMult ?? 1) * ageBandFor(store.age[idx]).healthMult * rankHealthMultFor(store, idx);
+    const healthMult = (store.trait[idx]?.healthMult ?? 1) * ageBandFor(store.age[idx]).healthMult * rankHealthMultFor(store, idx) * augmentHealthMultFor(store, idx);
     store.health[idx] = Math.max(0.05, store.health[idx] - HELD_CITIZEN_ESCALATION_INJURY / healthMult);
     if (store.health[idx] <= 0.05) store.flags[idx] |= CitizenFlags.Downed;
     const name = store.name[idx];

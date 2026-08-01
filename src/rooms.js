@@ -91,6 +91,7 @@ const BEAUTY_BY_KIND = {
   shelf: -0.3,     // plain storage furniture -- mildly utilitarian, not as neutral as a door
   medical_bed: 1.0, // functional furnishing like a plain bed, but clinical rather than cozy
   fitness_station: 0.5, // exercise equipment -- a small deliberate positive, milder than a table/bed
+  shower: 0.3, // hygiene fixture -- functional plumbing furniture, a small deliberate positive like fitness_station but milder
   armory: -1.5,    // racked weapons -- utilitarian, not as bad as a turret bolted to the floor
   turret: -2,      // a gun bolted to the floor of your room is not cozy
   fence: -1,
@@ -115,6 +116,11 @@ const BEAUTY_BY_KIND = {
   // room's beauty score hard, the same way it does in the source game (a single altar can carry
   // an otherwise-plain room to "impressive" on its own).
   shrine: 15,
+  // Cinema (real PA DLC prefab catalog WatchCinema, see jobs.js's tickCinemas): a deliberate
+  // entertainment fixture, same "nice furniture" family as table/bed but bigger since it's the
+  // room's whole reason to exist -- priced below shrine (a beauty-only building) since Cinema's
+  // beauty contribution is a side effect of a building whose real function lives in jobs.js.
+  cinema: 3.5,
 };
 
 const CLEANLINESS_POLLUTION_DIVISOR = 20; // world.pollution this high alone fully tanks cleanliness

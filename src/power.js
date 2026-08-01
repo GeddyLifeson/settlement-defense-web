@@ -407,7 +407,7 @@ export function overloadedSupplyKeys(structures) {
 // pledged discharge, which is circular. This keeps it simple and one-directional: batteries
 // charge off genuine generator surplus, and discharge to help cover genuine generator shortfall;
 // what they contribute back to the overload check is a separate, later read (addBatteryCapacity).
-function computeSegmentLoads(structures) {
+export function computeSegmentLoads(structures) {
   const { segments, segIdOf } = computeSegments(structures);
   for (const s of structures) {
     if (!POWERED_CONSUMER_KINDS.has(s.kind) || s.destroyed || s.underConstruction) continue;
@@ -451,5 +451,72 @@ export function tickBatteries(structures) {
       const drawn = Math.min(neededDrawn, s.storedEnergy);
       s.storedEnergy = Math.max(0, s.storedEnergy - drawn);
     }
+  }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Power Exporter (real PA DLC mechanic -- Transformer/PowerExportMeter/QuickConnect -- ported
+// honestly rather than reskinned: PA lets a segment with real spare capacity sell it off-site for
+// money; this is that same idea applied to the flood-fill segment model above). A power_exporter
+// structure is a consumer-shaped conductor-adjacent building (placed touching a wire/generator
+// tile, same "on or orthogonally touching an energized tile" rule as a turret) that converts a
+// slice of its segment's GENUINE spare capacity into a slow, real scrap trickle -- never power the
+// grid actually needs.
+//
+// "Genuine spare capacity" is deliberately computeSegmentLoads' raw generator-capacity-minus-real-
+// consumer-load balance -- the EXACT same number tickBatteries above already uses to decide
+// whether a battery gets to charge this tick. Reusing it (rather than a parallel calculation)
+// guarantees the exporter can never claim capacity a battery, a turret, or any other real consumer
+// would have gotten instead: if it's not safe for a battery to draw on, it's not safe for this to
+// export either.
+//
+// Two separate safety margins keep this from ever contributing to (or masking) a real overload:
+//   1. POWER_EXPORT_RESERVE_MARGIN -- a flat amount of raw capacity held back, untouched, before
+//      anything is exportable at all. Sized to roughly one plain generator's per-tick capacity (5)
+//      so a segment has to have genuinely spare, not just momentarily-idle, headroom before the
+//      exporter does anything.
+//   2. Even past that margin, only POWER_EXPORT_FRACTION of what's left converts to scrap per
+//      tick, capped at POWER_EXPORT_MAX_PER_TICK -- a real trickle, not a way to drain a segment's
+//      headroom in a handful of ticks.
+// Since computeSegmentLoads is recomputed fresh every call (not cached the way energizedTiles/
+// overloadState are), the very tick a new downstream consumer comes online and eats into the
+// segment's surplus, every exporter on that segment sees the smaller (or negative) balance and its
+// trickle shrinks or drops to zero on that same tick -- it never keeps exporting off a stale
+// number. If multiple exporters share one segment, each allocation is immediately folded back into
+// that segment's `load` for the rest of this same pass, so a second exporter reading the same
+// segment right after the first sees the already-reduced remainder rather than double-claiming the
+// same slice of surplus.
+export const POWER_EXPORT_RESERVE_MARGIN = 1.5;
+export const POWER_EXPORT_FRACTION = 0.12;
+export const POWER_EXPORT_MAX_PER_TICK = 0.15;
+
+// Call once per world tick (world.js), any time after computeSegmentLoads' inputs for this tick
+// are settled -- mirrors tickBatteries' calling convention, but this one reports out through
+// `addScrap` (world.js's addScrap, bucketed under the 'powerExport' finance category) rather than
+// mutating structures' own state, matching the recycling-center trickle's call shape in world.js's
+// tick(). Also stamps `s._exportRate` on each exporter (0 when not currently exporting) purely for
+// render.js to read back -- the glow/arrow on the sprite is only ever lit while a real trickle is
+// actually flowing this tick, never a static "built" indicator.
+export function tickPowerExporters(structures, addScrap) {
+  let hasExporter = false;
+  for (const s of structures) {
+    if (s.kind === 'power_exporter' && !s.destroyed && !s.underConstruction) { hasExporter = true; break; }
+  }
+  if (!hasExporter) return; // cheap bail-out -- computeSegmentLoads is a full graph rebuild, skip it entirely on maps with none built
+
+  const { segments, segIdOf } = computeSegmentLoads(structures);
+  for (const s of structures) {
+    if (s.kind !== 'power_exporter' || s.destroyed || s.underConstruction) continue;
+    s._exportRate = 0;
+    const segId = findSegmentIdForConsumer(s.x, s.y, segIdOf);
+    if (segId == null) continue; // not actually touching the power grid -- exports nothing, per the task's gate
+    const seg = segments[segId];
+    const surplus = seg.capacity - seg.load - POWER_EXPORT_RESERVE_MARGIN;
+    if (surplus <= 0) continue;
+    const amount = Math.min(POWER_EXPORT_MAX_PER_TICK, surplus * POWER_EXPORT_FRACTION);
+    if (amount <= 0) continue;
+    seg.load += amount; // reserve this slice from any other exporter sharing the same segment this pass
+    s._exportRate = amount;
+    addScrap(amount, 'powerExport');
   }
 }

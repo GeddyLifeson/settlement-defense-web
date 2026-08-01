@@ -1,11 +1,12 @@
 // Ported from SD.Presentation/SimWorldHost.cs -- owns one SimWorld, steps it at a fixed
 // 10 Hz tick rate independent of frame rate, and renders every frame.
-import { SimWorld } from './world.js';
+import { SimWorld, STARTER_NAMES } from './world.js';
 import { Renderer } from './render.js';
 import { InputController, TOOLS } from './input.js';
 import { topbarIconUri } from './assets.js';
 import { isNight, ScheduleOverride, SCHEDULE_OVERRIDE_LABELS } from './schedule.js';
-import { PASSION_ICON } from './backstories.js';
+import { PASSION_ICON, randomBackstory, randomPassions } from './backstories.js';
+import { randomTrait } from './traits.js';
 import { worldMap, EXPANSION_FUEL_COST, MAX_TRAVEL_RANGE } from './worldmap.js';
 import {
   playBuildComplete, playWaveAlert, playTurretFire, playKill, playCitizenDowned,
@@ -15,10 +16,11 @@ import {
   playRatTierChange, playSevereWeatherOnset,
   isMuted, toggleMute, getVolume, setVolume, getMasterGainValue,
 } from './audio.js';
-import { WeatherKind, tryWandererEvent, tryBlightEvent } from './weather.js';
+import { WeatherKind, tryWandererEvent, tryBlightEvent, tryResourceGiftEvent, tryTraderEvent, tryMassFireEvent, isHazardActive, hazardRefillMult, tickHazardCondition, HAZARD_EARLIEST_TICK, HAZARD_MIN_REFIRE_TICKS } from './weather.js';
 import { WEAPON_TIERS, WeaponTier, fireCorruptStaff, forceCorruptionRoll, forceActivateCorruption, CORRUPTION_FIRE_REWARD, K9_UPGRADE_SCRAP_COST } from './security.js';
 import { forceHeldCitizenCrisis } from './siege.js';
 import { buildCost } from './economy.js'; // vest purchase price display, see the inspector's Buy Vest button
+import { canInspectDelivery, canSearchDelivery } from './supplies.js'; // tainted-delivery banner gating, see updateSupplyAlert below
 import { AggressionPreset, makeRng, rngInt } from './core.js';
 import { STORYTELLERS } from './director.js';
 import {
@@ -40,6 +42,7 @@ import {
   isCallInReady, callInLiveCount, triggerCallIn,
 } from './coverageplans.js';
 import { RANKS, rankOf, canRankUp, tryRankUp } from './ranks.js';
+import { AUGMENTS, AUGMENT_SLOT_CAP, hasAugment, augmentCountFor, canBuyAugment } from './augments.js';
 import {
   DRONE_CATEGORIES, DRONE_COST, DRONE_GESTATION_TICKS, droneCapacity, droneSlotsUsed,
   queueDroneFabrication,
@@ -211,6 +214,14 @@ window.__debug = {
   showTitleScreen: () => showTitleScreen(),
   isInGame: () => world != null,
   newGame: (opts) => beginSettlement(opts),
+  // Customize Starting Colonists (see main.js's "customize starting colonists" section) -- exposed
+  // for verification/testing the same way every other title-screen flow above is: showColonistSetup
+  // rolls (or reuses) pendingRoster and shows the panel, getPendingRoster reads its live state,
+  // rerollColonist re-rolls one slot the same way the panel's own button does.
+  showColonistSetup: () => showColonistSetup(),
+  hideColonistSetup: () => hideColonistSetup(),
+  getPendingRoster: () => pendingRoster,
+  rerollColonist: (i) => { pendingRoster[i] = rollColonistPreview(i); renderColonistGrid(); return pendingRoster[i]; },
   hasSave: () => hasSave(),
   save: () => save(),
   load: () => load(),
@@ -304,6 +315,26 @@ window.__debug = {
     force: (kind) => { world.weather = kind; },
     triggerWanderer: () => tryWandererEvent(world),
     triggerBlight: () => tryBlightEvent(world),
+    triggerTrader: () => tryTraderEvent(world),
+    triggerMassFire: () => tryMassFireEvent(world),
+    // New this pass: resource-gift windfall (real RimWorld ResourcePodCrash) -- force-roll it
+    // directly against world.resourceNodes without waiting on the normal event timer/odds.
+    triggerResourceGift: () => tryResourceGiftEvent(world),
+    // New this pass: toxic-fallout map-wide hazard (real ToxicFallout/VolcanicWinter-style rare,
+    // late-game-gated, long-refire-gap condition -- see weather.js's tickHazardCondition header
+    // comment). isActive/refillMult/tick expose the real gated state directly for console
+    // verification (fast-forward world.currentTick + call tick() repeatedly to test the gates
+    // without soaking out 10,000+ real ticks); EARLIEST_TICK/MIN_REFIRE_TICKS are the real
+    // constants the gate itself checks, exposed so a test script doesn't have to hardcode them.
+    hazard: {
+      isActive: () => isHazardActive(world),
+      refillMult: () => hazardRefillMult(world),
+      ticksRemaining: () => world._hazardTicksRemaining,
+      lastEndTick: () => world._hazardLastEndTick,
+      EARLIEST_TICK: HAZARD_EARLIEST_TICK,
+      MIN_REFIRE_TICKS: HAZARD_MIN_REFIRE_TICKS,
+      tick: () => tickHazardCondition(world),
+    },
   },
   // metaprogress.js cross-run stats/achievements -- console-verification pattern matching every
   // other feature above (toggle the panel directly, read the live lifetime numbers, and force a
@@ -395,16 +426,20 @@ const TOOL_CATEGORY = {
   generator: 'power', generator_coal: 'power', generator_wind: 'power', generator_solar: 'power',
   generator_nuclear: 'power', waste_storage: 'power', wire: 'power', battery: 'power',
   power_switch: 'power', pump: 'power', pipe: 'power',
+  power_exporter: 'power', // power.js's surplus-gated scrap trickle, same power-utility bucket as battery/power_switch
   garage_recycling_fossil: 'economy', garage_recycling_gas: 'economy',
   garage_recycling_ethanol: 'economy', garage_recycling_electric: 'economy',
   garage_garbage_fossil: 'economy', garage_garbage_gas: 'economy',
   garage_garbage_ethanol: 'economy', garage_garbage_electric: 'economy',
   recycling_center: 'economy', workshop: 'economy',
-  fabrication_bay: 'economy', farm_plot: 'economy',
+  fabrication_bay: 'economy', farm_plot: 'economy', restaurant: 'economy',
   bed: 'furniture', table: 'furniture', door: 'furniture',
   shelf: 'furniture', medical_bed: 'furniture', shrine: 'furniture', fitness_station: 'furniture',
+  cinema: 'furniture', // group-broadcast entertainment fixture, same "Recreation-zone furniture" bucket as fitness_station
+  shower: 'furniture', // Hygiene need's refill fixture, same needs-refill-furniture bucket as fitness_station
   camera: 'security', monitor_station: 'security', armory: 'security', rat_trap: 'security',
   stabilizer: 'security', // anomaly.js's counter-buildable, same "hazard-management, not combat" bucket as Rat Trap
+  checkpoint: 'security', // security.js/factions.js's screening chokepoint, same corruption/unrest-management bucket
   'zone-food': 'zones', 'zone-bedroom': 'zones', 'zone-recreation': 'zones', 'zone-training': 'zones',
   'zone-storage': 'zones', 'zone-medical': 'zones', 'zone-command': 'zones', 'zone-gymnasium': 'zones',
   'restrict-area': 'zones', // paints a citizen's allowed area, same paint-gesture family as the zone tools
@@ -463,8 +498,13 @@ const TOOL_BLURB = {
   medical_bed: 'Medical room furniture -- doubles a downed citizen\'s recovery rate while they\'re tended inside a validated Medical room.',
   shrine: 'Pure beauty building -- raises a room\'s Beauty score, feeding the room-quality mood bonus.',
   fitness_station: 'Gymnasium room furniture. A citizen with low Exercise walks to and uses it to refill the need.',
+  shower: 'Refills Hygiene when a citizen uses it -- but only works if connected to the water grid via Pump/Pipe. An unconnected Shower does nothing.',
   fabrication_bay: 'Unlocks capacity for labor drones -- tireless, needs-free workers locked to one work category each.',
   farm_plot: 'Staffed crop plot -- a tending citizen produces a steady scrap trickle each work cycle. Requires Agronomy research.',
+  checkpoint: 'Screening chokepoint -- cuts a corrupt staffer\'s scrap diversion and reduces a rival clique\'s unmet-demand consequence, but only for whoever actually passes within its radius.',
+  restaurant: 'Staffed retail counter -- once a citizen mans it, produces a steady scrap trickle from visitor traffic each service cycle. No raw material needed to start a cycle, and no research gate.',
+  cinema: 'Group-broadcast entertainment. Every ~30s it airs a showing that refills Social for every citizen within a 10-tile radius at once -- no worker needed, no walking to a specific tile.',
+  power_exporter: 'Sells genuine spare generator capacity on its segment for a slow scrap trickle. Never touches power real consumers need -- the trickle shrinks or stops the moment the surplus does.',
 };
 
 // ---- DOM scaffold (header + collapsible body: Select shortcut, category grid, item list, detail) ----
@@ -2269,6 +2309,7 @@ const FINANCE_CATEGORIES = [
   ['conquestScrap', '🗺 Conquest supply lines', 'income'],
   ['factionScrap', '🤝 Clique demands', 'income'],
   ['grantScrap', '📜 Charter contracts & investments', 'income'],
+  ['powerExportScrap', '⚡ Power Exporter trickle', 'income'],
   ['otherScrap', '❓ Other', 'income'],
   ['buildSpend', '🔨 Construction spend', 'expense'],
 ];
@@ -2412,6 +2453,7 @@ function updateInspector() {
     `Combat: ${skillLevel(c.skillCombat[sel])}${PASSION_ICON[c.passionCombat[sel]]} · ` +
     `Construction: ${skillLevel(c.skillConstruction[sel])}${PASSION_ICON[c.passionConstruction[sel]]}`;
   updateInspectorRank(sel);
+  renderInspectorAugments(sel);
   updateInspectorWeapon(c.id[sel], role);
   updateInspectorRoom(c.x[sel], c.y[sel]);
 }
@@ -2438,6 +2480,55 @@ function updateInspectorRank(sel) {
     rankBtn.title = check.ok
       ? `Rank up to ${check.rank.name} for ${check.rank.scrapCost} scrap -- +${Math.round((check.rank.workSpeedMult - 1) * 100)}% work speed, +${Math.round((check.rank.healthMult - 1) * 100)}% health.`
       : `Rank Up: ${check.reason}`;
+  }
+}
+
+// Scavenged Augments (augments.js -- see that file's header for how this is distinct from Rank
+// above: PURCHASED with scrap, no skill gate, and every one carries a real permanent tradeoff
+// alongside its upside). One row per AUGMENTS entry, always showing the full cost/upside/tradeoff
+// readout so the player can see exactly what they're buying before they buy it, same "always show
+// why" convention as updateInspectorRank above. An already-installed augment's row dims and hides
+// its Purchase button; otherwise the button disables (with a title explaining exactly why) once
+// canBuyAugment fails any gate -- unaffordable or the slot cap is already full.
+function renderInspectorAugments(sel) {
+  const c = world.citizens;
+  const listEl = document.getElementById('insp-augments-list');
+  const summaryEl = document.getElementById('insp-augments-summary');
+  if (!listEl || !summaryEl) return;
+  const count = augmentCountFor(c, sel);
+  summaryEl.textContent = `Installed: ${count} / ${AUGMENT_SLOT_CAP} slots`;
+  listEl.innerHTML = '';
+  for (const def of AUGMENTS) {
+    const installed = hasAugment(c, sel, def.id);
+    const check = canBuyAugment(c, sel, def.id, world);
+    const row = document.createElement('div');
+    row.className = 'aug-row' + (installed ? ' installed' : '');
+    const cost = buildCost(world, def.costKind);
+    const head = document.createElement('div');
+    head.className = 'aug-row-head';
+    head.innerHTML = `<span>${def.name}</span><span>${installed ? 'Installed' : cost + ' scrap'}</span>`;
+    row.appendChild(head);
+    const upside = document.createElement('div');
+    upside.className = 'aug-row-upside';
+    upside.textContent = `+ ${def.upsideText}`;
+    row.appendChild(upside);
+    const tradeoff = document.createElement('div');
+    tradeoff.className = 'aug-row-tradeoff';
+    tradeoff.textContent = `- ${def.tradeoffText}`;
+    row.appendChild(tradeoff);
+    if (!installed) {
+      const btn = document.createElement('button');
+      btn.textContent = 'Install';
+      btn.disabled = !check.ok;
+      btn.title = check.ok ? `Install ${def.name} for ${cost} scrap.` : check.reason;
+      btn.addEventListener('click', () => {
+        const result = world.buyAugment(c.id[sel], def.id);
+        if (result.ok) showToast(`${c.name[sel]} fitted with ${result.def.name}`);
+        renderInspectorAugments(sel);
+      });
+      row.appendChild(btn);
+    }
+    listEl.appendChild(row);
   }
 }
 
@@ -2561,6 +2652,10 @@ function updateInspectorMulti(indices) {
   // weapon-tier row / Schedule / Restrict Area controls above.
   document.getElementById('insp-rank-line').textContent = '';
   document.getElementById('insp-rankup-btn').classList.add('hidden');
+  // Augments are also a single-citizen purchase (one slot cap, one scrap spend) -- same
+  // "select one citizen" reasoning as Rank Up above.
+  document.getElementById('insp-augments-summary').textContent = 'Select one citizen to view/install augments';
+  document.getElementById('insp-augments-list').innerHTML = '';
   document.getElementById('insp-room-role').textContent = 'Group averages -- select one citizen for room detail';
   document.getElementById('insp-clean-row').classList.add('hidden');
   document.getElementById('insp-impress-row').classList.add('hidden');
@@ -2593,6 +2688,36 @@ function updateEventLog() {
   eventlogEl.innerHTML = world.milestoneLog.slice(-4).map(e => `<div class="entry">${e.text}</div>`).join('');
 }
 
+// ---------------------------------------------------------------- tainted-delivery banner
+// supplies.js's player-facing "dispose of the bad batch" / "search and recover" objectives --
+// same lightweight #banner-with-buttons shape as #achievement-toast, but conditionally visible
+// (not a fire-and-forget toast) for as long as an action is actually available, since the player
+// needs a real window to notice and act rather than a message that scrolls past.
+const supplyAlertEl = document.getElementById('supply-alert');
+const supplyAlertTextEl = document.getElementById('supply-alert-text');
+const supplyInspectBtn = document.getElementById('supply-inspect-btn');
+const supplySearchBtn = document.getElementById('supply-search-btn');
+supplyInspectBtn?.addEventListener('click', () => {
+  if (!world) return;
+  world.inspectDelivery();
+});
+supplySearchBtn?.addEventListener('click', () => {
+  if (!world) return;
+  world.searchDelivery();
+});
+function updateSupplyAlert() {
+  if (!supplyAlertEl) return;
+  const inspectable = canInspectDelivery(world);
+  const searchable = canSearchDelivery(world);
+  supplyAlertEl.classList.toggle('hidden', !inspectable && !searchable);
+  if (!inspectable && !searchable) return;
+  supplyInspectBtn.classList.toggle('hidden', !inspectable);
+  supplySearchBtn.classList.toggle('hidden', !searchable);
+  supplyAlertTextEl.textContent = inspectable
+    ? 'A recent supply delivery hasn’t been checked yet.'
+    : 'The recent delivery went unchecked -- some supplies may be tainted.';
+}
+
 const gameoverEl = document.getElementById('gameover');
 function updateGameOver() {
   if (!world.gameOver) { gameoverEl.classList.add('hidden'); return; }
@@ -2611,6 +2736,15 @@ function updateTopbar() {
   const pollutionEl = document.getElementById('stat-pollution');
   pollutionEl.textContent = Math.round(world.pollution);
   pollutionEl.classList.toggle('danger', world.pollution > 150);
+  // Ammo (this session's ammo/suppression pass, see world.js's this.ammo/this.ammoCapacity and
+  // security.js's tickAmmoProduction) -- danger-red once the stockpile drops below one Sniper
+  // shot's worth (siege.js's AMMO_PER_SHOT_SNIPER = 2), the real "about to start seeing fallback
+  // states" threshold, not an arbitrary percentage.
+  const ammoEl = document.getElementById('stat-ammo');
+  if (ammoEl) {
+    ammoEl.textContent = `${Math.round(world.ammo)}/${Math.round(world.ammoCapacity)}`;
+    ammoEl.classList.toggle('danger', world.ammo < 2);
+  }
   // Unrest (world.js's UNREST_* / world.unrestLevel/unrestActive): stays out of the topbar
   // entirely on a healthy colony (kept hidden below a "starting to matter" floor) rather than
   // showing a 0%/1% reading all the time -- this is meant to read as a rare warning, not
@@ -2910,8 +3044,33 @@ function readSetupForm() {
   };
 }
 
+/** Applies a Customize Starting Colonists roster (see the section below) onto a just-constructed
+ *  SimWorld's CitizenStore. `roster[i]` transplants directly onto store index i -- world.js's
+ *  constructor spawns starting citizens in the same 0..count-1 order this preview roster was built
+ *  in, so index i here is guaranteed to be the same citizen slot the preview card for i represented.
+ *  Every field being written was itself produced by a real randomTrait/randomBackstory/
+ *  randomPassions roll (see rollColonistPreview) -- this never invents a value, only moves which
+ *  already-real roll landed on which starting citizen. */
+function applyRosterOverride(w, roster) {
+  const store = w.citizens;
+  const n = Math.min(roster.length, store.count);
+  for (let i = 0; i < n; i++) {
+    const pick = roster[i];
+    if (pick.name) store.name[i] = pick.name;
+    store.trait[i] = pick.trait;
+    store.backstory[i] = pick.backstory;
+    store.passionCombat[i] = pick.passionCombat;
+    store.passionConstruction[i] = pick.passionConstruction;
+    store.skillCombat[i] = pick.skillCombat;
+    store.skillConstruction[i] = pick.skillConstruction;
+  }
+}
+
 /** Construct + start a settlement from an explicit settings object. Every field is optional and
- *  falls back to the current defaults, so `__debug.newGame({ storyteller: 'Randy' })` works. */
+ *  falls back to the current defaults, so `__debug.newGame({ storyteller: 'Randy' })` works.
+ *  `opts.rosterOverride` (see "Customize Starting Colonists" below) is optional too -- when
+ *  present, applyRosterOverride transplants it onto the freshly-spawned roster right after
+ *  construction and before the world is handed to startGame(). */
 function beginSettlement(opts = {}) {
   const cfg = {
     width: 64, height: 64, seed: randomSeed(),
@@ -2922,9 +3081,12 @@ function beginSettlement(opts = {}) {
   // startGame recovers width/height/aggression/storyteller from the world it is handed; the
   // starting head-count is the one thing it can't, so record it here before handing over.
   lastNewGameConfig.startingCitizens = cfg.startingCitizens;
-  startGame(makeWorld(cfg));
+  const newWorld = makeWorld(cfg);
+  if (Array.isArray(opts.rosterOverride)) applyRosterOverride(newWorld, opts.rosterOverride);
+  startGame(newWorld);
   console.log(`[SimWorldHost] New settlement ${cfg.width}x${cfg.height}, seed ${cfg.seed}, ` +
-    `${cfg.startingCitizens} citizens, ${cfg.aggression}, storyteller ${cfg.storyteller}.`);
+    `${cfg.startingCitizens} citizens, ${cfg.aggression}, storyteller ${cfg.storyteller}` +
+    `${opts.rosterOverride ? ' (customized roster)' : ''}.`);
   // First-run onboarding (tutorial.js). Hooked HERE rather than in startGame() on purpose:
   // startGame is also the load/restart/conquest-expansion path, and a returning player loading a
   // save should never be handed a beginner's tour. No-ops after the first time (localStorage flag).
@@ -2974,7 +3136,122 @@ function showSetupScreen() {
   buildRadioList('setup-storyteller', 'setup-storyteller-desc', STORYTELLER_CARDS,
     () => setupStoryteller, (v) => { setupStoryteller = v; });
   drawSetupPreview();
+  // A fresh trip into New Game shouldn't carry a stale customization from a previous visit --
+  // see the "Customize Starting Colonists" section below, showColonistSetup() re-rolls whenever
+  // pendingRoster is null or its length no longer matches the citizen slider anyway, but clearing
+  // it here also means Back-then-New-Game reads as a genuinely fresh setup, not a leftover roster.
+  pendingRoster = null;
 }
+
+// ---------------------------------------------------------------- customize starting colonists
+// Optional pre-start step (reachable from the setup screen's "Customize Starting Colonists"
+// button below) -- shows the player the exact starting roster CitizenStore.spawn() would
+// otherwise roll blind and unseen, using the SAME real randomTrait/randomBackstory/
+// randomPassions functions (traits.js/backstories.js) that spawn() itself calls. Re-rolling a
+// citizen here calls those same functions again; it never invents a parallel roll table, and it
+// deliberately never lets the player type a skill value in directly -- only re-roll from the same
+// pool, so a min-maxed roster isn't possible, matching the spirit of "control over outcome, not
+// removing randomness as a resource."
+let pendingRoster = null; // null = no customization pending; beginSettlement() rolls fresh as normal
+
+/** One citizen's preview roll -- exactly what CitizenStore.spawn() would produce for starting
+ *  citizen slot `index`, computed the same way (randomTrait/randomBackstory/randomPassions), just
+ *  not yet written into a CitizenStore since no SimWorld exists yet at this point in the setup
+ *  flow (see applyRosterOverride above, called once a world actually gets constructed). Uses
+ *  Math.random rather than the setup form's seeded rng on purpose -- the seed drives real terrain/
+ *  spawn generation once Start is pressed, and re-rolling a preview citizen here should feel like
+ *  a genuine fresh roll, not a deterministic function of the seed field. */
+function rollColonistPreview(index) {
+  const trait = randomTrait(Math.random);
+  const backstory = randomBackstory(Math.random);
+  const passions = randomPassions(Math.random, backstory);
+  return {
+    name: STARTER_NAMES[index] ?? `Colonist ${index + 1}`,
+    trait, backstory,
+    passionCombat: passions.combat,
+    passionConstruction: passions.construction,
+    skillCombat: backstory.skillCombatStart ?? 0,
+    skillConstruction: backstory.skillConstructionStart ?? 0,
+  };
+}
+
+function rollFreshRoster(count) {
+  const roster = [];
+  for (let i = 0; i < count; i++) roster.push(rollColonistPreview(i));
+  return roster;
+}
+
+const colonistSetupEl = document.getElementById('colonist-setup');
+const colonistGridEl = document.getElementById('colonist-setup-grid');
+
+/** Builds one card's DOM for pendingRoster[i] -- a name field (renamable), the backstory pair
+ *  (hover for its full flavor description, same title-attribute convention the inspector's own
+ *  backstory line already uses), the trait name, a bucketed skill readout (skillLevel/PASSION_ICON,
+ *  same convention the inspector panel uses so this reads consistently with the rest of the game),
+ *  and a Re-roll button. */
+function renderColonistCard(i) {
+  const c = pendingRoster[i];
+  const card = document.createElement('div');
+  card.className = 'node';
+  const nameEsc = c.name.replace(/"/g, '&quot;');
+  const descEsc = c.backstory.description.replace(/"/g, '&quot;');
+  card.innerHTML = `
+    <input class="cname-input" type="text" value="${nameEsc}" maxlength="24">
+    <div class="backstory" title="${descEsc}">${c.backstory.childhood} &rarr; ${c.backstory.adult}</div>
+    <div class="trait">${c.trait.name}</div>
+    <div class="skills">Combat: ${skillLevel(c.skillCombat)}${PASSION_ICON[c.passionCombat]} &middot; Construction: ${skillLevel(c.skillConstruction)}${PASSION_ICON[c.passionConstruction]}</div>
+    <button class="reroll-btn" type="button">🎲 Re-roll backstory/trait</button>
+  `;
+  card.querySelector('.cname-input').addEventListener('input', (e) => {
+    pendingRoster[i].name = e.target.value;
+  });
+  card.querySelector('.reroll-btn').addEventListener('click', () => {
+    const keepName = pendingRoster[i].name; // re-rolling is about backstory/trait, not clobbering
+    pendingRoster[i] = rollColonistPreview(i); // a name the player already typed in above
+    pendingRoster[i].name = keepName;
+    renderColonistGrid();
+  });
+  return card;
+}
+
+function renderColonistGrid() {
+  colonistGridEl.innerHTML = '';
+  for (let i = 0; i < pendingRoster.length; i++) colonistGridEl.appendChild(renderColonistCard(i));
+}
+
+function showColonistSetup() {
+  const count = Number(setupCitizensEl.value) || 24;
+  // Regenerate only if there's nothing pending yet or the citizen-count slider moved since the
+  // last visit -- otherwise re-opening this screen (e.g. after Back) keeps whatever the player
+  // already re-rolled/renamed rather than throwing it away.
+  if (!pendingRoster || pendingRoster.length !== count) pendingRoster = rollFreshRoster(count);
+  titleSetupEl.classList.add('hidden');
+  colonistSetupEl.classList.remove('hidden');
+  renderColonistGrid();
+}
+
+function hideColonistSetup() {
+  colonistSetupEl.classList.add('hidden');
+  titleSetupEl.classList.remove('hidden');
+}
+
+document.getElementById('btn-setup-customize').addEventListener('click', () => showColonistSetup());
+document.getElementById('btn-colonist-back').addEventListener('click', () => hideColonistSetup());
+// Fast-path skip, per the task's explicit ask: players who don't want to fuss with customization
+// get a one-click "just roll it and go" that behaves exactly like the plain Start ▶ button always
+// has (a completely fresh random roster, not whatever partial re-rolls/renames happened to be
+// sitting in pendingRoster -- discarding it here is deliberate, this button means "never mind").
+document.getElementById('btn-colonist-randomize-all').addEventListener('click', () => {
+  pendingRoster = null;
+  colonistSetupEl.classList.add('hidden');
+  beginSettlement(readSetupForm());
+});
+document.getElementById('btn-colonist-confirm').addEventListener('click', () => {
+  const roster = pendingRoster;
+  pendingRoster = null;
+  colonistSetupEl.classList.add('hidden');
+  beginSettlement({ ...readSetupForm(), rosterOverride: roster });
+});
 
 document.getElementById('btn-title-new').addEventListener('click', () => showSetupScreen());
 document.getElementById('btn-title-continue').addEventListener('click', () => load());
@@ -3085,6 +3362,7 @@ function frame() {
   syncToolbarHighlight();
   updateInspector();
   updateEventLog();
+  updateSupplyAlert();
   updateGameOver();
   refreshWorldMapValues();
   refreshResearchValues();

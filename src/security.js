@@ -272,6 +272,53 @@ export function tickArmoryIssuance(roster, structures) {
   }
 }
 
+// ---------------------------------------------------------------- ammo economy (this session's pass)
+// Real design call (see siege.js's AMMO_PER_SHOT_* doc comment for the full reasoning): a single
+// global stockpile (world.ammo/world.ammoCapacity), not a per-turret/per-guard inventory --
+// consistent with how Armory-issued weapon TIERS already work roster-wide off a single
+// armory-count-derived rung rather than per-unit stock. Production/capacity both scale with the
+// number of built (not destroyed/under-construction) Armories, same "count real buildings, not a
+// flag" pattern tickArmoryIssuance above already uses.
+//
+// AMMO_BASE_CAPACITY (a real starting reserve even with zero Armories, so a fresh colony's 4
+// starter turrets aren't already dry the instant a wave arrives) + AMMO_CAPACITY_PER_ARMORY*N is
+// the hard ceiling production can fill to; AMMO_PRODUCTION_PER_ARMORY*N is the per-tick trickle,
+// same shape as world.js's own pollution-per-generator accumulation. Numbers picked against
+// siege.js's real per-shot costs: a lone Armory's ~0.08/tick trickle (~4.8/game-minute at 10Hz)
+// comfortably outpaces one turret's ~1-shot-per-TURRET_COOLDOWN_TICKS(8) burn rate in isolation,
+// but a hands-off colony under sustained multi-defender fire (several turrets + guards/snipers all
+// burning ammo every cooldown) will genuinely outrun a single Armory's production -- that gap is
+// the whole point of the resource, verified via a real soak-test comparison (see the task's own
+// verification checklist).
+export const AMMO_BASE_CAPACITY = 40;
+export const AMMO_CAPACITY_PER_ARMORY = 50;
+export const AMMO_PRODUCTION_PER_ARMORY = 0.08;
+// A zero-Armory colony (the hands-off soak-test baseline every prior balance pass this session
+// was calibrated against -- see SESSION_HANDOFF.md) previously got literally 0 ammo regen forever
+// once its starting AMMO_BASE_CAPACITY ran dry, permanently crippling turrets/guards to their
+// dry-fire fallback for the rest of the game. Confirmed via a real 3-seed soak: survival collapsed
+// from the established 22-36k tick range to ~11.4-12k, all wave 14. A small always-on trickle
+// (1/4 of one Armory's own rate) keeps ammo scarcity real -- it still can't outrun sustained
+// multi-defender fire on its own, so building an Armory stays a genuine, meaningful choice -- but
+// stops an unattended colony's core defense from flatlining to zero regen permanently.
+export const AMMO_BASE_PRODUCTION = 0.02;
+
+// Called once per world tick (world.js), same "cheap, just re-derive every tick" placement as
+// tickArmoryIssuance right above it (armoryCount is already a fresh per-tick structures scan there;
+// this is a second, equally cheap one rather than threading the count through as a shared param,
+// keeping both functions independently callable/testable). A destroyed Armory correctly shrinks
+// world.ammoCapacity immediately -- if that drops world.ammo above the new ceiling, it's clamped
+// down rather than left "banked" above cap (mirrors world.js's own pollution/nuclearWaste
+// clamp-to-current-cap conventions elsewhere in this file's neighborhood).
+export function tickAmmoProduction(world) {
+  let armoryCount = 0;
+  for (const s of world.structures) {
+    if (s.kind === 'armory' && !s.destroyed && !s.underConstruction) armoryCount++;
+  }
+  world.ammoCapacity = AMMO_BASE_CAPACITY + armoryCount * AMMO_CAPACITY_PER_ARMORY;
+  world.ammo = Math.min(world.ammoCapacity, world.ammo + AMMO_BASE_PRODUCTION + armoryCount * AMMO_PRODUCTION_PER_ARMORY);
+}
+
 // Guards/snipers/monitors walk their assigned route -- a single point holds position (matches
 // the Unity build's "hold position" staff behavior); 2-4 points cycle as a patrol loop, pausing
 // PATROL_PAUSE_TICKS at each stop before moving to the next. Off-duty staff (see
@@ -616,6 +663,31 @@ function corruptionRatio(world) {
   return isNodeUnlocked(world.research, 'staff_vetting') ? CORRUPTION_VETTED_RATIO : CORRUPTION_BASE_RATIO;
 }
 
+// --- Checkpoint (real PA DLC prefab catalog: ScannerMachine/MetalDetector/CheckPoint -- a
+// screening chokepoint, reskinned with zero carceral framing: it's a security checkpoint for a
+// civil settlement, not a prison search station) ---
+//
+// Real, measurable hook (not flavor text): a corrupt staffer's periodic scrap diversion (see
+// tickStaffCorruption's active-bribe loop above) is reduced by CHECKPOINT_DIVERSION_REDUCTION
+// whenever that staffer's current position is within CHECKPOINT_RADIUS of a built, undestroyed,
+// non-under-construction Checkpoint -- the screening chokepoint genuinely has to be somewhere the
+// staffer actually passes for it to catch anything, same "placed at a chokepoint" framing the task
+// asked for. factions.js's applyUnmetConsequence reuses this same isNearCheckpoint/any-checkpoint-
+// built helper for its own real reduction (see that file).
+export const CHECKPOINT_RADIUS = 3.5; // grid cells -- same ballpark as DOG_RANGE(2.5)*K9_UPGRADE_RANGE_MULT(1.3), a screening post covers a real but modest area, not the whole map
+export const CHECKPOINT_DIVERSION_REDUCTION = 0.65; // 65% cut to a corrupt staffer's per-siphon amount while screened
+
+// True if `structures` contains at least one built (not destroyed, not under construction)
+// Checkpoint within CHECKPOINT_RADIUS of (x, y). Exported so factions.js can reuse the exact same
+// spatial check for its own unmet-demand consequence reduction, rather than re-deriving it.
+export function isNearCheckpoint(structures, x, y) {
+  for (const s of structures) {
+    if (s.kind !== 'checkpoint' || s.destroyed || s.underConstruction) continue;
+    if (Math.hypot(s.x - x, s.y - y) <= CHECKPOINT_RADIUS) return true;
+  }
+  return false;
+}
+
 // Called once per world tick (world.js). Cheap: iterates the roster (small) and, at most once
 // every CORRUPTION_ROLL_INTERVAL_TICKS, the (small) eligible set -- never the full citizen store
 // except via the one population-gate count and the per-active-bribe lookups below, both bounded
@@ -659,7 +731,12 @@ export function tickStaffCorruption(world) {
       continue;
     }
     if (world.currentTick % CORRUPTION_DIVERSION_INTERVAL_TICKS === 0) {
-      const amt = Math.min(world.scrap, CORRUPTION_DIVERSION_AMOUNT);
+      // Checkpoint (see isNearCheckpoint/CHECKPOINT_DIVERSION_REDUCTION above): a corrupt staffer
+      // physically standing/patrolling within a Checkpoint's screening radius right now gets a
+      // real, measured cut to what they're able to quietly siphon this tick.
+      const screened = isNearCheckpoint(world.structures, store.x[idx], store.y[idx]);
+      const baseAmt = Math.min(world.scrap, CORRUPTION_DIVERSION_AMOUNT);
+      const amt = screened ? baseAmt * (1 - CHECKPOINT_DIVERSION_REDUCTION) : baseAmt;
       if (amt > 0) {
         world.scrap -= amt;
         world.finance.corruptionLoss = (world.finance.corruptionLoss || 0) + amt;

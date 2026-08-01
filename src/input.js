@@ -6,8 +6,8 @@ import { isToolUnlocked, researchNodeForTool } from './research.js';
 import { nearestAliveAttacker } from './siege.js';
 import { issueMoveOrder, issueAttackOrder } from './draft.js';
 import { forceJob, ForceJobKind, pickClosestUndraftedCitizen } from './forcejob.js';
-import { roomContaining } from './rooms.js';
-import { MESS_CLEAN_THRESHOLD } from './jobs.js';
+import { roomContaining, roomCentroid } from './rooms.js';
+import { MESS_CLEAN_THRESHOLD, JobState } from './jobs.js';
 
 // Draft/undraft order-issuing (draft.js): right-click auto-detects move-vs-attack by what's under
 // the cursor -- an attacker within this pick radius (world units, same ballpark as _pickCitizen's
@@ -132,6 +132,36 @@ export const TOOLS = [
   // producer, distinct from the resource-node scrap-harvest loop. Every unshifted/shift-digit key
   // up through '&' is claimed above, '*' (shift+8) is the next free one.
   { key: '*', tool: 'farm_plot', label: 'Farm Plot', cost: BUILD_COST.farm_plot },
+  // Checkpoint (security.js's isNearCheckpoint, factions.js's applyUnmetConsequence): a screening
+  // chokepoint that reduces corrupt-staff diversion and unmet-clique-demand consequence severity
+  // for whoever passes within its radius. Every unshifted/shift-digit key up through '*' is
+  // claimed above, '(' (shift+9) is the next free one.
+  { key: '(', tool: 'checkpoint', label: 'Checkpoint', cost: BUILD_COST.checkpoint },
+  // Restaurant (PA real Restaurant+Bakery retail-income analog, see economy.js's BUILD_COST
+  // comment / jobs.js's Restaurant job): a staffed standing-income producer. Every unshifted/
+  // shift-digit key up through '(' is claimed above, ')' (shift+0) is the next free one.
+  { key: ')', tool: 'restaurant', label: 'Restaurant', cost: BUILD_COST.restaurant },
+  // Cinema (real PA DLC prefab catalog's WatchCinema provider, see jobs.js's tickCinemas/
+  // CINEMA_RANGE): a group-broadcast entertainment building -- refills Social for every citizen
+  // within range at once when it shows, reusing the same range-iteration mechanism siege.js's
+  // Tesla Coil already uses for its chain-to-everyone-in-range hit. Every digit/letter and every
+  // easy shifted-digit/punctuation key is claimed above -- '_' (shift+-) is free since '-'/'='/'+'
+  // are reserved for speed control but checked in _onKey AFTER this table (see that comment
+  // above), and '_' itself is never intercepted there.
+  { key: '_', tool: 'cinema', label: 'Cinema', cost: BUILD_COST.cinema },
+  // Power Exporter (power.js's tickPowerExporters, real PA DLC Transformer/PowerExportMeter/
+  // QuickConnect mechanic): sells genuine spare power-grid capacity for a slow scrap trickle,
+  // never power a real consumer needs. Every unshifted/shift-digit/shift-punctuation key is
+  // claimed above -- SHIFT+E ('E', mnemonic "Export") is free: lowercase 'e' is already the
+  // Recycling Garage (Ethanol) hotkey, but the uppercase-panel-shortcut convention (SHIFT+D/M/B/
+  // T/F/P/G/N/I above) hasn't claimed 'E' yet.
+  { key: 'E', tool: 'power_exporter', label: 'Power Exporter', cost: BUILD_COST.power_exporter },
+  // Shower (citizens.js's HYGIENE_DECAY, RimWorld QoL-mod-style hygiene need -- see jobs.js's
+  // findNearestShower/JobState.Bathing): a cheap needs-refill fixture like Fitness Station, but
+  // only functions once connected to the water grid (a pump/pipe run to it). Every unshifted/
+  // shift-digit/shift-punctuation/uppercase-panel-shortcut key up through 'E' is claimed above --
+  // SHIFT+H ('H', mnemonic "Hygiene") is the next free one.
+  { key: 'H', tool: 'shower', label: 'Shower (needs a water connection)', cost: BUILD_COST.shower },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -157,6 +187,15 @@ export class InputController {
     this.marqueeActive = false;
     this.marqueeStartWorldX = 0; this.marqueeStartWorldY = 0;
     this.marqueeEndWorldX = 0; this.marqueeEndWorldY = 0;
+    // Mass-designation marquee mode (forcejob.js's RimWorld-Prioritize-mod-style drag-designate,
+    // see _onDown/_onUp/_massDesignate below): a SECOND marquee behavior layered onto the exact
+    // same drag gesture the citizen-multi-select marquee above already uses, switched on by
+    // holding Alt when the drag STARTS. Tracked as its own flag rather than a new tool so it
+    // still only ever runs with the Select tool -- Alt+drag on any build tool is untouched, still
+    // paints/places normally. render.js reads this flag too, to color the marquee box differently
+    // while designate mode is armed (see _drawMarquee's doc comment for why Alt was picked over a
+    // dedicated toolbar mode).
+    this._marqueeDesignate = false;
 
     // Right-click order gesture (draft.js): tracks total on-screen movement since a right-
     // mousedown so _onUp can tell an order-issuing click apart from a camera-pan drag -- see
@@ -166,7 +205,7 @@ export class InputController {
     canvas.addEventListener('mousemove', (e) => this._onMove(e));
     canvas.addEventListener('mousedown', (e) => this._onDown(e));
     canvas.addEventListener('mouseup', (e) => this._onUp(e));
-    canvas.addEventListener('mouseleave', () => { this.hoverGridX = null; this.hoverGridY = null; this._painting = false; this._panning = false; this.marqueeActive = false; });
+    canvas.addEventListener('mouseleave', () => { this.hoverGridX = null; this.hoverGridY = null; this._painting = false; this._panning = false; this.marqueeActive = false; this._marqueeDesignate = false; });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault()); // right-drag is pan, not a context menu
     canvas.addEventListener('wheel', (e) => this._onWheel(e), { passive: false });
     window.addEventListener('keydown', (e) => this._onKey(e));
@@ -209,6 +248,7 @@ export class InputController {
     this._touchId = null;
     this._painting = false;
     this.marqueeActive = false;
+    this._marqueeDesignate = false; // touch has no Alt-key equivalent; always plain multi-select
   }
 
   _beginPinch(a, b) {
@@ -358,12 +398,27 @@ export class InputController {
     if (e.button !== 0) return;
 
     if (this.tool === null) {
+      this._updateHover(e);
+      const world = this.getWorld();
+      // Mass-designation mode (forcejob.js, see _massDesignate below): holding Alt when the drag
+      // STARTS switches this from "marquee-select citizens" to "marquee-designate job targets" --
+      // skip _pickCitizen entirely (an Alt+click shouldn't select whatever citizen happens to be
+      // under the cursor, it should always arm the designate drag) and clear any existing
+      // selection immediately so the mode switch reads clearly in the UI the instant it starts.
+      if (e.altKey && world) {
+        this.selectedCitizen = -1;
+        this.selectedCitizens = [];
+        this._marqueeDesignate = true;
+        this.marqueeActive = true;
+        this.marqueeStartWorldX = this.hoverWorldX; this.marqueeStartWorldY = this.hoverWorldY;
+        this.marqueeEndWorldX = this.hoverWorldX; this.marqueeEndWorldY = this.hoverWorldY;
+        return;
+      }
       // Select tool: try an immediate single pick first (this is the existing plain-click path,
       // completely unchanged). Only if that pick lands on empty ground do we arm a possible
       // marquee drag -- if the mouseup never moves it stays a no-op deselect-click, exactly as
       // before this feature existed.
-      this._updateHover(e);
-      const world = this.getWorld();
+      this._marqueeDesignate = false;
       if (world) this._pickCitizen(world);
       this.selectedCitizens = [];
       if (this.selectedCitizen === -1 && world) {
@@ -409,6 +464,8 @@ export class InputController {
     this._painting = false;
     if (this.marqueeActive) {
       this.marqueeActive = false;
+      const wasDesignate = this._marqueeDesignate;
+      this._marqueeDesignate = false;
       const world = this.getWorld();
       const dx = this.marqueeEndWorldX - this.marqueeStartWorldX;
       const dy = this.marqueeEndWorldY - this.marqueeStartWorldY;
@@ -419,6 +476,10 @@ export class InputController {
         const x1 = Math.max(this.marqueeStartWorldX, this.marqueeEndWorldX);
         const y0 = Math.min(this.marqueeStartWorldY, this.marqueeEndWorldY);
         const y1 = Math.max(this.marqueeStartWorldY, this.marqueeEndWorldY);
+        if (wasDesignate) {
+          this._massDesignate(world, x0, y0, x1, y1);
+          return;
+        }
         const picked = [];
         for (let i = 0; i < world.citizens.count; i++) {
           if (!world.citizens.isAliveAt(i)) continue;
@@ -616,6 +677,85 @@ export class InputController {
       return { kind: ForceJobKind.Room, ref: room, x: wx, y: wy };
     }
     return null;
+  }
+
+  // Box variant of _findJobTargetAt above, for the Alt+drag mass-designation marquee (see
+  // _massDesignate below): every valid Force-Job target whose own position falls inside the box,
+  // not just the single nearest one to a point. Same four ForceJobKind categories the single-
+  // click gesture already supports (unclaimed blueprints, resource nodes, messy rooms, unstaffed
+  // workshop stations) -- farm_plot/program-station staffing aren't a ForceJobKind yet (see
+  // forcejob.js's own header comment on its four-kind scope), so a drag over those doesn't pick
+  // them up either; extending ForceJobKind itself would be the natural follow-up if wanted, out
+  // of scope for reusing the existing claim logic as asked.
+  _findJobTargetsInBox(world, x0, y0, x1, y1) {
+    const inBox = (x, y) => x >= x0 && x <= x1 && y >= y0 && y <= y1;
+    const targets = [];
+    for (const s of world.structures) {
+      if (s.destroyed || !inBox(s.x, s.y)) continue;
+      if (s.underConstruction) { targets.push({ kind: ForceJobKind.Blueprint, ref: s, x: s.x, y: s.y }); continue; }
+      if (s.kind === 'workshop' && s.workerId == null) { targets.push({ kind: ForceJobKind.Workshop, ref: s, x: s.x, y: s.y }); continue; }
+    }
+    for (const n of world.resourceNodes) {
+      if (n.depleted || !inBox(n.x, n.y)) continue;
+      targets.push({ kind: ForceJobKind.Node, ref: n, x: n.x, y: n.y });
+    }
+    for (const room of world.rooms) {
+      if ((room.mess || 0) <= MESS_CLEAN_THRESHOLD) continue;
+      const centroid = roomCentroid(room, world.grid);
+      if (!inBox(centroid.x, centroid.y)) continue;
+      targets.push({ kind: ForceJobKind.Room, ref: room, x: centroid.x, y: centroid.y });
+    }
+    return targets;
+  }
+
+  // Mass designation (Alt+drag on the Select tool, see _onDown/_onUp above): the RimWorld
+  // mass-designate-drag pattern this whole feature is modeled on (public reputation of the
+  // GENERAL CONCEPT only, no ported code/text) -- queues a Force Job on every valid target caught
+  // in the box, reusing forceJob's existing per-target claim logic in a loop instead of a single
+  // click target. Each target is assigned to the closest currently-IDLE, undrafted citizen not
+  // already used by an earlier target in this same drag, so N targets and M idle citizens spread
+  // across up to min(N, M) citizens instead of dog-piling every target onto the single closest
+  // one. Deliberately idle-only, unlike a single Force Job click (which DOES interrupt whatever a
+  // citizen is currently doing) -- a drag over a dozen targets yanking a dozen already-working
+  // citizens off their current task would read as a hostile mis-click, not a helpful mass order.
+  // Any targets left over once idle citizens run out are simply not force-assigned this batch --
+  // they're still real, valid targets (unclaimed blueprint/node/messy room/unstaffed workshop),
+  // so the normal autonomous ladder (jobs.js) picks them up the next time someone goes Idle on
+  // their own; nothing is lost, they just don't jump the queue like the ones that got assigned.
+  _massDesignate(world, x0, y0, x1, y1) {
+    const targets = this._findJobTargetsInBox(world, x0, y0, x1, y1);
+    if (targets.length === 0) { this.onToast?.('No valid targets in selection'); return; }
+    // Real bug found and fixed during this feature's own verification, not pre-existing behavior
+    // this pass relied on: a Guard/Sniper/K9Handler/Monitor holding their post never runs
+    // jobs.js's tickJobs Idle branch at all (world.isStaffOnDutyAt(i) short-circuits tickJobs
+    // before the state read -- see jobs.js's own `if (staffOnDuty(i)) continue;`), but their
+    // jobState SoA slot is simply left at its default 0 (Idle) forever since they never entered
+    // any job state through that branch. Without this exclusion, a forced job silently assigned
+    // to on-duty staff would sit unconsumed forever (tryClaimForcedJob, the only place that ever
+    // clears it, is inside the very branch staff never reach) -- same latent trap the single-
+    // click Force Job gesture in _tryIssueOrder/pickClosestUndraftedCitizen has today, just far
+    // more likely to bite here since a mass-designate drag sweeps up whoever LOOKS idle in bulk
+    // rather than one player-chosen citizen at a time.
+    const idleIds = [];
+    for (let i = 0; i < world.citizens.count; i++) {
+      if (!world.citizens.isAliveAt(i) || world.citizens.isDraftedAt(i)) continue;
+      if (world.isStaffOnDutyAt(i)) continue;
+      if (world.citizens.jobState[i] !== JobState.Idle) continue;
+      idleIds.push(world.citizens.id[i]);
+    }
+    const used = new Set();
+    let assigned = 0;
+    for (const target of targets) {
+      if (used.size >= idleIds.length) break;
+      const available = idleIds.filter(id => !used.has(id));
+      const closestId = pickClosestUndraftedCitizen(world, available, target.x, target.y);
+      if (closestId == null) continue;
+      if (forceJob(world, closestId, target.kind, target.ref)) {
+        used.add(closestId);
+        assigned++;
+      }
+    }
+    this.onToast?.(`Mass designate: ${assigned}/${targets.length} target${targets.length > 1 ? 's' : ''} assigned`);
   }
 
   _pickCitizen(world) {

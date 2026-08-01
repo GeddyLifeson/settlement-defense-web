@@ -1327,3 +1327,221 @@ programmatically rather than eyeballing. Found two real, concrete issues:
 11-tool category gap confirmed closed via the same programmatic diff check (0 missing), and the
 cache-buster confirmed working live (`document.querySelector('script[src*="game.bundle.js"]').src`
 showed a real `?t=<timestamp>` in a fresh tab). Not yet committed as of this handoff update.
+
+## POWER EXPORTER (real PA DLC mechanic ported): DONE
+
+Implemented the Transformer/PowerExportMeter/QuickConnect idea from the round-9 research notes: a
+new `power_exporter` buildable (`economy.js` cost 42, `input.js` hotkey SHIFT+E, `main.js`
+category `power` + blurb, `render.js` transformer-pylon Canvas shape with a pulsing scrap-arrow
+that only lights up while actively exporting) that converts a power segment's GENUINE spare
+capacity into a slow scrap trickle.
+
+Core logic lives in `power.js`'s new `tickPowerExporters` (called from `world.js`'s `tick()`
+right after `tickBatteries`, same calling shape, reports through `world.addScrap(amt,
+'powerExport')` -> new `finance.powerExportScrap` bucket). Deliberately reuses
+`computeSegmentLoads` (exported for this purpose -- the exact same raw capacity-minus-load number
+`tickBatteries` already uses to gate battery charging) rather than a parallel calculation, so the
+exporter can never claim capacity a battery or a real consumer would have gotten instead. Two
+stacked safety margins: `POWER_EXPORT_RESERVE_MARGIN` (1.5 raw capacity units held back untouched
+before anything is exportable) and `POWER_EXPORT_FRACTION`/`POWER_EXPORT_MAX_PER_TICK` (only a
+small slice of what's left, capped, converts per tick -- a real trickle, not a drain). Recomputed
+fresh every tick (not cached), so a new downstream consumer's load shows up in the very next
+tick's export calculation, no lag.
+
+**Verified live via `window.__debug`** (generator capacity=5, one exporter, `POWER_EXPORT_
+RESERVE_MARGIN=1.5`, `POWER_EXPORT_FRACTION=0.12`, `POWER_EXPORT_MAX_PER_TICK=0.15`):
+- Generator + wire + exporter, no other consumers: surplus = 5 - 0 - 1.5 = 3.5, export hits the
+  0.15/tick cap immediately; `finance.powerExportScrap` accumulated exactly 45.0 over 300 ticks
+  (0.15 x 300), confirmed via direct scrap-bucket read, not just `world.scrap` (which also moves
+  from harvesting).
+- Added 3 turrets on the same segment (load=3): surplus = 5 - 3 - 1.5 = 0.5, export rate dropped
+  to exactly 0.06 (0.5 x 0.12) -- a genuine proportional SHRINK, not a binary cutoff.
+- Added a 4th turret (load=4): surplus = 5 - 4 - 1.5 = -0.5, export rate dropped to exactly 0,
+  `finance.powerExportScrap` delta over the next 100 ticks was 0.0, and
+  `isSegmentOverloadedAt(structures, wireX, wireY)` stayed `false` throughout -- confirms it never
+  causes or contributes to an overload, it just goes quiet.
+- `TOOLS.filter(t=>t.tool && !(t.tool in TOOL_CATEGORY))` and the same check against `TOOL_BLURB`
+  both returned `[]` -- the toolbar-completeness gate from the note at the top of this file, still
+  clean after this addition.
+
+**A live collision hazard worth remembering**: this pass landed while at least 3-4 OTHER
+concurrent agents were actively editing this same tree (a restaurant buildable, a checkpoint
+buildable, a cinema buildable, an epidemic/sickness system, a supplies/tainted-delivery system,
+and an augments system all landed mid-session). Three of those left `build.py`'s `ORDER` array
+missing their new file (`epidemic.js`→fixed by another agent before this pass finished,
+`supplies.js` and `augments.js`→both fixed live during this pass's own verification, since a
+broken bundle blocked testing the Power Exporter itself). If a future session hits a
+`ReferenceError: initXxx is not defined` or similar at `new SimWorld`, check `build.py`'s `ORDER`
+for a missing entry before assuming it's a logic bug -- this is now the second session in a row
+this exact failure mode has shown up from a concurrent multi-agent pass.
+
+**Verified**: `python build.py` clean, zero duplicate top-level declarations across the full
+bundle, zero console errors placing/ticking the new buildable, and `tests/run.html` at 88/89 (the
+one failure, "the builder gains construction skill on completion", is unrelated to this pass --
+not touched by any file this change modified -- and was already failing before this work started,
+almost certainly from one of the concurrent sessions' work; worth a fresh look next session).
+
+## MASS-DESIGNATION MARQUEE (this session): DONE
+
+User's ask, explicitly scoped as "inspired by the general concept" of a well-known RimWorld QoL
+mod category (mass-designate-via-drag), described from public reputation only, built entirely
+original: a way to Force-Job-designate many targets at once via the same marquee-drag gesture
+`input.js` already uses for multi-citizen select, instead of clicking each target one at a time
+via `forcejob.js`'s existing single-click Force Job gesture.
+
+**Mode switch, design call**: held **Alt** at the moment the drag starts (`_onDown`, Select tool
+only) switches the SAME drag gesture from "marquee-select citizens" to "marquee-designate job
+targets" -- tracked as a new `this._marqueeDesignate` instance flag on `InputController`, not a
+separate toolbar tool, so it's still only ever reachable with the Select tool and never collides
+with build-tool painting. Chose a modifier over a dedicated toolbar entry because every other
+"alternate behavior on the same gesture" precedent in this codebase (`_tryIssueOrder`'s
+drafted-vs-undrafted auto-detect, `power_switch`'s click-to-toggle) already reads context off the
+existing gesture rather than adding a mode button, and the toolbar is already extremely dense
+(50+ single-key entries, see `TOOLS` in `input.js`).
+
+**Implementation** (`src/input.js`): `_onDown`'s Select-tool branch checks `e.altKey` first --
+if set, skips `_pickCitizen` entirely (an Alt+click shouldn't select whoever's under the cursor)
+and arms the marquee with `_marqueeDesignate = true`. `_onUp` branches on that flag once the drag
+exceeds the existing 0.5-world-unit click-vs-drag threshold, calling the new `_massDesignate`
+instead of the existing citizen-picking loop. `_findJobTargetsInBox` is the box variant of the
+existing single-point `_findJobTargetAt` -- same four `ForceJobKind` categories the single-click
+Force Job gesture already supports (unclaimed blueprint, resource node, messy room, unstaffed
+workshop); farm_plot/program-station staffing are NOT `ForceJobKind` values yet (see forcejob.js's
+own header), so a drag over those doesn't pick them up either -- extending `ForceJobKind` itself
+would be the natural follow-up, out of scope for reusing the existing claim logic as asked.
+`_massDesignate` calls `forceJob`/`pickClosestUndraftedCitizen` (both from forcejob.js, unmodified)
+in a loop over every target found, assigning each to the closest currently-**idle**, undrafted
+citizen not already used by an earlier target in the same drag (so N targets and M idle citizens
+spread across up to min(N,M) citizens instead of dog-piling one citizen). Deliberately idle-only,
+unlike a single Force Job click (which DOES interrupt whatever a citizen is doing) -- a drag over a
+dozen targets yanking a dozen already-working citizens off their current task would read as a
+hostile mis-click. Leftover targets beyond the idle-citizen count are simply left unforced; the
+normal autonomous ladder (jobs.js) picks them up the next time someone goes Idle on their own,
+nothing is lost. `render.js`'s `_drawMarquee` reads the same flag to color the box orange
+(`#ffb020`, matching forcejob's own pending-order "!" glyph color) instead of the default cyan, so
+the mode reads clearly at a glance while dragging.
+
+**Real bug found and fixed during this pass's own verification, not pre-existing behavior this
+pass relied on**: a Guard/Sniper/K9Handler/Monitor holding their post (`world.isStaffOnDutyAt(i)`)
+never runs `jobs.js`'s `tickJobs` Idle branch at all (staff are skipped before the state read), but
+their `jobState` SoA slot is simply left at its default `0` (Idle) forever since they never enter
+any job state through that branch -- they LOOK idle by every check `_massDesignate`'s naive
+idle-scan was using. Without excluding them, a forced job assigned to on-duty staff would sit
+unconsumed forever (`tryClaimForcedJob`, the only place that ever clears `forcedJobKind`, lives
+inside the very branch staff never reach) -- caught live: a first test run over a box containing 4
+staff citizens left all 4 with `forcedJobKind` set and `jobState` still `0` after 87 real ticks,
+zero blueprints ever got claimed. This same latent trap exists in the single-click Force Job
+gesture too (`_tryIssueOrder`/`pickClosestUndraftedCitizen` don't filter staff either) but is far
+more likely to bite via a mass-designate drag, which sweeps up whoever LOOKS idle in bulk rather
+than one player-chosen citizen at a time. Fixed by adding `world.isStaffOnDutyAt(i)` to
+`_massDesignate`'s own idle-candidate filter; the single-click gesture's version of this same bug
+was left alone (out of scope for this task, worth a follow-up).
+
+**Verified**: `python build.py` clean, zero duplicate top-level declarations across the full
+bundle, zero console errors. Direct-logic test via `window.__debug` (`input._massDesignate(world,
+x0,y0,x1,y1)` called directly): 7 blueprints + resource nodes spread across a 40x40 map, all
+correctly force-assigned to 19 distinct idle non-staff citizens in one call (confirmed by distinct
+`claimedBy` ids after ticking), 5 genuinely on-duty staff correctly excluded from the idle pool.
+Real end-to-end gesture test via actual DOM `MouseEvent` dispatch on the canvas (`mousedown` with
+`altKey:true` -> `mousemove` -> `mouseup`, exercising the real registered event listeners, not
+calling internal methods directly) over 3 fresh blueprints: `input.selectedCitizens` stayed empty
+(confirms designate mode never falls back to citizen-select) and 3 distinct citizens (ids 6/7/8)
+each claimed a different blueprint over the following ticks. A real plain (non-Alt) drag over a
+cluster of citizens, tested via the `computer` tool's actual pixel-space mouse drag (coordinate
+mapping confirmed via a calibration click first -- this environment's screenshot/computer-tool
+pixel space is scaled ~0.8167x relative to the page's CSS px, `1568x703` vs `1920x861` at
+`devicePixelRatio:2`, consistent with this file's other computer-tool caveats), selected the
+correct 5 citizens with `_marqueeDesignate` correctly false throughout -- confirms the existing
+citizen-marquee-select gesture is completely unaffected outside Alt-drag. `tests/run.html`: 121/122
+passing, the one failure (`"the builder gains construction skill on completion"`) is the same
+pre-existing, already-documented failure from the Power Exporter pass immediately above --
+unrelated to this pass, not touched by either file this change modified (`input.js`/`render.js`).
+Not yet committed as of this handoff update.
+
+## ROUND 10 (this session): backlog clear + "mod-concept" adaptation wave, DONE
+
+User asked for everything remaining in round-9's backlog EXCEPT zombie mode, then separately asked
+to "adapt" well-known RimWorld/Prison Architect mod CONCEPTS (not their actual content -- see the
+explicit copyright line held throughout this conversation: reading a base game's own shipped Defs/
+Lua is fine since it's shipped as plaintext for modding, but a third-party mod is an independent
+copyrighted work licensed for use *within* that game, not for extraction into an unrelated project,
+regardless of scale or popularity). Two waves, 16 agents total, all landed:
+
+**Backlog wave (9 items, all done)**: gang territory/lieutenant/graffiti refinement (`factions.js`),
+tropical-fever proximity-spread epidemic distinct from `sickness.js` (`epidemic.js`, new),
+tainted-shipment/contraband-in-supply mechanic (`supplies.js`, new), Cinema group-broadcast
+buildable, Restaurant retail-income loop, power-export economy (Power Exporter buildable),
+Checkpoint (reduces corrupt-staff/faction-consequence severity near it), Security Response
+Coverage Plan (3rd plan, reinforcement call-in), resource-gift event + a rare/long-cooldown
+map-wide hazard condition distinct from weather -- both in `weather.js`.
+
+**Mod-concept-adaptation wave (5 items, all done, each an ORIGINAL implementation inspired only by
+a mod's public reputation, never its actual code/text/art)**: a pre-game "Customize Starting
+Colonists" screen (re-roll/rename via the real existing backstory/trait roll functions, no direct
+stat-value editing), an Ammo + Suppression combat layer (`security.js`/`siege.js` -- weapons now
+consume a global ammo pool replenished by Armories, sustained fire suppresses accuracy), a Hygiene
+need tied to the existing water-plumbing grid (`water.js`), a mass-designation Alt-drag marquee
+mode (queues Force Job on every valid target in the drag box, not just one), and a Scavenged
+Augments system (`augments.js` -- purchasable permanent stat trade-offs, distinct from the earned
+`ranks.js` ladder).
+
+**Two real cross-agent caching bugs found and fixed during final integration, same root-cause
+class as `index.html`'s already-fixed bug**: `tests/run.html` also had zero cache-busting on its
+dynamic test-file imports (fixed, with a hard-learned caveat: `harness.js` must stay a bare,
+non-cache-busted import since every test file also imports it via a bare specifier -- cache-busting
+it separately would split it into two module instances with two independent `results` arrays and
+silently break `renderSummary`), AND `run.html`'s own outer HTML had no cache-buster on ITS OWN
+url either -- meaning even after fixing the inner imports, a bare navigation to `/tests/run.html`
+could still execute a stale cached copy of the page that never runs the fix at all (a genuine
+bootstrapping problem: a fix living inside a document doesn't help if the document itself is
+served stale). Added a self-redirect-once-with-a-fresh-marker script, though note this can't
+retroactively un-stick an ALREADY-cached copy from before the fix landed -- if `tests/run.html`
+ever seems to be running stale content again, manually append `?t=<anything>` to force a real
+fetch. **This same "outer HTML page itself might be served stale, not just its sub-resources"
+risk plausibly also still affects `index.html`** even after its earlier fix (that fix handles
+`game.bundle.js` staying fresh, but if the browser has an old cached copy of `index.html` itself
+from before that fix was added, a bare navigation could still run pre-fix HTML) -- worth actively
+checking for, not assuming fixed, in a fresh browsing session.
+
+**Real, legitimate bug found and fixed via this pass's manual test-suite audit** (not a caching
+issue): `tests/vehicles.test.js`'s "the builder gains construction skill on completion" assertion
+predated the backstory-skill-penalty feature (some backstories now legitimately start
+`skillConstruction` negative as a real tradeoff, added earlier this session) -- the test asserted
+`skillConstruction > 0` when it should have asserted the value *increased from wherever it
+started*. Fixed the test, not the game logic. Confirmed fixed: **122/122 tests passing** once the
+caching bugs above were also worked around.
+
+**CRITICAL -- unresolved balance regression, top priority to investigate next.** A hands-off soak
+(zero player building beyond the starting structures) now falls in ~10-12k ticks across 3 seeds
+(42/12345/777), down hard from the established 22-36k baseline -- confirmed reproducible, not
+noise, and confirmed NOT a crash (zero exceptions thrown in any run). Investigated one real,
+confirmed contributing cause and fixed it: `security.js`'s new ammo system gave a hands-off colony
+(which never builds an Armory) literally zero ammo regen once its `AMMO_BASE_CAPACITY` (40) ran
+dry, permanently crippling turrets/guards to their heavy dry-fire penalty for the entire rest of
+the game -- added a small always-on `AMMO_BASE_PRODUCTION = 0.02` trickle independent of Armory
+count. **This fix alone was NOT sufficient** -- re-soaked after it, survival barely moved
+(11.3k/10.2k/11.7k, essentially unchanged). A deeper tick-by-tick trace (seed 42) shows the real
+proximate cause is different and more systemic: **`world.scrap` collapses to 0 by tick ~2000-3000
+(wave 2-3!) and stays there for most of the game**, and **`world.unrestTier` hits its max (3) by
+tick 5000 and never recovers**, creating a real compounding spiral (low wellbeing -> max unrest
+-> rate penalties + violence events -> citizens work/harvest slower -> economy stays broke ->
+needs stay unmet -> wellbeing stays low -> unrest stays maxed). This round landed an unusually
+large number of independent PASSIVE scrap-drain and rate-penalty systems in one merge -- faction
+unmet-demand scrap loss, corrupt-staff diversion, anomaly-pressure scrap drain, tainted-shipment
+effects, epidemic/sickness work-rate penalties, gang food-fight damage -- each individually
+soak-tested and verified correct IN ISOLATION by its own agent, but nothing tested their combined
+effect on one colony at once. This is the same "systemic compounding" bug class this session has
+hit and fixed before (the wanderer-join population-cap bug from an earlier round, the
+`colonyStrength` sqrt-diminishing-returns fix) -- **next step**: instrument a hands-off soak to
+log exactly which drain source(s) account for the scrap collapse and the earliest unrest-tier-3
+trigger (the tick-1000/2000/3000 snapshots already show scrap hitting 0 well before wave 3, i.e.
+before combat losses alone plausibly explain it -- check the passive drains first, not combat
+damage), then retune whichever constant(s) are actually dominant rather than guessing further.
+Do NOT assume the ammo fix above resolved this -- it's real and correct but demonstrably
+insufficient alone.
+
+**Final integration for round 10**: clean rebuild, zero duplicate top-level declarations, 122/122
+tests passing (once caching quirks above are worked around), zero console errors and zero
+exceptions across multiple full soak tests. NOT yet committed as of this handoff update pending
+the balance investigation above -- or committed anyway with this regression clearly flagged,
+depending what's decided when this is picked back up.

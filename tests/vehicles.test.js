@@ -56,6 +56,12 @@ section('Structure blueprint-construction lifecycle', () => {
     'an idle citizen with a nearby unclaimed blueprint and no urgent needs claims it (SeekingBuild or Building, depending on arrival distance)');
   assert(bp.claimedBy === idOf(ci), 'the blueprint records claimedBy as the citizen who took the job');
 
+  // Some backstories (see backstories.js) deliberately start skillConstruction below 0 as a real
+  // tradeoff against a favored skill elsewhere -- so "gains skill" has to mean "increased from
+  // wherever it started", not "ended up positive". Capture the pre-build value rather than
+  // assuming it's 0.
+  const skillBeforeBuild = store.skillConstruction[ci];
+
   for (let t = 0; t < 500 && bp.underConstruction; t++) {
     tickJobs(store, zones, () => false, world.structures, [], idOf, null, world);
   }
@@ -63,7 +69,8 @@ section('Structure blueprint-construction lifecycle', () => {
   assert(bp.buildProgress >= 1, 'buildProgress is >= 1 once construction completes');
   assert(bp.claimedBy === null, 'claimedBy is released back to null once construction completes');
   assert(store.jobState[ci] === JobState.Idle, 'the citizen returns to Idle once their blueprint finishes');
-  assert(store.skillConstruction[ci] > 0, 'the builder gains construction skill on completion');
+  assert(store.skillConstruction[ci] > skillBeforeBuild,
+    `the builder gains construction skill on completion (${skillBeforeBuild.toFixed(4)} -> ${store.skillConstruction[ci].toFixed(4)})`);
 });
 
 section('Structure blueprint: claimedBy prevents a second citizen from double-claiming', () => {

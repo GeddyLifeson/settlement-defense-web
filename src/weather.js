@@ -255,6 +255,7 @@ const EVENT_WEIGHTS = [
   ['blight', 1],
   ['trader', 1],
   ['massfire', 0.3], // deliberately the rarest -- see tryMassFireEvent below, a genuine catastrophe tier
+  ['resourcegift', 1], // real RimWorld ResourcePodCrash, baseChance 1.0, no cooldown -- see tryResourceGiftEvent below
 ];
 
 export function tickRandomEvents(world) {
@@ -272,6 +273,7 @@ export function tickRandomEvents(world) {
   if (kind === 'wanderer') tryWandererEvent(world);
   else if (kind === 'blight') tryBlightEvent(world);
   else if (kind === 'massfire') tryMassFireEvent(world);
+  else if (kind === 'resourcegift') tryResourceGiftEvent(world);
   else tryTraderEvent(world);
 }
 
@@ -328,6 +330,33 @@ export function tryBlightEvent(world) {
   const text = node.depleted
     ? 'Blight wipes out a resource node'
     : "Blight reduces a resource node's yield";
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+  return true;
+}
+
+const GIFT_GAIN_MIN = 0.4; // fraction of remaining headroom (maxAmount - amount) granted
+const GIFT_GAIN_MAX = 0.7;
+
+/** Picks a random resource node with headroom left (not already at maxAmount) and grants it a
+ *  windfall -- a chunk of its remaining headroom, same shape as tryBlightEvent's loss roll but
+ *  inverted (headroom filled instead of yield destroyed). Can fully replenish a depleted node
+ *  (real RimWorld ResourcePodCrash: a literal fresh resource drop, not just "the existing node
+ *  grows a bit"), un-depleting it if so. Returns true if a node was actually granted a gift. */
+export function tryResourceGiftEvent(world) {
+  const candidates = world.resourceNodes.filter(n => n.amount < n.maxAmount);
+  if (candidates.length === 0) return false;
+
+  const node = candidates[Math.floor(world.rng() * candidates.length)];
+  const wasDepleted = node.depleted;
+  const frac = GIFT_GAIN_MIN + world.rng() * (GIFT_GAIN_MAX - GIFT_GAIN_MIN);
+  node.amount = Math.min(node.maxAmount, node.amount + (node.maxAmount - node.amount) * frac);
+  if (wasDepleted && node.amount > 0) node.depleted = false;
+
+  const text = wasDepleted
+    ? 'A resource windfall replenishes a depleted node'
+    : "A resource windfall boosts a node's yield";
   world.milestoneLog.push({ tick: world.currentTick, text });
   if (world.milestoneLog.length > 20) world.milestoneLog.shift();
   world.onRandomEvent?.(text);
@@ -542,4 +571,83 @@ export function tickLightningStorm(world) {
   if (world.rng() < LIGHTNING_STRIKE_CHANCE_GROUND) {
     pushLightningMilestone(world, 'Lightning strikes open ground');
   }
+}
+
+// ---------------------------------------------------------------- toxic fallout hazard (map-wide)
+// Real RimWorld anchor: ToxicFallout / VolcanicWinter -- both are sustained, MAP-WIDE CONDITIONS
+// (durationRange in ticks, applied colony-wide the whole time they're up) rather than an instant
+// one-off roll, which is what every entry in EVENT_WEIGHTS above resolves as in a single tick, and
+// they're gated by a much longer refire gap than an ordinary incident (real Defs pair a long
+// `daysBetweenIncidentsRange`/century-tier rarity with an early-game grace period so a fresh
+// colony never sees one in its first hours) -- distinct in BOTH trigger cadence and effect from
+// every WeatherKind above (those are frequent, short-lived, and hook accuracy/move-speed; this is
+// rare, long-lived, late-game-only, and hooks the zone-refill-rate knob instead). Ported here as a
+// temporary reduction to how fast zones refill citizen needs (jobs.js's REFILL_RATE, see
+// hazardRefillMult below and its call sites in jobs.js) -- the real ToxicFallout kills outdoor
+// plant life; this project has no farming system to reuse, so "the settlement's zones stop
+// replenishing needs as well while toxic air blankets the map" is the honest genre-neutral
+// equivalent, same "port the mechanism, not the flavor" framing as the rest of this file.
+export const HAZARD_EARLIEST_TICK = 12000;    // real "not before" grace -- roughly a third into a
+                                               // healthy 22-36k-tick game, so it reads as late-game
+export const HAZARD_MIN_REFIRE_TICKS = 9000;  // long cooldown between occurrences -- VolcanicWinter-
+                                               // tier rarity, not a frequent weather-cycle-style repeat
+const HAZARD_CHECK_INTERVAL = 500;  // same roll cadence as tickRandomEvents above
+const HAZARD_CHANCE = 0.03;         // per check, once eligible -- rarer than any single EVENT_WEIGHTS entry
+const HAZARD_DURATION_MIN = 1200;   // ~2 min at 10Hz
+const HAZARD_DURATION_MAX = 3000;   // ~5 min at 10Hz
+export const HAZARD_REFILL_MULT = 0.55; // real, measurable colony-wide zone-refill penalty while active
+
+/** Call once from SimWorld's constructor (or lazily from tickHazardCondition on first tick) to
+ *  seed initial state -- same pattern as initWeather above. _hazardLastEndTick starts at -Infinity
+ *  so the very first refire-gap check (currentTick - lastEndTick) reads as "long enough ago". */
+export function initHazard(world) {
+  world._hazardActive = false;
+  world._hazardTicksRemaining = 0;
+  world._hazardLastEndTick = -Infinity;
+}
+
+/** True while the toxic-fallout hazard is active. */
+export function isHazardActive(world) {
+  return !!world._hazardActive;
+}
+
+/** Map-wide zone-refill-rate multiplier -- 1 (no effect) when no hazard is active, otherwise the
+ *  real penalty above. Read fresh every tick by jobs.js's REFILL_RATE call sites, same
+ *  no-caching shape as weatherAccuracyMult/weatherMoveSpeedMult. */
+export function hazardRefillMult(world) {
+  return isHazardActive(world) ? HAZARD_REFILL_MULT : 1;
+}
+
+/** Advances an active hazard's duration and ends it once expired (recording the end tick for the
+ *  next refire-gap check), or -- while no hazard is active -- rolls a new one once BOTH the
+ *  earliest-tick grace period and the minimum-refire gap since the last occurrence have elapsed.
+ *  Call once per tick from SimWorld.tick(), alongside the other weather/event systems. */
+export function tickHazardCondition(world) {
+  if (world._hazardActive == null) initHazard(world);
+
+  if (world._hazardActive) {
+    world._hazardTicksRemaining--;
+    if (world._hazardTicksRemaining <= 0) {
+      world._hazardActive = false;
+      world._hazardLastEndTick = world.currentTick;
+      const text = 'Toxic fallout clears -- zones return to their normal refill rate';
+      world.milestoneLog.push({ tick: world.currentTick, text });
+      if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+      world.onRandomEvent?.(text);
+    }
+    return;
+  }
+
+  if (world.currentTick < HAZARD_EARLIEST_TICK) return;
+  if (world.currentTick - world._hazardLastEndTick < HAZARD_MIN_REFIRE_TICKS) return;
+  if (world.currentTick % HAZARD_CHECK_INTERVAL !== 0) return;
+  if (world.rng() >= HAZARD_CHANCE) return;
+
+  world._hazardActive = true;
+  world._hazardTicksRemaining = HAZARD_DURATION_MIN
+    + Math.floor(world.rng() * (HAZARD_DURATION_MAX - HAZARD_DURATION_MIN));
+  const text = 'Toxic fallout blankets the settlement -- zones refill needs more slowly until it clears';
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
 }

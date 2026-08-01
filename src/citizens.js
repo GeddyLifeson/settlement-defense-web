@@ -5,6 +5,8 @@ import { roomContaining, RoomRole } from './rooms.js';
 import { randomBackstory, randomPassions } from './backstories.js';
 import { isWateredAt } from './water.js';
 import { StaffRoleKind } from './core.js';
+import { epidemicHungerMultFor, epidemicRestMultFor } from './epidemic.js';
+import { augmentHungerMultFor, augmentRestMultFor, augmentBreakThresholdOffsetFor } from './augments.js';
 
 export const CitizenFlags = Object.freeze({
   None: 0,
@@ -15,6 +17,10 @@ export const CitizenFlags = Object.freeze({
                     // flag gates. A drafted citizen is pulled out of jobs.js's autonomous
                     // priority state machine entirely (jobs.js checks this flag first thing in
                     // tickJobs) and only moves/fights on a direct player order.
+  Lieutenant: 1 << 4, // factions.js's clique lieutenant hierarchy -- one member per ~5-8
+                       // clique-mates promoted, purely a status flag (no distinct AI behavior of
+                       // its own yet), surfaced in the inspector/debug the same way OnBreak/
+                       // Downed/Drafted already are.
 });
 
 const DOWNED_RECOVERY_RATE = 0.0015; // per tick, passive -- no dedicated first-aid job yet
@@ -91,6 +97,37 @@ const HYDRATION_BURST_REFILL = 0.2; // per tick while on/adjacent to a watered t
 // tuned against PA's raw per-use numbers, which don't translate directly onto this project's
 // per-tick decay model anyway.
 export const EXERCISE_DECAY = 0.00045; // same order of magnitude as HUNGER_DECAY/REST_DECAY/HYDRATION_DECAY
+
+// ---------------------------------------------------------------- hygiene (RimWorld QoL-mod-style need)
+// A citizen needs to bathe periodically using a water-connected fixture, same "genre-neutral
+// plumbing dependency" precedent water.js already established for Hydration/the Food-Recreation
+// zone refill bonus/the Recycling Center throughput bonus. Decay pinned to the SAME order of
+// magnitude as this codebase's other slow-decaying needs (Rest/Hydration/Exercise all sit at
+// 0.00045, Hunger at 0.0005) rather than inventing a new curve -- this is deliberately the least
+// original number in this whole feature, matched proportionally on purpose per the task brief.
+// Refill is entirely job-driven (jobs.js's SeekingHygiene/Bathing states, walking a citizen to the
+// new Shower buildable), same active-use shape as Exercise's Fitness Station rather than
+// Hydration's passive isWateredAt burst -- a shower is something you have to actually go use, not
+// ambient plumbing you happen to be standing near. The plumbing dependency is real and load-bearing
+// here in a way Hydration's is not: Hydration refills from ANY watered tile just by standing on it,
+// but a Shower only refills Hygiene if that specific Shower structure is itself connected to the
+// water grid (see jobs.js's findNearestShower / the Bathing job's isWateredAt gate) -- an
+// unconnected Shower is inert furniture, exactly the "real plumbing-dependency, not just a flat
+// furniture piece" the task calls for.
+export const HYGIENE_DECAY = 0.00045; // same order of magnitude as REST_DECAY/HYDRATION_DECAY/EXERCISE_DECAY
+
+// ---------------------------------------------------------------- low-hygiene consequence
+// Real, measurable consequence distinct from the mood hit every need already contributes via the
+// avgNeed average below: low hygiene raises a citizen's chance of coming down sick (see
+// sickness.js's tickSickness, which reads HYGIENE_SICK_THRESHOLD/HYGIENE_SICK_CHANCE_MULT below
+// directly off this citizen's current store.hygiene value) rather than inventing a parallel penalty
+// system -- reuses the sickness mechanic that already exists and is already tracked/visible
+// (store.sickSeverity, the sick mood event, SICK_WORK_SPEED_MULT) instead of a disconnected new one.
+export const HYGIENE_SICK_THRESHOLD = 0.3; // "poor hygiene" band -- roughly matches HUNGER_SPIRAL_THRESHOLD's
+                                            // own "near-empty" framing, scaled up since hygiene refills in one
+                                            // shower trip rather than needing a sustained near-zero spell
+export const HYGIENE_SICK_CHANCE_MULT = 3; // real, meaningful multiplier on sickness.js's base per-check
+                                            // onset chance -- not a token nudge
 
 // ---------------------------------------------------------------- hunger spiral (malnutrition)
 // RimWorld's real malnutrition ramps hungerRateFactorOffset 0.5 -> 0.6 across its severity stages
@@ -221,6 +258,7 @@ export class CitizenStore {
     this.social = new Float32Array(capacity).fill(1);
     this.hydration = new Float32Array(capacity).fill(1); // PA-style Hydration need, see HYDRATION_DECAY above
     this.exercise = new Float32Array(capacity).fill(1); // PA-style Exercise need, see EXERCISE_DECAY above
+    this.hygiene = new Float32Array(capacity).fill(1); // RimWorld QoL-mod-style Hygiene need, see HYGIENE_DECAY above
     this.mood = new Float32Array(capacity).fill(1);
     this.health = new Float32Array(capacity).fill(1);
     // Vest armor (siege.js's CITIZEN_VEST_ARMOR_RATING/resolveCitizenArmorRoll, economy.js
@@ -241,6 +279,29 @@ export class CitizenStore {
     // back would be circular; keep the two values in sync by hand if either ever changes.
     this.sickSeverity = new Float32Array(capacity);
     this._sickOffset = new Uint16Array(capacity);
+    // Epidemic (epidemic.js -- real Prison Architect tropicalfever_settings.txt data): a
+    // DIFFERENT, worse, rarer mechanic than sickness.js above -- proximity-spread contagion with
+    // 2-stage severity, not an independent-per-citizen roll. epidemicStage: 0 = healthy, 1 =
+    // Early, 2 = Mid (epidemic.js's EpidemicStage). epidemicStageTicks: ticks spent in the
+    // CURRENT stage, drives the Early->Mid->recovered progression. epidemicImmuneUntil: a tick
+    // value -- immune to new infection while world.currentTick < this (Medical Bed/Vaccine/
+    // natural-recovery immunity, see epidemic.js). _epidemicOffset staggers the per-citizen
+    // check the same way _sickOffset above does; hardcoded modulus (40) rather than importing
+    // epidemic.js's EPIDEMIC_CHECK_INTERVAL constant here, same circularity-avoidance convention
+    // _sickOffset's doc comment above already established (epidemic.js also imports addMoodEvent
+    // from this file) -- keep the two values in sync by hand if either ever changes.
+    this.epidemicStage = new Uint8Array(capacity);
+    this.epidemicStageTicks = new Float32Array(capacity);
+    this.epidemicImmuneUntil = new Float32Array(capacity);
+    this._epidemicOffset = new Uint16Array(capacity);
+    // Tainted-supply dependency (supplies.js -- ported from Prison Architect's real
+    // contraband.lua, see that file's header comment): 0 = unaffected, >0 = currently dependent,
+    // same shape as sickSeverity just above. _taintOffset staggers the per-citizen mood-refresh
+    // check the same way _sickOffset does for sickness (onset itself isn't staggered -- it's
+    // driven directly by supplies.js's delivery-consumption roll, not an independent per-citizen
+    // timer, see that file's tickSupplyDelivery).
+    this.dependencySeverity = new Float32Array(capacity);
+    this._taintOffset = new Uint16Array(capacity);
     this.moodEvents = new Array(capacity).fill(null); // index -> array of {magnitude, startTick, durationTicks, stackKey}, see addMoodEvent
     this.breakSeverity = new Uint8Array(capacity); // index into BREAK_TIERS, set when a break triggers
     this._breakTicksRemaining = new Float32Array(capacity); // MTB-style: break runs its own course instead of clearing on mood alone
@@ -252,7 +313,30 @@ export class CitizenStore {
     // A plain Uint8Array like breakSeverity above -- 7 tiers fits comfortably, no need for a
     // wider type.
     this.citizenRank = new Uint8Array(capacity);
+    // Scavenged Augments (augments.js -- purchased, not earned, distinct from citizenRank above,
+    // see that file's header comment). Bitmask, one bit per augments.js AUGMENTS index -- same
+    // compact convention as CitizenFlags/breakSeverity, plenty of headroom for the handful of
+    // augment types this feature defines.
+    this.augmentMask = new Uint8Array(capacity);
     this._staffCooldown = new Float32Array(capacity); // used by siege.js tickStaffCombat
+    // Suppression (this session's ammo/suppression pass, see siege.js's tickSuppression/
+    // suppressionAccuracyMult): 0-1, builds while a citizen is actually being hit by attacker fire
+    // (siege.js's tickAttackerVsCitizens increments it directly on a landed roll against them) and
+    // decays on its own during a lull (tickSuppression, called once per world tick). Read by
+    // tickStaffCombat to penalize a suppressed Guard/Sniper's own return-fire accuracy -- sustained
+    // incoming fire measurably makes a defender worse at shooting back, not just chip their health.
+    // Every citizen carries this (not just staff) since a plain citizen getting shot at is exactly
+    // as suppressed in principle -- staff are simply the only role that currently reads it back out
+    // for a gameplay effect, matching the task's "(or citizen)" scope note.
+    this.suppression = new Float32Array(capacity);
+    // Out-of-ammo fallback flag (security.js's Armory ammo economy, see siege.js's
+    // AMMO_PER_SHOT_GUARD/AMMO_PER_SHOT_SNIPER + GUARD_FALLBACK_* constants): 0 = fighting with a
+    // loaded weapon at full stats, 1 = the settlement's ammo stockpile couldn't cover this
+    // Guard/Sniper's last shot attempt, so tickStaffCombat downgraded them to the melee fallback
+    // (short range, reduced damage/penetration, zero ammo cost) rather than disabling them
+    // outright. Purely a debug/UI-readable mirror of tickStaffCombat's own per-tick decision, not
+    // itself authoritative -- re-derived fresh every tick, never read as an input anywhere.
+    this.outOfAmmo = new Uint8Array(capacity);
     this._jobRef = {}; // used by jobs.js: index -> blueprint/resource-node object currently targeted
     // First-aid tending (jobs.js's JobState.SeekingTend/Tending, see TEND_RECOVERY_RATE above).
     // tendClaimedBy: -1 = no tender assigned, else the tender's stable id (idOf(i), NOT an index
@@ -353,6 +437,7 @@ export class CitizenStore {
     // "born" at tick 0 together.
     this.age[i] = 2000 + rng() * 22000;
     this.hunger[i] = 1; this.rest[i] = 1; this.social[i] = 1; this.hydration[i] = 1; this.exercise[i] = 1;
+    this.hygiene[i] = 1;
     this.mood[i] = 1; this.health[i] = 1;
     this.flags[i] = CitizenFlags.None;
     this.hasVest[i] = 0;
@@ -360,6 +445,12 @@ export class CitizenStore {
     this._hungerSpiralTicks[i] = 0;
     this.sickSeverity[i] = 0;
     this._sickOffset[i] = Math.floor(rng() * 50); // keep '50' in sync with sickness.js's SICKNESS_CHECK_INTERVAL
+    this.epidemicStage[i] = 0;
+    this.epidemicStageTicks[i] = 0;
+    this.epidemicImmuneUntil[i] = 0;
+    this._epidemicOffset[i] = Math.floor(rng() * 40); // keep '40' in sync with epidemic.js's EPIDEMIC_CHECK_INTERVAL
+    this.dependencySeverity[i] = 0;
+    this._taintOffset[i] = Math.floor(rng() * 300); // keep '300' in sync with supplies.js's DEPENDENCY_CHECK_INTERVAL
     this.moodEvents[i] = [];
     this.breakSeverity[i] = 0;
     this._breakTicksRemaining[i] = 0;
@@ -369,6 +460,7 @@ export class CitizenStore {
     this.skillCombat[i] = backstory.skillCombatStart ?? 0;
     this.skillConstruction[i] = backstory.skillConstructionStart ?? 0;
     this.citizenRank[i] = 0; // ranks.js RANKS[0] 'Settler' -- everyone starts here
+    this.augmentMask[i] = 0; // augments.js -- no augments installed at spawn
     const passions = randomPassions(rng, backstory);
     this.passionCombat[i] = passions.combat;
     this.passionConstruction[i] = passions.construction;
@@ -408,6 +500,19 @@ export class CitizenStore {
 
   isSickAt(i) {
     return this.sickSeverity[i] > 0;
+  }
+
+  // Epidemic (epidemic.js) -- distinct from isSickAt above. stage > 0 means Early or Mid.
+  isEpidemicInfectedAt(i) {
+    return this.epidemicStage[i] > 0;
+  }
+
+  isEpidemicImmuneAt(i, currentTick) {
+    return this.epidemicImmuneUntil[i] > currentTick;
+  }
+
+  isDependentAt(i) {
+    return this.dependencySeverity[i] > 0;
   }
 
   isOnBreakAt(i) {
@@ -596,8 +701,13 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
     }
     const spiralMult = 1 + (HUNGER_SPIRAL_MAX_MULT - 1) * (store._hungerSpiralTicks[i] / HUNGER_SPIRAL_RAMP_TICKS);
 
-    store.hunger[i] = Math.max(0, store.hunger[i] - HUNGER_DECAY * (trait?.hungerMult ?? 1) * spiralMult);
-    store.rest[i] = Math.max(0, store.rest[i] - REST_DECAY * (trait?.restMult ?? 1));
+    // Epidemic (epidemic.js) need-decay escalation -- real PA tropicalfever_settings.txt
+    // multipliers (Food 1x->2.5x, Sleep 2x->5x across Early->Mid stage), stacked multiplicatively
+    // on top of the trait/spiral multipliers already here, same "extra term in the chain" shape
+    // every other per-citizen rate modifier in this file uses. Returns 1 (no-op) for a healthy
+    // citizen, so this is a byte-for-byte no-op until epidemic.js actually infects someone.
+    store.hunger[i] = Math.max(0, store.hunger[i] - HUNGER_DECAY * (trait?.hungerMult ?? 1) * spiralMult * epidemicHungerMultFor(store, i) * augmentHungerMultFor(store, i));
+    store.rest[i] = Math.max(0, store.rest[i] - REST_DECAY * (trait?.restMult ?? 1) * epidemicRestMultFor(store, i) * augmentRestMultFor(store, i));
     store.social[i] = Math.max(0, store.social[i] - SOCIAL_DECAY * (1 - staffFulfillment));
 
     // Hydration (see the HYDRATION_* doc comment above): slow drain like every other need, but a
@@ -617,18 +727,29 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
     // Hunger/Rest/Social precedent more closely than Hydration's passive-plumbing one.
     store.exercise[i] = Math.max(0, store.exercise[i] - EXERCISE_DECAY);
 
-    // Hydration/Exercise fold into the SAME eased need-average as hunger/rest/social, not a
-    // separate raw additive nudge -- an earlier version of this added a small unbounded
+    // Hygiene (see HYGIENE_DECAY doc comment above): pure ambient drain here, same job-driven
+    // refill shape as Exercise (jobs.js's SeekingHygiene/Bathing states walk a citizen to the new
+    // Shower buildable) rather than Hydration's passive isWateredAt burst -- see HYGIENE_DECAY's
+    // doc comment for why the plumbing dependency has to live on the Shower structure itself
+    // rather than "any watered tile", unlike Hydration.
+    store.hygiene[i] = Math.max(0, store.hygiene[i] - HYGIENE_DECAY);
+
+    // Low-hygiene consequence (see HYGIENE_SICK_THRESHOLD/HYGIENE_SICK_CHANCE_MULT doc comment
+    // above): sickness.js's tickSickness reads store.hygiene directly off this same array, so
+    // nothing further is needed here beyond keeping the field itself up to date every tick.
+
+    // Hydration/Exercise/Hygiene fold into the SAME eased need-average as hunger/rest/social, not
+    // a separate raw additive nudge -- an earlier version of this added a small unbounded
     // (hydration-0.5)*weight term directly to mood every tick, same shape as the room-quality term
     // below, but unlike a room (which simply has no term at all until the citizen stands inside
     // one) an un-plumbed colony has EVERY citizen's hydration pinned at 0 for the entire early
     // game, so that raw term permanently dragged mood toward 0 tick after tick with nothing to
     // counteract it -- caught in that pass's soak test (population collapsed from 24 to 3 by tick
     // ~9000 on a fresh Calm colony with no pump built yet). Folding it into avgNeed instead means
-    // it only pulls mood toward a lower *target* (proportionally diluted 1-in-5 now that Exercise
-    // is included, was 1-in-4), which the existing 0.05 easing already keeps gentle -- same bounded
+    // it only pulls mood toward a lower *target* (proportionally diluted 1-in-6 now that Hygiene
+    // is included, was 1-in-5), which the existing 0.05 easing already keeps gentle -- same bounded
     // behavior as hunger/rest/social, no separate uncapped accumulation path.
-    const avgNeed = (store.hunger[i] + store.rest[i] + store.social[i] + store.hydration[i] + store.exercise[i]) / 5;
+    const avgNeed = (store.hunger[i] + store.rest[i] + store.social[i] + store.hydration[i] + store.exercise[i] + store.hygiene[i]) / 6;
 
     // Stacking mood events (RimWorld "Thought" mechanic, see addMoodEvent above): each live
     // event's magnitude decays linearly to zero over its duration. RimWorld recomputes mood fresh
@@ -672,7 +793,7 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
     // MentalBreakThreshold) applied on top of whatever the base constant currently is -- read
     // fresh each tick from the trait object rather than baked into the constant, so this stays
     // correct no matter how BREAK_MOOD_THRESHOLD itself gets tuned.
-    const effBreakThreshold = BREAK_MOOD_THRESHOLD + (trait?.breakThresholdOffset ?? 0);
+    const effBreakThreshold = BREAK_MOOD_THRESHOLD + (trait?.breakThresholdOffset ?? 0) + augmentBreakThresholdOffsetFor(store, i);
 
     // Break severity tiers with MTB-style recovery (see BREAK_TIERS above): a break, once
     // triggered, counts down its own tier duration instead of clearing the instant mood recovers

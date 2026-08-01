@@ -107,6 +107,58 @@ export const BUILD_COST = {
   // a combat or utility structure -- the real payoff is the ongoing tended cycle, not the
   // placement itself.
   farm_plot: 16,
+  // Restaurant (Prison Architect real prefab catalog's Restaurant+Bakery combo -- Fridge/Cooker/
+  // DoughMixer/DisplayCounter/ShopCounter/CakeStand consolidated into ONE representative
+  // buildable, same consolidation precedent as Fitness Station standing in for PA's whole gym-
+  // equipment catalog above): a staffed station generating steady scrap "retail income" once a
+  // citizen mans it, distinct from Farm Plot's renewable-tending loop and Workshop's raw-input
+  // conversion chain -- see jobs.js's Restaurant job for the no-raw-input, staffed-for-a-trickle
+  // shape (closest existing precedent is Recycling Center's passive-but-staffed-for-a-bonus
+  // pattern, adapted here to require staffing rather than just existing unstaffed). Priced in the
+  // same staffed-producer tier as Workshop (40) / Recycling Center (55), between the two since it
+  // needs a worker (unlike Recycling Center) but has no raw-scrap input cost to net against
+  // (unlike Workshop).
+  restaurant: 46,
+  // Checkpoint (real PA DLC prefab catalog: ScannerMachine/MetalDetector/CheckPoint, reskinned
+  // with zero carceral framing -- a security screening chokepoint, not a prison search station).
+  // See security.js's isNearCheckpoint/CHECKPOINT_DIVERSION_REDUCTION and factions.js's
+  // CHECKPOINT_CONSEQUENCE_REDUCTION for the real mechanical hook: reduces a corrupt staffer's
+  // scrap diversion and a rival clique's unmet-demand consequence severity, but only for whoever
+  // actually passes within its radius. Priced in the same cheap single-purpose-counter-buildable
+  // tier as Rat Trap (10)/Stabilizer (18)/Lightning Rod (14) -- it does nothing against attackers,
+  // purely a corruption/unrest-management tool.
+  checkpoint: 16,
+  // Cinema (real PA DLC prefab catalog: WatchCinema provider, see jobs.js's tickCinemas/
+  // CINEMA_RANGE for the group-broadcast mechanic this buildable actually runs). Priced above
+  // plain Recreation-zone furniture (bed 8/table 6/fitness_station 9) since it's a broadcast
+  // building that benefits every citizen within a 10-tile radius simultaneously rather than one
+  // occupant at a time -- closer to Tesla Coil's (40) "hits everyone in range" niche than a
+  // single-citizen fixture, but priced below it since Cinema is passive furniture with no combat
+  // upkeep. Landed in the same tier as Watchtower (20)/Recycling Center-adjacent buildings.
+  cinema: 26,
+  // Power Exporter (real PA DLC mechanic -- Transformer/PowerExportMeter/QuickConnect -- see
+  // power.js's tickPowerExporters for the full surplus-gated trickle mechanic): converts a
+  // segment's genuine spare generator capacity into scrap. Priced in the same power-utility tier
+  // as Battery (50) -- a real strategic investment requiring an already-built surplus of
+  // generation to pay off at all, not a cheap add-on like Wire/Power Switch.
+  power_exporter: 42,
+  // Scavenged Augments (augments.js -- inspired by the well-known "installable permanent
+  // stat-boost with a real tradeoff" CONCEPT from RimWorld's bionic/cybernetic mod category,
+  // reskinned to this project's own SEA:R scavenged-tech aesthetic, see that file's header
+  // comment). A per-CITIZEN purchase like Vest above, not a structure -- world.buyAugment spends
+  // one of these once per citizen per augment slot. Priced above Vest (10) since each carries a
+  // real permanent upside, roughly in the trap/turret combat-structure tier for the combat rig,
+  // the garage/workshop mid tier for the work-speed servo-limb (a genuine economic investment,
+  // not a cheap add-on), and between the two for the endurance rig.
+  augment_combat: 26,
+  augment_work: 30,
+  augment_endurance: 22,
+  // Shower (citizens.js's HYGIENE_DECAY, RimWorld QoL-mod-style hygiene need -- see jobs.js's
+  // findNearestShower/JobState.Bathing): a cheap needs-refill fixture, same tier as Fitness
+  // Station (9)/Bed (8) -- but unlike either of those, it does nothing at all unless it's also
+  // connected to the water grid (an extra pump/pipe run cost the player has to actually pay for
+  // it to function, not baked into this price).
+  shower: 8,
 };
 
 export const SCRAP_PER_KILL = 4;
