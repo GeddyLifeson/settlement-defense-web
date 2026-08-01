@@ -111,7 +111,11 @@ export function isWateredAt(structures, x, y) {
 // non-conductors when hashing the layout, so a newly-frozen (or newly-thawed) tile changes the
 // hash on its own, no separate cache-bust needed.
 const FREEZE_CHECK_INTERVAL = 100; // ~10s at 10Hz -- rolled periodically, not every tick
-const FREEZE_TIER_TICKS = [0, 400, 900]; // ticks of continuous Cold before each tier below kicks in
+// Exported: weather.js reuses this exact set of duration breakpoints for its own Cold-tier-gated
+// systems (Construction/Gardening work-rate reduction, Deep-Freeze-linked flu risk) so every
+// "how far into a sustained Cold snap are we" tier check in this codebase agrees on the same three
+// breakpoints, rather than each file inventing its own slightly-different escalation schedule.
+export const FREEZE_TIER_TICKS = [0, 400, 900]; // ticks of continuous Cold before each tier below kicks in
 const FREEZE_TIER_CHANCE = [0.07, 0.17, 0.30]; // real PA numbers, escalating with Cold duration
 export const FREEZE_ADJACENT_BONUS = 0.05; // real PA number
 
@@ -121,6 +125,21 @@ function freezeTierChance(coldStreakTicks) {
     if (coldStreakTicks >= FREEZE_TIER_TICKS[i]) chance = FREEZE_TIER_CHANCE[i];
   }
   return chance;
+}
+
+// Valve/pump freeze split (real Prison Architect pipefreezingsystem.txt-adjacent data, see task
+// brief): valves freeze much more readily than plain pipe (0.35/0.65/0.90 vs pipe's 0.07/0.17/0.30
+// above) and pumps freeze ONLY at the top Cold-duration tier, at a flat 0.50 -- distinct shapes,
+// not just scaled-up pipe numbers. This project has no 'valve' structure kind (grep confirms only
+// 'pipe' and 'pump' exist as water-network buildables -- see input.js's tool list/BUILD_COST), so
+// only the pump half of this split is actually wireable; the valve chance table is intentionally
+// NOT added since there's no structure kind for it to key off (would be dead code with nothing to
+// ever match it). If a Valve buildable is added later, this is the spot to add a
+// VALVE_FREEZE_CHANCE = [0.35, 0.65, 0.90] table and a matching kind check below.
+const PUMP_FREEZE_CHANCE_L3 = 0.50; // real PA number -- pumps never freeze at tier 1/2, only tier 3
+
+function pumpFreezeChance(coldStreakTicks) {
+  return coldStreakTicks >= FREEZE_TIER_TICKS[2] ? PUMP_FREEZE_CHANCE_L3 : 0;
 }
 
 /** Call once per tick from SimWorld.tick(), after weather.js's tickWeather so world.weather /
@@ -149,7 +168,9 @@ export function tickPipeFreezing(world) {
   for (const s of world.structures) {
     if (s.kind !== 'pipe' && s.kind !== 'pump') continue;
     if (s.destroyed || s.underConstruction || s.frozen) continue;
-    let roll = chance;
+    // Pump uses its own distinct L3-only chance table (see pumpFreezeChance above); pipe keeps
+    // the existing, already-verified-correct per-tier chance unchanged.
+    let roll = s.kind === 'pump' ? pumpFreezeChance(streak) : chance;
     const tx = Math.floor(s.x), ty = Math.floor(s.y);
     for (const [dx, dy] of WATER_NEIGHBORS) {
       if (frozenKeys.has((tx + dx) * WATER_TILE_STRIDE + (ty + dy))) { roll += FREEZE_ADJACENT_BONUS; break; }

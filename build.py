@@ -12,9 +12,9 @@ SRC = ROOT / "src"
 # Dependency order matters for classic scripts (no hoisting across files at parse time in a
 # way that matters here since everything runs top-to-bottom, but keep it topological anyway).
 ORDER = [
-    "core.js", "assets.js", "traits.js", "backstories.js", "grid.js", "zones.js", "economy.js", "research.js", "resources.js", "vehicles.js",
+    "core.js", "assets.js", "traits.js", "backstories.js", "inspirations.js", "grid.js", "zones.js", "economy.js", "research.js", "resources.js", "vehicles.js",
     "rooms.js", "ranks.js", "power.js", "water.js", "augments.js", "citizens.js", "coverageplans.js", "security.js", "siege.js", "relationships.js", "director.js",
-    "schedule.js", "sickness.js", "epidemic.js", "supplies.js", "programs.js", "jobs.js", "drones.js", "forcejob.js", "draft.js", "factions.js", "worldmap.js", "fire.js", "weather.js", "rats.js", "anomaly.js", "grading.js", "audio.js", "metaprogress.js", "grants.js", "world.js", "render.js", "input.js", "tutorial.js", "main.js",
+    "schedule.js", "sickness.js", "epidemic.js", "supplies.js", "programs.js", "jobs.js", "drones.js", "forcejob.js", "draft.js", "factions.js", "worldmap.js", "fire.js", "weather.js", "rats.js", "anomaly.js", "grading.js", "audio.js", "metaprogress.js", "grants.js", "quests.js", "world.js", "render.js", "input.js", "tutorial.js", "main.js",
 ]
 
 IMPORT_RE = re.compile(r"^\s*import\s+[\s\S]*?from\s+['\"][^'\"]*['\"];?\s*$", re.MULTILINE)

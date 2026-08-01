@@ -1,7 +1,7 @@
 // Ported from SD.Presentation/SimWorldHost.cs -- owns one SimWorld, steps it at a fixed
 // 10 Hz tick rate independent of frame rate, and renders every frame.
 import { SimWorld, STARTER_NAMES } from './world.js';
-import { Renderer } from './render.js';
+import { Renderer, ROLE_COLOR, CITIZEN_SKIN } from './render.js';
 import { InputController, TOOLS } from './input.js';
 import { topbarIconUri } from './assets.js';
 import { isNight, ScheduleOverride, SCHEDULE_OVERRIDE_LABELS } from './schedule.js';
@@ -21,10 +21,11 @@ import { WEAPON_TIERS, WeaponTier, fireCorruptStaff, forceCorruptionRoll, forceA
 import { forceHeldCitizenCrisis } from './siege.js';
 import { buildCost } from './economy.js'; // vest purchase price display, see the inspector's Buy Vest button
 import { canInspectDelivery, canSearchDelivery } from './supplies.js'; // tainted-delivery banner gating, see updateSupplyAlert below
-import { AggressionPreset, makeRng, rngInt } from './core.js';
+import { AggressionPreset, makeRng, rngInt, StaffRoleKind } from './core.js';
 import { STORYTELLERS } from './director.js';
 import {
   RESEARCH_NODES, isNodeUnlocked, isToolUnlocked, researchBlockedReason, tryResearch,
+  colonyTechLevelFromState, TECH_LEVEL_NAMES,
 } from './research.js';
 import {
   initOnboarding, maybeStartTutorial, startTutorial, stopTutorial, isTutorialActive,
@@ -37,6 +38,7 @@ import {
   INVEST_COST, INVEST_SHORT_TICKS, INVEST_LONG_TICKS, INVEST_SHORT_PAYOUT, INVEST_LONG_PAYOUT,
 } from './grants.js';
 import { computeCitizenUnrestScore } from './citizens.js';
+import { QuestKind, offerQuest, acceptQuest, declineQuest } from './quests.js';
 import {
   COVERAGE_PLAN_DEFS, COVERAGE_PLAN_ORDER, isPlanActive, purchaseCoveragePlan,
   isCallInReady, callInLiveCount, triggerCallIn,
@@ -423,6 +425,10 @@ const CATEGORY_ICON = {
 const TOOL_CATEGORY = {
   wall: 'defense', turret: 'defense', fence: 'defense', trap: 'defense',
   floodlight: 'defense', tesla: 'defense', watchtower: 'defense', lightning_rod: 'defense',
+  // Turret tiers + mortar + trap variety (siege.js's TURRET_TIERS/TRAP_KINDS) -- same defense
+  // bucket as the buildables they're variants of.
+  turret_mini: 'defense', turret_auto: 'defense', turret_sniper: 'defense', mortar: 'defense',
+  trap_spike: 'defense', trap_explosive: 'defense',
   generator: 'power', generator_coal: 'power', generator_wind: 'power', generator_solar: 'power',
   generator_nuclear: 'power', waste_storage: 'power', wire: 'power', battery: 'power',
   power_switch: 'power', pump: 'power', pipe: 'power',
@@ -505,6 +511,13 @@ const TOOL_BLURB = {
   restaurant: 'Staffed retail counter -- once a citizen mans it, produces a steady scrap trickle from visitor traffic each service cycle. No raw material needed to start a cycle, and no research gate.',
   cinema: 'Group-broadcast entertainment. Every ~30s it airs a showing that refills Social for every citizen within a 10-tile radius at once -- no worker needed, no walking to a specific tile.',
   power_exporter: 'Sells genuine spare generator capacity on its segment for a slow scrap trickle. Never touches power real consumers need -- the trickle shrinks or stops the moment the surplus does.',
+  turret_mini: 'Cheap, short-range gun. The affordable early pick -- less range and damage than a plain Turret, but costs less too.',
+  turret_auto: 'Longer range and harder-hitting than a plain Turret, but cannot engage a target that gets inside its minimum range.',
+  turret_sniper: 'Longest range, one heavy shot, slow reload -- and the most expensive ammo of any turret tier. The answer to armor at long range.',
+  mortar: 'Indirect fire -- very long range, high damage, slow reload. Inaccurate: the shell scatters around its target rather than guaranteeing a hit.',
+  trap_spike: 'Cheap melee deadfall. Equally (mediocre) effective against every attacker type -- no rock-paper-scissors matchup, just a cheap single-target hit.',
+  trap_explosive: 'Costlier than a plain Trap, but its blast catches every attacker in a small radius, not just the one that triggered it.',
+  demolish: 'Click an existing structure to remove it. An unfinished blueprint is cancelled outright; a finished structure refunds half its scrap cost.',
 };
 
 // ---- DOM scaffold (header + collapsible body: Select shortcut, category grid, item list, detail) ----
@@ -515,6 +528,7 @@ toolbarEl.innerHTML = `
   </div>
   <div id="toolbar-body">
     <div id="toolbar-select-btn" class="tool-btn select-btn"><span><span class="key">[0]</span>Select</span></div>
+    <div id="toolbar-demolish-btn" class="tool-btn demolish-btn"><span><span class="key">[X]</span>Demolish</span></div>
     <div id="toolbar-categories"></div>
     <div id="toolbar-items"></div>
     <div id="toolbar-detail"></div>
@@ -531,6 +545,16 @@ let tbDetailTool = null; // currently-detailed tool string, or null (item list, 
 document.getElementById('toolbar-select-btn').addEventListener('click', () => {
   if (!world) return;
   input.setTool(null);
+});
+
+// Demolish (explicit project-owner ask): a dedicated always-visible top-level button, same
+// treatment as Select above -- both are structure-INTERACTION tools rather than buildables, so
+// neither fits (or needs) the category->items->detail hierarchy the rest of the palette uses.
+// Still also a real TOOLS entry (input.js, key 'X') so it gets a working hotkey and shows up in
+// the Keybindings reference panel automatically, same as every other tool.
+document.getElementById('toolbar-demolish-btn').addEventListener('click', () => {
+  if (!world) return;
+  input.setTool('demolish');
 });
 
 document.getElementById('toolbar-collapse-btn').addEventListener('click', (e) => {
@@ -638,6 +662,7 @@ function researchNodeForToolLocal(tool) {
 let tbLastSyncedTool; // undefined on purpose: forces one real sync pass on the very first frame
 function syncToolbarHighlight() {
   document.getElementById('toolbar-select-btn')?.classList.toggle('active', input.tool === null);
+  document.getElementById('toolbar-demolish-btn')?.classList.toggle('active', input.tool === 'demolish');
 
   // Follow a hotkey (or a New Game reset) that changed input.tool from outside this panel's own
   // clicks -- jump the category/item/detail view to match, so pressing a hotkey is just as
@@ -685,6 +710,8 @@ document.getElementById('btn-programs').addEventListener('click', () => togglePr
 document.getElementById('btn-programs-close').addEventListener('click', () => toggleProgramsPanel(false));
 document.getElementById('btn-grants').addEventListener('click', () => toggleGrantsPanel());
 document.getElementById('btn-grants-close').addEventListener('click', () => toggleGrantsPanel(false));
+document.getElementById('btn-quests').addEventListener('click', () => toggleQuestsPanel());
+document.getElementById('btn-quests-close').addEventListener('click', () => toggleQuestsPanel(false));
 document.getElementById('btn-coverage').addEventListener('click', () => toggleCoveragePlansPanel());
 document.getElementById('btn-coverage-close').addEventListener('click', () => toggleCoveragePlansPanel(false));
 document.getElementById('btn-drones').addEventListener('click', () => toggleDronesPanel());
@@ -798,6 +825,7 @@ syncMuteButton();
 //                     hotkeys documented across input.js/main.js; nothing here is rebindable.
 const HIGHCONTRAST_KEY = 'settlement-defense-highcontrast';
 const UISCALE_KEY = 'settlement-defense-uiscale';
+const UISCALE_AUTO_KEY = 'settlement-defense-uiscale-auto'; // '1'/'0'; unset (null) defaults to auto ON
 
 const settingsEl = document.getElementById('settings');
 const settingsVolumeEl = document.getElementById('settings-volume');
@@ -806,6 +834,7 @@ const settingsAggressionEl = document.getElementById('settings-aggression');
 const settingsStorytellerEl = document.getElementById('settings-storyteller');
 const settingsDifficultyNoteEl = document.getElementById('settings-difficulty-note');
 const settingsHighContrastEl = document.getElementById('settings-highcontrast');
+const settingsUiScaleAutoEl = document.getElementById('settings-uiscale-auto');
 const settingsTextSizeEl = document.getElementById('settings-textsize');
 const settingsTextSizeValEl = document.getElementById('settings-textsize-val');
 const settingsKeybindsEl = document.getElementById('settings-keybinds');
@@ -845,6 +874,7 @@ function renderSettings() {
 
   // Accessibility
   settingsHighContrastEl.checked = renderer.highContrast;
+  settingsUiScaleAutoEl.checked = isUiScaleAuto();
   const scalePct = Math.round(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale') || '1') * 100);
   settingsTextSizeEl.value = String(scalePct);
   settingsTextSizeValEl.textContent = scalePct + '%';
@@ -910,23 +940,82 @@ function setHighContrast(value) {
 settingsHighContrastEl.addEventListener('change', () => setHighContrast(settingsHighContrastEl.checked));
 try { setHighContrast(localStorage.getItem(HIGHCONTRAST_KEY) === '1'); } catch { /* default false */ }
 
-/** Set the --ui-scale CSS custom property (index.html's ".box { transform: scale(...) }") and
- *  persist it. Clamped to the same 85-150% range as the slider. */
-function setUiScale(value) {
-  const clamped = Math.max(0.85, Math.min(1.5, value));
+/** Apply the --ui-scale CSS custom property (index.html's ".box { transform: scale(...) }") and
+ *  update the slider display, without touching persisted state. Clamped to the same 85-150%
+ *  range as the slider, snapped to its 5% step so the slider/value label stay in sync whichever
+ *  path (auto or manual) set it. */
+function applyUiScale(value) {
+  const clamped = Math.round(Math.max(0.85, Math.min(1.5, value)) * 20) / 20; // snap to 5% steps
   document.documentElement.style.setProperty('--ui-scale', String(clamped));
-  try { localStorage.setItem(UISCALE_KEY, String(clamped)); } catch { /* best effort */ }
-}
-settingsTextSizeEl.addEventListener('input', () => {
-  const pct = Number(settingsTextSizeEl.value);
+  const pct = Math.round(clamped * 100);
+  settingsTextSizeEl.value = String(pct);
   settingsTextSizeValEl.textContent = pct + '%';
-  setUiScale(pct / 100);
+  return clamped;
+}
+
+/** Explicit manual override (dragging the slider): applies, persists as the fixed value, and
+ *  switches auto-fit off (a manual choice should stick until the player re-enables auto-fit,
+ *  same "explicit action wins over a passive default" precedent as setHighContrast). */
+function setUiScale(value) {
+  applyUiScale(value);
+  try { localStorage.setItem(UISCALE_KEY, String(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale')))); } catch { /* best effort */ }
+  setUiScaleAuto(false, { skipReapply: true });
+}
+
+function isUiScaleAuto() {
+  try {
+    const v = localStorage.getItem(UISCALE_AUTO_KEY);
+    return v === null ? true : v === '1'; // unset -> auto ON by default
+  } catch { return true; }
+}
+
+/** Compute a sensible UI scale from the current viewport instead of always defaulting to 100%
+ *  -- a laptop-size window gets a smaller UI so panels/text fit without overflow-scrolling, a
+ *  larger/high-res window gets a mildly bigger one. Reference size (1280x800) is this project's
+ *  baseline desktop layout (see the settings-panel/topbar CSS); min() of the two axis ratios so
+ *  a narrow-but-tall or short-but-wide window doesn't get an oversized scale on its cramped axis.
+ *  Snapped to the slider's own 5% step inside applyUiScale so it always lines up with a value the
+ *  player could have chosen manually. */
+function computeAutoUiScale() {
+  const ratio = Math.min(window.innerWidth / 1280, window.innerHeight / 800);
+  return Math.max(0.85, Math.min(1.5, ratio));
+}
+
+function setUiScaleAuto(enabled, opts = {}) {
+  try { localStorage.setItem(UISCALE_AUTO_KEY, enabled ? '1' : '0'); } catch { /* best effort */ }
+  if (enabled && !opts.skipReapply) applyUiScale(computeAutoUiScale());
+  if (settingsUiScaleAutoEl) settingsUiScaleAutoEl.checked = enabled;
+}
+
+settingsUiScaleAutoEl.addEventListener('change', () => {
+  if (settingsUiScaleAutoEl.checked) {
+    setUiScaleAuto(true);
+  } else {
+    // Switching auto off keeps whatever scale was showing (now a manual override) rather than
+    // silently resetting to some other value.
+    setUiScaleAuto(false, { skipReapply: true });
+    try { localStorage.setItem(UISCALE_KEY, String(parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--ui-scale')))); } catch { /* best effort */ }
+  }
 });
+settingsTextSizeEl.addEventListener('input', () => setUiScale(Number(settingsTextSizeEl.value) / 100));
+
+let _uiScaleResizeTimer = null;
+window.addEventListener('resize', () => {
+  if (!isUiScaleAuto()) return;
+  // Debounced -- a window drag fires many resize events, only the settled size matters.
+  clearTimeout(_uiScaleResizeTimer);
+  _uiScaleResizeTimer = setTimeout(() => applyUiScale(computeAutoUiScale()), 150);
+});
+
 (function initUiScale() {
+  if (isUiScaleAuto()) {
+    applyUiScale(computeAutoUiScale());
+    return;
+  }
   try {
     const stored = Number.parseFloat(localStorage.getItem(UISCALE_KEY));
-    if (Number.isFinite(stored)) setUiScale(stored);
-  } catch { /* default 1 via the CSS variable's own default */ }
+    applyUiScale(Number.isFinite(stored) ? stored : 1);
+  } catch { applyUiScale(1); }
 })();
 
 // ---------------------------------------------------------------- minimap
@@ -1724,6 +1813,83 @@ function refreshGrants() {
   renderGrants();
 }
 
+// ---------------------------------------------------------------- field contracts overlay (quests.js)
+// Real-deadline, real-fail-state timed quests -- distinct from the Charter Contracts panel above
+// (charters can never fail). Two grids: pending offers (Accept/Decline) and currently-active
+// contracts (read-only progress). offerQuest() itself is a no-op past MAX_PENDING_OFFERS, so the
+// "Request Contract" button below is safe to spam.
+const questsEl = document.getElementById('quests');
+const questsOffersGridEl = document.getElementById('quests-offers-grid');
+const questsActiveGridEl = document.getElementById('quests-active-grid');
+const questsSubEl = document.getElementById('quests-sub');
+
+function toggleQuestsPanel(force) {
+  const show = force != null ? force : questsEl.classList.contains('hidden');
+  questsEl.classList.toggle('hidden', !show);
+  document.getElementById('btn-quests').classList.toggle('active', show);
+  if (show) renderQuests();
+}
+input.onToggleQuests = () => toggleQuestsPanel();
+input.onCloseQuests = () => toggleQuestsPanel(false);
+
+function questProgressText(q) {
+  const ticksLeft = Math.max(0, (q.deadlineTick ?? 0) - world.currentTick);
+  if (q.kind === QuestKind.SurviveNoLosses) return `${ticksLeft} ticks left, no losses so far`;
+  return `${Math.max(0, Math.round(q.targetScrap - world.scrap))} scrap short, ${ticksLeft} ticks left`;
+}
+
+/** Full rebuild of both grids -- cheap (a handful of small cards, only while open), same
+ *  "cheap enough not to diff" reasoning as renderGrants/renderResearch. */
+function renderQuests() {
+  const state = world.quests;
+  questsOffersGridEl.innerHTML = '';
+  for (const offer of state.offers) {
+    const card = document.createElement('div');
+    card.className = 'node';
+    const expiresIn = Math.max(0, offer.offerExpiresAtTick - world.currentTick);
+    card.innerHTML =
+      `<div class="rname">${offer.label}</div>` +
+      `<div class="badge">+${offer.reward} scrap if completed</div>` +
+      `<div class="desc">${offer.desc}</div>` +
+      `<div class="unlocks">Offer expires in ${expiresIn} ticks if not answered</div>` +
+      `<div class="quest-actions"><button class="accept">Accept</button><button class="decline">Decline</button></div>`;
+    card.querySelector('.accept').addEventListener('click', () => {
+      const res = acceptQuest(world, offer.id);
+      if (!res.ok) showToast(res.reason);
+      renderQuests();
+    });
+    card.querySelector('.decline').addEventListener('click', () => {
+      declineQuest(world, offer.id);
+      renderQuests();
+    });
+    questsOffersGridEl.appendChild(card);
+  }
+  if (state.offers.length === 0) {
+    questsOffersGridEl.innerHTML = '<div class="desc">No contracts currently offered.</div>';
+  }
+
+  questsActiveGridEl.innerHTML = '';
+  for (const q of state.active) {
+    const card = document.createElement('div');
+    card.className = 'node';
+    card.innerHTML =
+      `<div class="rname">${q.label}</div>` +
+      `<div class="badge">+${q.reward} scrap on success</div>` +
+      `<div class="desc">${questProgressText(q)}</div>`;
+    questsActiveGridEl.appendChild(card);
+  }
+  if (state.active.length === 0) {
+    questsActiveGridEl.innerHTML = '<div class="desc">No active contracts.</div>';
+  }
+
+  questsSubEl.textContent = `${state.active.length} active &middot; ${state.offers.length} offered &middot; ${Math.round(world.scrap)} scrap on hand`;
+}
+
+function refreshQuests() {
+  if (questsEl.classList.contains('hidden')) return;
+  renderQuests();
+}
+
 // ---------------------------------------------------------------- fabrication / labor drones overlay (drones.js)
 // One card per DRONE_CATEGORIES entry with a "Fabricate" button (spends scrap immediately, queues
 // gestation -- see queueDroneFabrication's own doc comment for why), plus a live capacity readout
@@ -2128,9 +2294,11 @@ function renderResearch() {
     researchGridEl.appendChild(card);
   }
   const doneCount = RESEARCH_NODES.filter(n => isNodeUnlocked(world.research, n.id)).length;
+  const techTier = colonyTechLevelFromState(world.research);
   researchSubEl.textContent =
     `${Math.floor(world.research.points)} research points banked · ` +
-    `${doneCount} of ${RESEARCH_NODES.length} technologies known`;
+    `${doneCount} of ${RESEARCH_NODES.length} technologies known · ` +
+    `Tech Level: ${TECH_LEVEL_NAMES[techTier] || techTier}`;
 }
 
 // Live progress while the overlay stays open. Structural rebuild only when the unlocked set
@@ -2143,7 +2311,8 @@ function refreshResearchValues() {
   const state = world.research;
   researchSubEl.firstChild && (researchSubEl.textContent =
     `${Math.floor(state.points)} research points banked · ` +
-    `${RESEARCH_NODES.filter(n => isNodeUnlocked(state, n.id)).length} of ${RESEARCH_NODES.length} technologies known`);
+    `${RESEARCH_NODES.filter(n => isNodeUnlocked(state, n.id)).length} of ${RESEARCH_NODES.length} technologies known · ` +
+    `Tech Level: ${TECH_LEVEL_NAMES[colonyTechLevelFromState(state)] || colonyTechLevelFromState(state)}`);
   for (const card of researchGridEl.children) {
     const node = RESEARCH_NODES.find(n => n.id === card.dataset.nodeId);
     if (!node || node.cost === 0 || isNodeUnlocked(state, node.id)) continue;
@@ -2312,6 +2481,9 @@ const FINANCE_CATEGORIES = [
   ['powerExportScrap', '⚡ Power Exporter trickle', 'income'],
   ['otherScrap', '❓ Other', 'income'],
   ['buildSpend', '🔨 Construction spend', 'expense'],
+  ['corruptionLoss', '🕵 Corrupt-staff diversion', 'expense'],
+  ['ratLoss', '🐀 Rat/vermin theft', 'expense'],
+  ['factionLoss', '🤝 Clique demand losses', 'expense'],
 ];
 
 /** Rebuild the category rows + redraw the chart. Cheap enough (7 rows, one small canvas) to
@@ -2323,11 +2495,12 @@ function renderFinance() {
   // Summed from FINANCE_CATEGORIES' own 'income' rows rather than hardcoding each key -- keeps
   // this total correct automatically as categories get added (factionScrap, see factions.js).
   const totalIncome = FINANCE_CATEGORIES.filter(([, , cls]) => cls === 'income').reduce((sum, [key]) => sum + f[key], 0);
+  const totalExpense = FINANCE_CATEGORIES.filter(([, , cls]) => cls === 'expense').reduce((sum, [key]) => sum + f[key], 0);
   financeRowsEl.innerHTML = FINANCE_CATEGORIES.map(([key, label, cls]) =>
     `<div class="fin-row"><span class="label">${label}</span><span class="val ${cls}">${cls === 'expense' ? '-' : '+'}${Math.round(f[key])}</span></div>`
   ).join('') +
-    `<div class="fin-row total"><span class="label">Net lifetime</span><span class="val ${totalIncome - f.buildSpend >= 0 ? 'income' : 'expense'}">` +
-    `${Math.round(totalIncome - f.buildSpend)}</span></div>`;
+    `<div class="fin-row total"><span class="label">Net lifetime</span><span class="val ${totalIncome - totalExpense >= 0 ? 'income' : 'expense'}">` +
+    `${Math.round(totalIncome - totalExpense)}</span></div>`;
   financeSubEl.textContent = `${Math.round(world.scrap)} scrap on hand · tick ${world.currentTick}`;
   const h = f.history;
   financeChartRangeEl.textContent = h.length > 0 ? `tick ${h[0].tick} - ${h[h.length - 1].tick}` : '';
@@ -2879,7 +3052,7 @@ function showTitleScreen() {
   titleMainEl.classList.remove('hidden');
   titleSetupEl.classList.add('hidden');
   // Any overlay left open by the game being torn down would otherwise reappear on the next start.
-  for (const id of ['worldmap', 'finance', 'research', 'factions', 'programs', 'grants', 'drones', 'workprio', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
+  for (const id of ['worldmap', 'finance', 'research', 'factions', 'programs', 'grants', 'quests', 'drones', 'workprio', 'gameover', 'grading-popover', 'inspector', 'confirm-dialog', 'pausemenu', 'help-panel']) {
     document.getElementById(id).classList.add('hidden');
   }
   // Quitting to title mid-tour shouldn't burn the first-run flag -- the player hasn't actually
@@ -3164,7 +3337,7 @@ let pendingRoster = null; // null = no customization pending; beginSettlement() 
 function rollColonistPreview(index) {
   const trait = randomTrait(Math.random);
   const backstory = randomBackstory(Math.random);
-  const passions = randomPassions(Math.random, backstory);
+  const passions = randomPassions(Math.random, backstory, trait);
   return {
     name: STARTER_NAMES[index] ?? `Colonist ${index + 1}`,
     trait, backstory,
@@ -3196,12 +3369,24 @@ function renderColonistCard(i) {
   const nameEsc = c.name.replace(/"/g, '&quot;');
   const descEsc = c.backstory.description.replace(/"/g, '&quot;');
   card.innerHTML = `
+    <canvas class="csprite" width="88" height="88"></canvas>
     <input class="cname-input" type="text" value="${nameEsc}" maxlength="24">
     <div class="backstory" title="${descEsc}">${c.backstory.childhood} &rarr; ${c.backstory.adult}</div>
     <div class="trait">${c.trait.name}</div>
     <div class="skills">Combat: ${skillLevel(c.skillCombat)}${PASSION_ICON[c.passionCombat]} &middot; Construction: ${skillLevel(c.skillConstruction)}${PASSION_ICON[c.passionConstruction]}</div>
     <button class="reroll-btn" type="button">🎲 Re-roll backstory/trait</button>
   `;
+  // Sprite preview: reuses the exact same _drawHumanoid the live game draws citizens with (see
+  // render.js), on a tiny standalone Renderer/canvas pair rather than a parallel drawing routine
+  // -- so this preview can never visually drift from what the colonist actually looks like once
+  // spawned. camX/camY stay 0 (Renderer's own default) so worldToScreen(0,0) lands exactly on the
+  // canvas center; drawing the citizen at world (0,0) is what makes that centering work. Every
+  // starting colonist has StaffRoleKind.None (no roster assignment happens until after spawn), so
+  // the preview always uses the same base role color the live game would show for them at tick 0.
+  // `i` doubles as the humanoid's hair-tone seed, matching how _drawCitizens seeds it with the
+  // citizen's stable id -- gives the grid some visual variety without inventing a new seed scheme.
+  const spriteCanvas = card.querySelector('.csprite');
+  new Renderer(spriteCanvas)._drawHumanoid(0, 0, 2.0, ROLE_COLOR[StaffRoleKind.None], CITIZEN_SKIN, 1, false, 0, i);
   card.querySelector('.cname-input').addEventListener('input', (e) => {
     pendingRoster[i].name = e.target.value;
   });
@@ -3371,6 +3556,7 @@ function frame() {
   refreshPrograms();
   refreshCoveragePlans();
   refreshGrants();
+  refreshQuests();
   refreshDrones();
   updateGrading();
   syncPauseMenu();

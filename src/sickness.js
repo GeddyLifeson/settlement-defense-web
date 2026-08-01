@@ -8,6 +8,11 @@
 // uses) rather than a parallel mood-blending mechanic.
 import { addMoodEvent, HYGIENE_SICK_THRESHOLD, HYGIENE_SICK_CHANCE_MULT } from './citizens.js';
 import { DAY_NIGHT_CYCLE_TICKS } from './schedule.js';
+// Deep-Freeze-linked flu risk (real Prison Architect calamities.txt FluOutbreak, see weather.js's
+// fluRiskMultiplier doc comment for the full data/interpretation notes): sickness.js reads
+// weather.js's exported multiplier, not the other way around, per the task brief -- weather.js has
+// zero knowledge of sickness.js's onset-roll mechanics, it just exposes one small pure function.
+import { fluRiskMultiplier } from './weather.js';
 
 export const SICKNESS_CHECK_INTERVAL = 50; // per-citizen onset-roll/mood-refresh cadence -- keep in sync
                                             // with citizens.js's CitizenStore.spawn() '50' literal
@@ -74,7 +79,11 @@ export function tickSickness(world) {
       // citizen who's gone unwashed multiplies their own onset roll for this check, rather than
       // inventing a parallel penalty system -- reuses this exact mechanic, doesn't reskin it.
       const hygieneMult = (store.hygiene?.[i] ?? 1) < HYGIENE_SICK_THRESHOLD ? HYGIENE_SICK_CHANCE_MULT : 1;
-      if (world.rng() < SICKNESS_CHANCE * hygieneMult) {
+      // Deep Freeze scaling: bounded 1x-1.5x multiplier (see fluRiskMultiplier's doc comment in
+      // weather.js), 1 (no change) outside Cold weather entirely -- stacks multiplicatively with
+      // the existing hygiene penalty, same as every other multiplier already in this roll.
+      const deepFreezeMult = fluRiskMultiplier(world);
+      if (world.rng() < SICKNESS_CHANCE * hygieneMult * deepFreezeMult) {
         store.sickSeverity[i] = Math.min(SICKNESS_MAX_SEVERITY, SICKNESS_WORSEN_PER_TICK * DAY_NIGHT_CYCLE_TICKS);
         refreshSickMood(store, i, world.currentTick);
       }

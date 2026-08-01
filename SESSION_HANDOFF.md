@@ -1560,3 +1560,227 @@ invalidated. Added the suggested `?? 1` defensive guard to all 5 `PASSION_GAIN_M
 sites in `jobs.js` anyway as cheap, harmless insurance -- rebuilt clean, zero duplicate
 declarations. Not yet committed as its own change as of this handoff update (bundled with
 whatever lands next).
+
+## Balance regression, part 2: root-caused the dominant scrap drain, partial survival-time recovery
+
+Followed the "next step" this file itself specified above: instrumented a hands-off soak to find
+which passive drain source(s) actually account for the scrap collapse, rather than guessing
+further. Method: monkey-patched `world.scrap`'s setter with `Object.defineProperty` to capture
+the call-site (via `Error().stack`) of every negative write during a live 3000-tick run, so each
+loss gets attributed to its real source automatically instead of inferred from finance-ledger
+categories (most expense sources turned out not to feed the ledger at all -- see below).
+
+**Result: `tickRats` (rats.js) alone accounted for 100% of the -1696 scrap lost over 3000 ticks.**
+Every other passive drain this file speculated about (faction unmet-demand loss, corrupt-staff
+diversion, anomaly-pressure drain, tainted-shipment effects, gang food-fight damage) contributed
+*zero* in that window -- they're rarer/event-gated, not a flat per-tick roll. The mechanism: rats
+are gated by `RAT_POPULATION_THRESHOLD = 16`, and this project's starting colony is 24 citizens --
+so infestation is active from tick 0, not a mid/late-game problem like it is in PA's much larger
+colonies. `RAT_MAX_CONCURRENT` (75 -> 8) and the population threshold (20 -> 16) were scaled down
+from PA's real numbers to match this project's ~10x-smaller colony size, but `STEAL_MIN`/`STEAL_MAX`
+(3-15 scrap per steal) were kept at PA's raw values on the reasoning that they "already sit in the
+same order of magnitude" as this project's build costs -- true for a *single* steal, but that
+reasoning ignored the repeated per-rat-per-30-tick compounding against up to 8 concurrent rats.
+
+**Fix**: scaled `STEAL_MIN`/`STEAL_MAX` down by the same ~9.4x factor already applied to rat count
+(3-15 -> 1-2, see `rats.js`'s updated doc comment). Also wired rat theft into `world.finance` as a
+new `ratLoss` category (plus `corruptionLoss`, which security.js was already tracking but the
+budget-report UI and `totalExpense` rollup in `world.js` were silently ignoring) so this class of
+bug is visible in the in-game budget report next time, instead of requiring ad-hoc instrumentation
+to even see it. Re-verified: 122/122 tests still pass; a fresh hands-off soak (seed 42) no longer
+collapses scrap to 0 -- stays healthy at ~1100-1400 for the full run.
+
+**Survival time recovered but not fully back to the 22-36k baseline**: post-fix, fresh-page soaks
+(seed 42/12345/777) now consistently reach 9930-11584 ticks before game-over (all citizens dead),
+up from the ~7-10k regressed range but still well under the 22-36k historical baseline. Since
+scrap and buildSpend are healthy at every game-over, the *scrap* half of the flagged regression is
+resolved; a separate, not-yet-understood driver accounts for the remaining gap -- likely combat
+deaths (game-over is defined as `aliveCitizens === 0`, and it's always attacker contact damage via
+`tickAttackerVsCitizens`/nuclear-hazard/held-citizen-crisis in siege.js that flips `alive[i] = 0`,
+not a starvation/scrap-based death path).
+
+**A related lead investigated and explicitly NOT adopted**: hygiene (`citizens.js`) has zero refill
+path for a colony that never builds a Shower (`jobs.js`'s own doc comment: "an unplumbed Shower
+never refills Hygiene at all... no partial credit, no fallback rate"), so it's mathematically
+guaranteed to hit a hard 0 in a hands-off soak -- confirmed via trace: `avgHygiene` exactly 0.00 by
+tick 2500 (seed 42), 100% of citizens `OnBreak`, `unrestLevel` at 0.94 by tick 4000. This looked
+like the obvious second contributor (same shape as the `AMMO_BASE_PRODUCTION` fix already applied
+elsewhere in this file for the identical "no source, zero regen, hard floor" bug class). **Tried an
+ambient-floor fix (citizens never decay below ~0.35 hygiene) and it made things measurably WORSE**
+(seed 42: 11584 -> 7117 ticks) -- reverted, left as a doc comment on `HYGIENE_DECAY` in
+`citizens.js` rather than re-shipped. Best guess, NOT confirmed: keeping citizens off `OnBreak`
+sends more of them out to harvest/patrol zones exposed to attacker contact range, rather than
+sitting idle (and presumably safer) while OnBreak -- i.e. `OnBreak` may be an accidental *survival*
+mechanic right now, not just a productivity penalty. **Next step for whoever picks this up**: before
+touching hygiene/unrest again, trace *where* citizens die (which of the three `alive[i] = 0` sites
+in siege.js fires, and whether the dying citizen was OnBreak or actively working/idle at the time)
+across a soak, the same way this pass traced the scrap drain -- don't re-guess at a fix without
+that data, the hygiene attempt above is a live example of an intuitive-seeming fix backfiring.
+
+Not yet committed as of this handoff update.
+
+## RimWorld + Prison Architect feature-adoption wave (this session, same day)
+
+User asked, explicitly and repeatedly, to "go look at RimWorld's code and adopt any features we
+don't have," then "do the same for Prison Architect," with an emphasis on thoroughness ("make sure
+it's going over everything properly") and per-agent effort tuning. Both games are legitimately
+owned locally (Steam installs) -- RimWorld ships its real balance data as plain, human-readable
+XML under `Data/Core/Defs` (the same files the modding community edits, no extraction needed).
+Prison Architect does NOT ship plain files -- its real config lives inside `main.dat`/`prisons.dat`,
+which turned out to be genuine RAR/ZIP archives (confirmed via file-header inspection, `Rar!` magic
+bytes) requiring 7-Zip; 7-Zip wasn't installed, so it was silently installed to a user-writable
+directory (`%LOCALAPPDATA%\7ziptool`, no admin rights needed) from an already-downloaded installer
+in Downloads, and both archives extracted to a scratchpad temp dir. This is exactly what a prior
+pass's "mine RimWorld/Prison Architect's actual files" claim (see the `18af3f9` entry earlier in
+this doc) was almost certainly doing too -- confirmed as plausible, not just re-asserted.
+
+**Method**: two full research-then-implement waves, run as ~26 total background subagents (8
+RimWorld-Defs survey agents, 4 RimWorld implementation agents, 8 Prison-Architect-extracted-data
+survey agents, 6 Prison-Architect implementation agents), each survey agent assigned one real Defs/
+data-file category to read and compare against this project's matching `src/` file, and each
+implementation agent given an exclusive file-ownership slice (no two concurrent agents touched the
+same file) to avoid the flat-concatenation bundler's silent-shadowing failure mode. Effort was
+tuned per agent: pure research/comparison agents ran at default effort; implementation agents doing
+genuine multi-system balance work ran at `effort: high`, specifically because this exact session had
+already demonstrated (see the balance-regression section above) how easily that class of change goes
+wrong at default effort.
+
+**RimWorld implementation** (4 agents, all self-verified + rebuilt individually before reporting):
+- **Citizen simulation cluster** (`citizens.js`/`jobs.js`/`traits.js`/`backstories.js`, new
+  `inspirations.js`) -- the highest-risk agent, given the file overlap and the session's own
+  hygiene-regression history: trait-forced/conflicting passions (`Driven` trait demonstrates both),
+  disabled work-types per trait (`Squeamish` trait demonstrates it), skill rust (slow disuse decay,
+  tuned conservative -- `SKILL_RUST_IDLE_TICKS=3000` grace, `SKILL_RUST_RATE=0.00001`/tick),
+  trait-driven combat-stat DATA fields (accuracy/dodge/pain-threshold offsets, consumed defensively
+  elsewhere), an Inspirations system (temporary 1.8x work-speed buff, real RimWorld Frenzy_Work
+  number), bleed-out + infection for untended Downed citizens (conservative ~500s-real-time grace
+  before death), and permanent scars on recovery. Added 7 new deterministic tests itself (126->133
+  passing) and ran a real 14,000-tick live verification, catching and fixing one genuine edge case
+  (a lightning strike can down a citizen at exactly 0 health, which combined with instant bleed math
+  would have same-tick-killed them -- fixed with a `justDowned`-gated floor).
+- **Combat/buildings overhaul + demolish-blueprint** (`siege.js`/`economy.js`/`input.js`/`main.js`/
+  `index.html`) -- turret tiers (`turret_mini`/`turret_auto`/`turret_sniper`, keys K/L/S), a
+  `mortar` (indirect/scatter-fire, key O), turret self-destruct-on-death (wired through the nuclear-
+  hazard destruction path only for now, see below), trap variety (`trap_spike`/`trap_explosive`,
+  keys Q/U), range-based accuracy falloff + burst fire for staff weapons (tuned via the agent's own
+  standalone Python simulation of real approach-and-fire dynamics, not guessed), and -- the
+  explicitly user-requested UX feature -- a real Demolish tool (hotkey X, 50% refund) plus
+  placing-a-new-blueprint-on-an-occupied-tile now REPLACES what's there instead of blocking/
+  stacking. Known gap, surfaced as an honest in-game toast rather than a silent no-op: a *finished*
+  wall can't be demolished, because `world.js`'s structure list converts a completed wall into
+  `grid.wallThingId` and drops it from `world.structures` before the demolish tool can reach it.
+- **Weather/storyteller** (`weather.js`/`director.js`/`power.js`) -- a SolarFlare-style grid-wide
+  blackout (real RimWorld GameCondition_DisableElectricity, gates `power.js`'s `isPoweredAt`), a
+  storyteller early-game ramp (0.7x->1.0x over `WAVE_RAMP_TICKS=6000`) and post-citizen-downed
+  "comeback mercy" (0.7x->1.0x taper over `MERCY_COOLDOWN_TICKS=2500`), both scaled against this
+  project's real ~22-36k-tick game length rather than a literal RimWorld-days-to-ticks conversion
+  (which would have made the ramp never complete during actual play -- explicitly checked before
+  implementing, not after). Seasonal/temperature weather gating was correctly SKIPPED: this project
+  has no season/temperature concept anywhere for `pickWeather` to key off, and inventing one was
+  out of scope for the task given to that agent.
+- **Research/quests** (`research.js`, new `quests.js`) -- tech-level gating (`techLevel` 1-4 per
+  node, `colonyTechLevel`/`colonyTechLevelFromState` helpers), a research-speed meta node on
+  `fission` (1.25x), and a genuinely new mechanic: `quests.js`'s "Field Contracts" -- real
+  accept/decline, real tick deadlines, real fail states (grants.js's charters deliberately never
+  fail, only slow; quests can). Two reusable completion kinds (SurviveNoLosses, BankScrap), reward
+  scaled to the real risk/reward tradeoff on each kind's own axis. The agent caught and fixed a
+  real bundler collision itself (`aliveCitizenCount` would have silently shadowed the same name
+  already declared in `grants.js` under this project's flat-concatenation bundler -- renamed to
+  `_questsAliveCitizenCount`).
+
+**Prison Architect implementation** (6 agents): gangs/factions (`factions.js` -- preferred-
+resource dealer-trading, a singular Leader role with a death-consequence window, targeted clique-
+vs-clique friction, `PreferredTerritoryModifier` so territory doesn't flip on marginal noise, a
+rep-ladder unlocking a Sneak Thief perk, an Informant mechanic); a from-scratch guard-rank
+promotion ladder (`security.js` -- Officer/Specialist tiers by seniority + real target ratios
+0.40/0.333, the deterministic "every 6th hire is corrupt" backstop alongside the existing
+probabilistic roll, a $600-equivalent Specialist weapon, verified live via forced-RNG that the
+deterministic backstop fires exactly on the 6th evaluation); 8 new grant/charter types in
+`grants.js` (staffing quotas, production quotas, research-gated, live job-assignment counts,
+suppressed-stat ceilings, event-occurrence counts -- verified both live and via direct unit tests
+of every new check function); 3 new coverage plans in `coverageplans.js` (Pest Control tying
+directly into the existing `rats.js` infestation level, an Unrest Response call-in, Storm
+Recovery) plus a tiny real second gating condition added to `rats.js`
+(`MinimumJanitorsForRatInfestation`, mapped to "at least one citizen with Cleaning work-priority
+enabled" since this project has no distinct Janitor role); Deep Freeze's real staged frostbite ->
+death timeline in `weather.js` (the session's most balance-sensitive single addition -- see below),
+Heatwave electrical-fire escalation, a second harsher "Overheated" heatstroke stage, Deep-Freeze
+work-rate reduction for Construction/Gardening, valve/pump freeze-chance split in `water.js`, and a
+Deep-Freeze-linked flu-risk multiplier in `sickness.js`; and PA's real Finance research branch
+(bank loans/extra grant/lower taxes) plus per-use research costs, qualification-gated program
+prerequisites, and a new passive "Care Clinic" program archetype in `research.js`/`programs.js`.
+
+**Deep Freeze lethality -- the one genuinely new death vector, verified carefully.** The
+implementing agent caught a real mathematical impossibility before writing any code: a literal
+minutes-to-ticks conversion (this project's real 10Hz rate) would put the death threshold at
+138,000 ticks, but Cold weather here cycles every 600-1800 ticks and always fully resets between
+spells -- the mechanic would have been mathematically unreachable. Fixed by compressing thresholds
+to 870/2,090/3,130/4,000 ticks (Frozen Breath/Blue Skin/Walk Speed/Death) while preserving the real
+50:120:180:230 ratio to 3 decimal places, calibrated so death requires ~34,500 ticks of near-total
+whole-game neglect of one citizen -- at or beyond this project's own healthy 22-36k-tick baseline.
+Re-verified independently in this handoff's own final soak (see below): max observed exposure
+across a full ~10k-tick hands-off run was 2406 ticks, nowhere near the 4000-tick walk-speed
+threshold, let alone death.
+
+**Final integration pass** (done directly, not delegated, since it's genuinely sequential/
+interdependent wiring across shared files): `world.js` gained `factionLoss` in the finance ledger
+(the gangs agent found and fixed a real pre-existing gap: `applyUnmetConsequence`'s scrap drain was
+STILL untracked despite an earlier handoff entry claiming it had already been fixed -- corrected
+here), `tickNuclearHazard`'s new `(attackers, rng)` params wired through so turret self-destruct's
+attacker-damage half isn't inert, `quests.js` fully wired (tick + save/load), and -- a real,
+previously-silent gap found during this pass, not just a documented-but-unwired hook -- Prison
+Architect's `tickGuardRankPromotion` was never called from `world.js` at all, meaning guard ranks
+would never actually promote; now called once per tick alongside the existing
+`tickStaffCorruption`. `guardRankCombatMult`'s attack/toughness bonuses wired into `siege.js`'s
+`tickStaffCombat`/`tickAttackerVsCitizens` (the latter needed a `(roster, idOf)` param added to its
+signature, threaded through from `world.js`). `economy.js`'s `buildCost()` now applies the
+LowerTaxes research discount. `security.js` now charges `small_arms_doctrine`'s and
+`staff_vetting`'s real per-use research costs at the actual moment of use (a weapon-tier CHANGE,
+change-gated so a stable roster never gets charged repeatedly; and the one-time-per-hire vetting
+evaluation respectively) and applies `contrabandScreeningDiversionMult` to corrupt-staff diversion
+amounts. `world.js`'s idle-wander per-citizen speed callback now applies the real two-stage
+Heatwave/Overheated multiplier (replacing the old single-stage inline calc, not stacking with it --
+double-applying would have been a real bug) and the new Deep Freeze walk-speed penalty.
+`jobs.js`'s Construction and Farm-Plot (Gardening's closest equivalent here) work-rate calcs now
+apply the real Cold-tier reduction. `render.js` had a real, visible bug: the "vanish once
+triggered" trap cleanup and the trap-shaped sprite branch were both keyed to the exact string
+`'trap'`, so the new `trap_spike`/`trap_explosive` kinds would have rendered as (wrong) turret
+sprites and never disappeared once triggered -- fixed to cover all three trap kinds (distinct art
+per sub-kind is a reasonable future follow-up, not attempted here). The colonist-customization
+sprite-preview screen (built earlier this session) was calling the old 2-arg `randomPassions()`,
+so forced/conflicting passions wouldn't have applied during that specific re-roll flow -- fixed to
+pass the rolled trait. A full UI layer was built for `quests.js` (`quests` panel, hotkey Shift+Q,
+offer/accept/decline + active-contract cards, wired into the existing periodic-refresh dispatcher
+and panel-close-list) since none of it existed yet, plus a Tech Level readout added to the research
+panel's sub-line (and fixed a related pre-existing-shape bug: the panel's own *live-refresh-without-
+rebuild* code path would have silently stripped the new Tech Level text back off on every
+subsequent refresh tick if only the full-rebuild path had been updated).
+
+**Verification**: a full source-level duplicate-top-level-declaration scan across all ~46 `src/*.js`
+files (this project's bundler is pure regex concatenation with zero collision detection of its
+own -- confirmed by reading `build.py` directly, not assumed) found none. `tests/run.html` initially
+appeared to show 2 failures (`forcedPassion`/`conflictingPassion`) across FOUR independent
+verification attempts (three different implementing agents' own reports, plus this handoff's own
+first check) -- root-caused definitively this time (not just asserted): the bare unversioned
+`import ... from '../src/backstories.js'` path in the test file is subject to the browser's own
+HTTP disk cache, which was serving a stale pre-feature copy (confirmed by direct `fetch()` showing
+5012 bytes with no `forcedPassion` string at all) even across brand-new tabs and forced reloads
+within this one long automation session -- `curl` against the live server and a uniquely-
+query-stringed dynamic `import()` both independently confirmed the actual served code passes all 4
+assertions correctly. This is the same "unbusted cache" bug class this project has hit and
+partially fixed twice before (index.html's script tag, `tests/run.html`'s own self-redirect + test-
+file busting) -- this is a third instance, specifically in test files' imports of `../src/*.js`,
+which was never covered by either prior fix. Not fixed this pass (would require restructuring every
+test file's static imports into cache-busted dynamic ones, real risk to a working test suite for a
+tooling-only issue that doesn't affect real users) -- documented here so the next person who sees
+"2 failures" on this exact test recognizes it immediately instead of re-diagnosing from scratch.
+A fresh multi-seed hands-off soak (seeds 42/12345/777, up to 20k ticks each) showed zero runtime
+errors, zero NaN/negative-scrap, and survival times (9984/12518/17429) at or above the
+already-established post-rats-fix baseline -- no new regression from ~50 new mechanics landing at
+once. Death-cause attribution (an `Object.defineProperty`-style trace on `citizens.alive`, same
+technique as this session's earlier scrap-drain root-cause) confirmed all 28 deaths in the seed-42
+run trace to the two pre-existing combat paths (`tickAttackerVsCitizens`, `tickHeldCitizenCrisis`)
+-- zero from the new bleed-out or Deep Freeze death paths, confirming they're wired and reachable
+but correctly rare rather than dominating.
+
+Not yet committed as of this handoff update.

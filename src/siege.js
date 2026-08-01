@@ -5,7 +5,7 @@ import { CitizenFlags } from './citizens.js';
 import { isPoweredAt, hasPoweredBonus } from './power.js';
 import { PASSION_GAIN_MULT } from './backstories.js';
 import { ageBandFor } from './traits.js';
-import { WEAPON_TIERS } from './security.js';
+import { WEAPON_TIERS, guardRankCombatMult } from './security.js';
 import { rankHealthMultFor } from './ranks.js';
 import { augmentHealthMultFor, augmentDamageMultFor } from './augments.js';
 
@@ -576,6 +576,29 @@ const TURRET_DAMAGE = 0.35;
 const POWERED_DAMAGE_MULT = 1.5;
 const POWERED_RANGE_MULT = 1.25;
 
+// ---------------------------------------------------------------- turret tiers
+// RimWorld's real 3-tier turret roster (mini-turret / autocannon / sniper-turret), each a genuine
+// tradeoff rather than a strict upgrade -- this project previously had exactly one generic
+// 'turret' kind with flat range/damage. 'turret' stays in this table byte-for-byte identical to
+// its own pre-existing TURRET_RANGE/TURRET_DAMAGE/TURRET_COOLDOWN_TICKS/TURRET_PENETRATION
+// constants above/below -- both for save-compat (an old save's turret structures must keep
+// behaving exactly as before) and because world.js still spawns 'turret' directly as the wave-4
+// starter defense, untouched by this pass. turret_mini/turret_auto/turret_sniper are ADDITIONAL
+// toolbar options (see economy.js's BUILD_COST comment for the cost side of each tradeoff):
+//   turret_mini   -- cheap, short range, fast cooldown. The "always affordable early" pick.
+//   turret_auto   -- longer range and harder-hitting than plain turret, but minRange means it
+//                    literally cannot engage a target that's already inside that radius (real
+//                    autocannon can't depress its barrel low enough for a close target) --
+//                    tickTurrets below checks minRange via nearestAliveAttacker's new 4th arg.
+//   turret_sniper -- longest range, one heavy single shot, slow cooldown, and (see
+//                    AMMO_PER_SHOT_TURRET_SNIPER below) the most expensive ammo per shot of any
+//                    turret tier -- the "answer to armor at long range" pick, same role Sniper
+//                    staff already play per the GUARD_*/SNIPER_* section above.
+// Table itself is built further down this file (see TURRET_TIERS below the armorPenetration
+// section) purely so it can reference the real TURRET_PENETRATION/etc named constants instead of
+// duplicating their literal values -- this comment lives here, next to TURRET_RANGE/TURRET_DAMAGE,
+// because that's the more useful reading order.
+
 // Real connected-graph power (power.js): a consumer is powered only if it touches a generator
 // or a wire run that leads back to one. This replaced a radius stub where mere proximity to a
 // generator was enough and wires didn't exist.
@@ -674,10 +697,19 @@ export function suppressionAccuracyMult(suppression) {
 // re-derives turret/tesla suppression from live attacker proximity.
 export function tickSuppression(structures, attackers, citizens) {
   for (const s of structures) {
-    if (s.kind !== 'turret' && s.kind !== 'tesla') continue;
+    // Turret tiers (TURRET_TIERS, see the doc comment near TURRET_RANGE above): every tier shares
+    // this same suppression mechanic, keyed off its own tier-specific range rather than the flat
+    // TURRET_RANGE this used to hardcode -- 'turret' itself resolves to the exact same range it
+    // always did (TURRET_TIERS.turret.range === TURRET_RANGE), so this is byte-for-byte unchanged
+    // for any pre-existing turret/save. Mortar is deliberately NOT included -- indirect fire at a
+    // remembered point isn't "under fire" in the same way a direct-fire emplacement is, and it
+    // doesn't call rollsHit with accuracyMult at all (see tickTurrets' mortar branch).
+    const tier = TURRET_TIERS[s.kind];
+    const isTesla = s.kind === 'tesla';
+    if (!tier && !isTesla) continue;
     if (s.destroyed || s.underConstruction) { s.suppression = 0; continue; }
     s.suppression = Math.max(0, (s.suppression || 0) - SUPPRESSION_DECAY_PER_TICK);
-    const range = s.kind === 'tesla' ? TESLA_RANGE : TURRET_RANGE;
+    const range = isTesla ? TESLA_RANGE : tier.range;
     let inRange = 0;
     for (let i = 0; i < attackers.count; i++) {
       if (!attackers.isAliveAt(i)) continue;
@@ -706,6 +738,72 @@ const TRAP_PENETRATION = 35;
 export const GUARD_PENETRATION = 15; // exported for draft.js, see the GUARD_RANGE/DAMAGE/COOLDOWN comment above
 export const SNIPER_PENETRATION = 40; // exported for draft.js, see GUARD_* comment above
 
+// Trap variety: this project previously had exactly one generic 'trap' kind. 'trap' stays in this
+// table byte-for-byte identical to its own pre-existing TRAP_DAMAGE/DamageType.Explosive/
+// TRAP_PENETRATION/single-target behavior (radius: 0 means "only the attacker that stepped on it,
+// same as before this table existed") -- for save-compat. trap_spike/trap_explosive are ADDITIONAL
+// kinds (see economy.js's BUILD_COST comment for pricing):
+//   trap_spike     -- cheap melee deadfall. Uses DamageType.Blunt, which until now existed only as
+//                      resolveArmorRoll's half-damage OUTCOME LABEL and was never actually dealt by
+//                      anything (see the DamageType enum's own doc comment up top) -- armorRatingOf
+//                      falls back to its 20 default for every archetype on an out-of-table lookup
+//                      (ARMOR_RATING's rows only have 3 real entries, Blunt is index 3), so a spike
+//                      trap is equally mediocre against every archetype rather than a counter-pick
+//                      to any one of them, a deliberate "cheap and simple, no rock-paper-scissors"
+//                      niche distinct from the other two damage types' real matchups.
+//   trap_explosive -- costlier small-radius Explosive trap: radius > 0 means the trigger loop in
+//                      tickAttackers below damages EVERY live attacker within that radius of the
+//                      trap, not just the one that stepped on it -- can catch a cluster at once,
+//                      the real upside that justifies its higher price over plain trap.
+const TRAP_KINDS = Object.freeze({
+  trap:           { damage: TRAP_DAMAGE, type: DamageType.Explosive, penetration: TRAP_PENETRATION, radius: 0 },
+  trap_spike:     { damage: 1.6, type: DamageType.Blunt,     penetration: 10,               radius: 0 },
+  trap_explosive: { damage: 2.2, type: DamageType.Explosive, penetration: TRAP_PENETRATION,  radius: 1.2 },
+});
+
+// Turret tiers table (see the doc comment up near TURRET_RANGE/TURRET_DAMAGE for the design
+// rationale) -- built here, not up there, purely so 'turret' can reference the real
+// TURRET_PENETRATION constant instead of duplicating its literal value. Consumed by tickTurrets/
+// tickSuppression below. ammoPerShot is per-tier (turret_sniper costs more per shot than the
+// other three) -- see AMMO_PER_SHOT_TURRET_SNIPER's own doc comment below.
+export const AMMO_PER_SHOT_TURRET_SNIPER = 3; // pricier round, same "bigger gun costs more per
+                                               // shot" logic as AMMO_PER_SHOT_SNIPER for staff
+const TURRET_TIERS = Object.freeze({
+  turret:        { range: TURRET_RANGE, damage: TURRET_DAMAGE, cooldown: TURRET_COOLDOWN_TICKS, minRange: 0, penetration: TURRET_PENETRATION, ammoPerShot: AMMO_PER_SHOT_TURRET },
+  turret_mini:   { range: 5,  damage: 0.18, cooldown: 6,  minRange: 0, penetration: 12, ammoPerShot: AMMO_PER_SHOT_TURRET },
+  turret_auto:   { range: 11, damage: 0.45, cooldown: 10, minRange: 3, penetration: 22, ammoPerShot: AMMO_PER_SHOT_TURRET },
+  turret_sniper: { range: 14, damage: 1.1,  cooldown: 24, minRange: 0, penetration: 45, ammoPerShot: AMMO_PER_SHOT_TURRET_SNIPER },
+});
+
+// Mortar (RimWorld's real indirect-fire siege weapon): long range, high per-shot damage, slow
+// reload, and -- unlike every turret tier above -- genuinely inaccurate. Real RimWorld mortars
+// target a ground cell (not a live pawn) and the shell scatters around that cell; this project has
+// no "target a cell" UI, so tickTurrets below approximates it by targeting the nearest live
+// attacker's CURRENT position and then scattering the actual impact point around THAT, which
+// produces the same real behavior (the shot can miss the intended target, or catch a different
+// nearby attacker instead) without needing new player-facing targeting UI. This project's turret
+// targeting has never had a line-of-sight/wall-blocking check at all (nearestAliveAttacker below
+// is a pure distance scan), so mortar's real "bypasses line of sight" trait has nothing to
+// actually bypass here -- it's still implemented as a structurally distinct indirect-fire branch
+// in tickTurrets (scatter-around-a-remembered-point, not a locked homing shot) rather than folded
+// into the direct-fire path, so it behaves correctly if line-of-sight targeting is ever added to
+// the direct-fire turrets later. Deliberately has NO minRange (unlike turret_auto) -- a real
+// mortar's minimum range would create a dead zone that's actively bad for colony survival if a
+// tunnel wave spawns close to it, and the task brief didn't ask for one on the mortar.
+// Deliberately never damages citizens/structures on scatter (unlike the turret self-destruct
+// explosion below) -- every other combat AoE in this file (turret, tesla chain, trap) only ever
+// hits attackers, and a passive per-shot friendly-fire risk on a structure that fires
+// automatically every tick is exactly the kind of new passive risk this session's balance-
+// regression work says to avoid; scatter still matters because it can make the shot miss the
+// intended target or land on a different nearby attacker instead of a guaranteed hit.
+const MORTAR_RANGE = 16;
+const MORTAR_DAMAGE = 1.6;
+const MORTAR_COOLDOWN_TICKS = 40; // slow reload -- the longest cooldown of any defense structure
+const MORTAR_SCATTER_RADIUS = 1.8; // impact point is a random point within this of the target's position
+const MORTAR_BLAST_RADIUS = 1.3;   // AoE at the actual (scattered) impact point
+const MORTAR_PENETRATION = 30;
+export const AMMO_PER_SHOT_MORTAR = 4; // most expensive shot in the game -- real RimWorld mortar shells are a genuine ongoing cost
+
 // Floodlight (SEA:R's "soft wall" -- an area-denial light that slows rather than blocks, so it
 // doesn't need its own health/destroy state like a fence does).
 export const FLOODLIGHT_RANGE = 3.5;
@@ -729,11 +827,87 @@ export function isNuclearContained(structures, gen) {
     Math.hypot(s.x - gen.x, s.y - gen.y) <= NUCLEAR_CONTAINMENT_RADIUS);
 }
 
+// ---------------------------------------------------------------- turret self-destruct on death
+// Real RimWorld turret mechanic: a destroyed turret has a genuine chance of a residual explosion
+// (its own capacitor/ammo cooking off) -- approximated here as a flat 50/50 roll, the real
+// RimWorld number, since this project doesn't model per-weapon ammo-cook-off odds. Scoped to the
+// turret family (TURRET_TIERS) + mortar only, per the task brief's explicit list -- NOT tesla
+// (SEA:R's own thing, no real-RimWorld anchor for this) and NOT trap (already single-use/
+// destroyed-on-trigger, a self-destruct-on-death roll would be redundant with its own explosion).
+const TURRET_SELFDESTRUCT_CHANCE = 0.5;
+const TURRET_SELFDESTRUCT_RADIUS = 1.3;     // small radius, similar neighborhood to trap_explosive's blast
+const TURRET_SELFDESTRUCT_DAMAGE = 1.2;     // real damage against attackers caught in it -- not a scratch
+const TURRET_SELFDESTRUCT_CITIZEN_MULT = 0.3; // citizens/structures take a much smaller fraction --
+const TURRET_SELFDESTRUCT_STRUCTURE_MULT = 0.4; // see the doc comment on maybeTurretSelfDestruct below
+const TURRET_SELFDESTRUCT_PENETRATION = 25;
+
+function isTurretFamilyKind(kind) {
+  return TURRET_TIERS[kind] != null || kind === 'mortar';
+}
+
+// Called once, right when a turret/mortar structure transitions destroyed=false -> true, from
+// every site in this file capable of doing that -- currently only tickNuclearHazard's generic
+// structure-damage loop below (turrets/mortars have no other in-file destruction path today: this
+// engine's combat model never lets an attacker directly damage a turret, see the doc comment on
+// SUPPRESSION near the top of this file). Exported so a FUTURE destruction path added elsewhere
+// (e.g. world.js's own fire/overload-fire structure damage, referenced in that file's comments)
+// can call this too instead of silently setting `.destroyed = true` and skipping the explosion --
+// idempotent no-op on any non-turret-family kind, so it's always safe to call on ANY destroyed
+// structure. `attackers` is optional (null-safe) since not every destruction call site has an
+// AttackerStore handy -- the citizen/structure damage still applies even without it.
+// Unlike every other combat AoE in this file (turret/tesla/trap, which only ever hit attackers),
+// this ONE explosion is a real friendly-fire hazard, same as the RimWorld mechanic it's modeling
+// -- it can hurt nearby citizens and structures too, just at a reduced fraction
+// (TURRET_SELFDESTRUCT_CITIZEN_MULT/STRUCTURE_MULT) of the full attacker-facing damage, so "don't
+// stand next to a dying turret" is a real but not devastating lesson. Kept a single, non-chaining
+// roll (destroying a neighboring structure below does NOT re-roll its own self-destruct) so this
+// can't cascade into wiping out an entire turret line from one lucky/unlucky roll.
+export function maybeTurretSelfDestruct(s, structures, citizens, attackers, rng = Math.random, onScrap = null, onKill = null) {
+  if (!isTurretFamilyKind(s.kind)) return;
+  if (rng() >= TURRET_SELFDESTRUCT_CHANCE) return;
+
+  if (attackers) {
+    for (let j = 0; j < attackers.count; j++) {
+      if (!attackers.isAliveAt(j)) continue;
+      if (Math.hypot(attackers.x[j] - s.x, attackers.y[j] - s.y) > TURRET_SELFDESTRUCT_RADIUS) continue;
+      if (damageAttacker(attackers, j, TURRET_SELFDESTRUCT_DAMAGE, DamageType.Explosive, TURRET_SELFDESTRUCT_PENETRATION, rng)) {
+        onScrap?.(SCRAP_PER_KILL); onKill?.();
+      }
+    }
+  }
+
+  if (citizens) {
+    for (let c = 0; c < citizens.count; c++) {
+      if (!citizens.isAliveAt(c)) continue;
+      if (Math.hypot(citizens.x[c] - s.x, citizens.y[c] - s.y) > TURRET_SELFDESTRUCT_RADIUS) continue;
+      const armorRating = citizens.hasVest?.[c] ? CITIZEN_VEST_ARMOR_RATING : 0;
+      const { dealt } = resolveCitizenArmorRoll(armorRating, 0, TURRET_SELFDESTRUCT_DAMAGE * TURRET_SELFDESTRUCT_CITIZEN_MULT, rng);
+      citizens.health[c] -= dealt;
+      if (citizens.health[c] <= 0) {
+        citizens.health[c] = 0.05;
+        citizens.flags[c] |= CitizenFlags.Downed;
+      }
+    }
+  }
+
+  for (const other of structures) {
+    if (other === s || other.destroyed || other.underConstruction) continue;
+    if (Math.hypot(other.x - s.x, other.y - s.y) > TURRET_SELFDESTRUCT_RADIUS) continue;
+    other.health -= TURRET_SELFDESTRUCT_DAMAGE * TURRET_SELFDESTRUCT_STRUCTURE_MULT;
+    if (other.health <= 0) other.destroyed = true; // not re-rolled -- see the no-chaining note above
+  }
+}
+
 // Periodic hazard damage around any nuclear generator that isn't guarded by a nearby waste
 // storage -- mirrors tickAttackerVsCitizens's downed-then-dead pattern for citizens, and the
 // fence-damage/destroyed pattern (tickAttackers) for structures, so an unguarded reactor reads as
 // a real threat rather than a stat debuff.
-export function tickNuclearHazard(structures, citizens) {
+// attackers/rng (added for the turret self-destruct hook above, both optional/null-safe): the
+// existing world.js call site passes neither (`tickNuclearHazard(this.structures, this.citizens)`,
+// exactly 2 args), so the attacker-facing half of a self-destruct explosion triggered from THIS
+// path is inert until world.js's owner adds `this.attackers, this.rng` to that call -- citizen/
+// structure damage from the same explosion still works today since neither depends on attackers.
+export function tickNuclearHazard(structures, citizens, attackers = null, rng = Math.random) {
   for (const gen of structures) {
     if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction) continue;
     if (isNuclearContained(structures, gen)) continue;
@@ -758,7 +932,10 @@ export function tickNuclearHazard(structures, citizens) {
       if (s === gen || s.kind === 'waste_storage' || s.destroyed || s.underConstruction) continue;
       if (Math.hypot(s.x - gen.x, s.y - gen.y) > NUCLEAR_HAZARD_RADIUS) continue;
       s.health -= NUCLEAR_HAZARD_STRUCTURE_DAMAGE;
-      if (s.health <= 0) s.destroyed = true;
+      if (s.health <= 0) {
+        s.destroyed = true;
+        maybeTurretSelfDestruct(s, structures, citizens, attackers, rng);
+      }
     }
   }
 }
@@ -814,12 +991,27 @@ export function tickAttackers(attackers, structures, grid, centerX, centerY, cit
     }
 
     for (const t of structures) {
-      if (t.kind !== 'trap' || t.triggered || t.underConstruction) continue;
+      // Trap variety (TRAP_KINDS, see its doc comment above): 'trap' resolves to the exact same
+      // damage/type/penetration/single-target behavior it always had, so this is byte-for-byte
+      // unchanged for any pre-existing trap/save.
+      const tk = TRAP_KINDS[t.kind];
+      if (!tk || t.triggered || t.underConstruction) continue;
       if (Math.hypot(attackers.x[i] - t.x, attackers.y[i] - t.y) < TRAP_TRIGGER_RANGE) {
         t.triggered = true; t.destroyed = true;
-        // Traps are the game's Explosive source: the counter to armored Brutes, wasted on
-        // Skirmishers (who mostly run clear of the blast).
-        if (damageAttacker(attackers, i, TRAP_DAMAGE, DamageType.Explosive, TRAP_PENETRATION, rng)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
+        // Traps are (mostly) the game's Explosive source: the counter to armored Brutes, wasted on
+        // Skirmishers (who mostly run clear of the blast) -- trap_spike is the one exception, see
+        // its own doc comment above for why it deliberately skips that matchup entirely.
+        if (tk.radius > 0) {
+          // trap_explosive: hits every live attacker within radius, not just the one that
+          // stepped on it -- can catch a whole cluster in one placement.
+          for (let j = 0; j < attackers.count; j++) {
+            if (!attackers.isAliveAt(j)) continue;
+            if (Math.hypot(attackers.x[j] - t.x, attackers.y[j] - t.y) > tk.radius) continue;
+            if (damageAttacker(attackers, j, tk.damage, tk.type, tk.penetration, rng)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
+          }
+        } else if (damageAttacker(attackers, i, tk.damage, tk.type, tk.penetration, rng)) {
+          onScrap?.(SCRAP_PER_KILL); onKill?.();
+        }
       }
     }
   }
@@ -847,24 +1039,62 @@ function findBlockingFence(structures, x, y) {
 // consume", so every pre-existing call site (tests, console pokes) keeps its exact old behavior.
 export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng = Math.random, accuracyMult = 1, ammo = Infinity, consumeAmmo = null) {
   for (const s of structures) {
-    if (s.kind !== 'turret' && s.kind !== 'tesla') continue;
+    // Turret tiers (TURRET_TIERS, see the doc comment near TURRET_RANGE above) + tesla + mortar
+    // all share this one tick function -- 'turret'/'tesla' behave byte-for-byte as they always
+    // did (TURRET_TIERS.turret === the old flat constants), turret_mini/turret_auto/turret_sniper
+    // are new tiers, mortar is a structurally distinct indirect-fire branch handled first below.
+    const tier = TURRET_TIERS[s.kind];
+    const isTesla = s.kind === 'tesla';
+    const isMortar = s.kind === 'mortar';
+    if (!tier && !isTesla && !isMortar) continue;
     if (s.destroyed || s.underConstruction) continue;
     if (s.cooldown > 0) { s.cooldown--; continue; }
 
+    if (isMortar) {
+      // Indirect fire (see the MORTAR_* doc comment above): targets the nearest live attacker's
+      // current position, then scatters the actual impact point around it -- deliberately NOT
+      // run through rollsHit/accuracyMult at all, since a mortar's "miss" is scatter distance, not
+      // a binary hit roll like every other weapon in this file. No powered bonus, no suppression
+      // interaction -- a stationary indirect-fire tube isn't "aiming" the way a direct-fire
+      // emplacement is.
+      const targetI = nearestAliveAttacker(attackers, s.x, s.y, MORTAR_RANGE);
+      if (targetI < 0) continue;
+      const hasAmmo = ammo >= AMMO_PER_SHOT_MORTAR;
+      s.cooldown = MORTAR_COOLDOWN_TICKS;
+      onFire?.(s);
+      s.outOfAmmo = !hasAmmo;
+      if (!hasAmmo) continue; // dry -- a mortar has no melee fallback, it's a stationary tube
+      consumeAmmo?.(AMMO_PER_SHOT_MORTAR);
+      const ang = rng() * Math.PI * 2;
+      const scatterDist = rng() * MORTAR_SCATTER_RADIUS;
+      const landX = attackers.x[targetI] + Math.cos(ang) * scatterDist;
+      const landY = attackers.y[targetI] + Math.sin(ang) * scatterDist;
+      for (let j = 0; j < attackers.count; j++) {
+        if (!attackers.isAliveAt(j)) continue;
+        if (Math.hypot(attackers.x[j] - landX, attackers.y[j] - landY) > MORTAR_BLAST_RADIUS) continue;
+        if (damageAttacker(attackers, j, MORTAR_DAMAGE, DamageType.Explosive, MORTAR_PENETRATION, rng)) { onScrap?.(SCRAP_PER_KILL); onKill?.(); }
+      }
+      continue;
+    }
+
     const powered = isPoweredBonus(structures, s.x, s.y);
-    const isTesla = s.kind === 'tesla';
     // Range is NOT ammo-gated -- a mechanical turret's traverse/targeting doesn't shrink when it
     // runs dry, only the shot it actually puts out does (see damage/accuracy below).
-    const range = (isTesla ? TESLA_RANGE : TURRET_RANGE) * (powered ? POWERED_RANGE_MULT : 1);
-    const baseDamage = (isTesla ? TESLA_DAMAGE : TURRET_DAMAGE) * (powered ? POWERED_DAMAGE_MULT : 1);
-    // Tesla coils are the Energy source (armor-piercing, the answer to a Boss); plain turrets
-    // are Kinetic (great against unarmored Skirmishers, poor against a Brute's plate).
+    const range = (isTesla ? TESLA_RANGE : tier.range) * (powered ? POWERED_RANGE_MULT : 1);
+    const baseDamage = (isTesla ? TESLA_DAMAGE : tier.damage) * (powered ? POWERED_DAMAGE_MULT : 1);
+    // Tesla coils are the Energy source (armor-piercing, the answer to a Boss); plain/mini/auto/
+    // sniper turrets are all Kinetic (great against unarmored Skirmishers, poor against a Brute's
+    // plate) -- sniper-turret's edge against armor comes from its much higher penetration below,
+    // not a different damage type, mirroring how staff Sniper vs Guard are differentiated too.
     const dtype = isTesla ? DamageType.Energy : DamageType.Kinetic;
-    const penetration = isTesla ? TESLA_PENETRATION : TURRET_PENETRATION;
+    const penetration = isTesla ? TESLA_PENETRATION : tier.penetration;
+    // Autocannon's minRange (see TURRET_TIERS/economy.js's doc comments): 0 for every other tier,
+    // so this is a no-op for 'turret'/turret_mini/turret_sniper and byte-for-byte unchanged.
+    const minRange = isTesla ? 0 : (tier.minRange || 0);
     // Suppression (see tickSuppression above): concentrated attacker presence in this turret's own
     // range degrades its own accuracy, on top of whatever the ammo state does.
     const supMult = suppressionAccuracyMult(s.suppression || 0);
-    const ammoPerShot = isTesla ? AMMO_PER_SHOT_TESLA : AMMO_PER_SHOT_TURRET;
+    const ammoPerShot = isTesla ? AMMO_PER_SHOT_TESLA : tier.ammoPerShot;
     const hasAmmo = ammo >= ammoPerShot;
     const damage = hasAmmo ? baseDamage : baseDamage * TURRET_FALLBACK_DAMAGE_MULT;
     const effAccuracy = (hasAmmo ? accuracyMult : accuracyMult * TURRET_FALLBACK_ACCURACY_MULT) * supMult;
@@ -890,9 +1120,9 @@ export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng 
       continue;
     }
 
-    const bestI = nearestAliveAttacker(attackers, s.x, s.y, range);
+    const bestI = nearestAliveAttacker(attackers, s.x, s.y, range, minRange);
     if (bestI >= 0) {
-      s.cooldown = TURRET_COOLDOWN_TICKS;
+      s.cooldown = tier.cooldown;
       onFire?.(s);
       s.outOfAmmo = !hasAmmo;
       if (hasAmmo) consumeAmmo?.(ammoPerShot);
@@ -903,11 +1133,16 @@ export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng 
 
 // Exported so draft.js can reuse it for right-click "attack this target" detection (is there a
 // live attacker under the cursor?) instead of re-implementing the same nearest-in-range scan.
-export function nearestAliveAttacker(attackers, x, y, maxRange) {
+// minRange (turret_auto's autocannon tradeoff, see TURRET_TIERS above): defaults to 0, so every
+// pre-existing call site (draft.js, input.js, tickTurrets' tesla/mortar branches, tests) keeps
+// its exact old "closest attacker within maxRange, full stop" behavior -- a target strictly closer
+// than minRange is skipped entirely, same as if it were out of range on the far side.
+export function nearestAliveAttacker(attackers, x, y, maxRange, minRange = 0) {
   let bestI = -1, bestDist = maxRange;
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
     const d = Math.hypot(attackers.x[i] - x, attackers.y[i] - y);
+    if (d < minRange) continue;
     if (d < bestDist) { bestDist = d; bestI = i; }
   }
   return bestI;
@@ -934,7 +1169,7 @@ export function nearestAliveAttacker(attackers, x, y, maxRange) {
 // world.js wires this to relationships.js's logFight so citizens.js's computeCitizenUnrestScore
 // has a real "Fighting Nearby" signal to read (Prison Architect dynamicRep.txt) instead of
 // nothing at all -- distinct from onDowned above, which only fires on the downed/kill transition.
-export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math.random, accuracyMult = 1, onContact = null) {
+export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math.random, accuracyMult = 1, onContact = null, roster = null, idOf = null) {
   for (let i = 0; i < attackers.count; i++) {
     if (!attackers.isAliveAt(i)) continue;
     // Non-lethal incapacitation (see applyStun/tickAttackers above): a stunned attacker can't
@@ -964,7 +1199,12 @@ export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math
         continue;
       }
 
-      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c) * augmentHealthMultFor(citizens, c);
+      // Guard rank promotion (security.js): Officer/Specialist toughness bonus, staff-only (a
+      // plain citizen has no roster entry, guardRankCombatMult falls back to GuardRank.Base = 1x).
+      // roster/idOf are optional (defensive default for any older/test caller) -- no-op to 1x when
+      // absent, same backward-compatible pattern hasVest?.[c] just below already uses.
+      const guardToughMult = roster && idOf ? guardRankCombatMult(roster, idOf(c)).healthMult : 1;
+      const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c) * augmentHealthMultFor(citizens, c) * guardToughMult;
       const baseDamage = (ATTACKER_CITIZEN_DAMAGE * arch.damageMult) / healthMult;
       // Vest armor (see the "citizen armor (Vest)" section above) -- citizens.hasVest is a plain
       // Uint8Array duck-typed off the passed-in store, same access pattern as citizens.trait just
@@ -982,6 +1222,58 @@ export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math
     }
   }
 }
+
+// ---------------------------------------------------------------- range-based accuracy falloff
+// RimWorld's real 4-band accuracy-by-range system (Touch/Short/Medium/Long, each weapon defining
+// its own AccuracyTouch/Short/Medium/Long) -- staff combat previously used one flat accuracyMult
+// regardless of how far the target actually was, so a guard plinking at maximum range was exactly
+// as reliable as one standing next to their target. Scoped to tickStaffCombat ONLY, per the task
+// brief -- turret accuracy is untouched (turrets already have their own suppression/ammo accuracy
+// modifiers and this project's turret balance is flagged BALANCE-CRITICAL elsewhere in this file;
+// staff weapons were the explicit priority).
+//
+// Band edges are FRACTIONS of the shooter's own current range (post weapon-tier rangeMult), not
+// fixed world-unit thresholds, so a Sniper's much longer range and a Guard's short range both get
+// a full touch->long spread instead of a sniper's "medium" shot landing inside a guard's
+// fixed-unit "long" band.
+//
+// Multiplier tuning was NOT picked from thin air: this project's real ATTACKER_SPEED/GUARD_RANGE/
+// GUARD_COOLDOWN/SNIPER_RANGE/SNIPER_COOLDOWN constants were fed into a standalone approach-and-
+// fire simulation (attacker enters range, guard/sniper fires every cooldown while the attacker
+// keeps closing, same movement math tickAttackers uses) to find the REAL population-weighted
+// distribution of shot distances across a Grunt/Skirmisher/Brute approach and a Sniper engagement
+// -- roughly touch 9% / short 25% / medium 37% / long 29% of all shots fired. ACCURACY_BAND_MULT's
+// four values were then chosen so that distribution's weighted average lands within ~2% of the old
+// flat 1.0 baseline (1.30*.09 + 1.15*.25 + 1.00*.37 + 0.85*.29 ~= 1.02), per this session's own
+// balance-regression concerns -- this is meant to add real "closer is more reliable" texture
+// without silently nerfing (or buffing) overall staff-combat DPS. Monotonically decreasing with
+// distance, same shape as RimWorld's own accuracy curve for most guns. Re-verify with a real soak
+// if these are ever retuned -- this was a simulation of the MOVEMENT math, not a live engine soak.
+export const ACCURACY_BAND_MULT = Object.freeze({ touch: 1.30, short: 1.15, medium: 1.0, long: 0.85 });
+const ACCURACY_BAND_FRACTIONS = Object.freeze({ touch: 0.15, short: 0.4, medium: 0.75 }); // long = anything beyond medium's own fraction
+
+/** Multiplier for a shot fired at `distance` out of a weapon's current `maxRange` -- combines
+ *  multiplicatively with the existing weather/suppression/ammo accuracyMult chain, it does not
+ *  replace any of them. Exported in case draft.js's drafted-combat mirror wants the same curve. */
+export function rangeAccuracyMult(distance, maxRange) {
+  if (maxRange <= 0) return ACCURACY_BAND_MULT.long;
+  const frac = distance / maxRange;
+  if (frac <= ACCURACY_BAND_FRACTIONS.touch) return ACCURACY_BAND_MULT.touch;
+  if (frac <= ACCURACY_BAND_FRACTIONS.short) return ACCURACY_BAND_MULT.short;
+  if (frac <= ACCURACY_BAND_FRACTIONS.medium) return ACCURACY_BAND_MULT.medium;
+  return ACCURACY_BAND_MULT.long;
+}
+
+// ---------------------------------------------------------------- burst fire
+// Real RimWorld multi-shot-per-activation mechanic for higher-tier guns (e.g. the real Assault
+// Rifle's burstShotCount: 3) -- a flat 1-shot-per-activation left Rifle/Heavy Armory issuance a
+// pure damage/range/cooldown multiplier with no "more rounds downrange" texture of its own. Keyed
+// off the WEAPON TIER STRING (security.js's WeaponTier: 'Sidearm'/'Rifle'/'Heavy'/'StunBaton'),
+// not a new field added to security.js's own WEAPON_TIERS table -- security.js is a different
+// file/agent's scope this session, so this stays entirely inside siege.js rather than risking a
+// concurrent edit collision there. Any tier not listed here (Sidearm, StunBaton) defaults to 1
+// shot -- byte-for-byte the old behavior for anyone nobody's built a Rifle/Heavy Armory tier for.
+const BURST_SHOTS_BY_WEAPON = Object.freeze({ Rifle: 2, Heavy: 3 });
 
 // Guards/snipers fight back with their personal weapon (short/long range respectively),
 // separate from turret coverage. Gains combat skill on a confirmed kill.
@@ -1008,21 +1300,27 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKi
 
     // Armory-issued weapon tier (security.js WEAPON_TIERS/tickArmoryIssuance) multiplies the
     // role's baseline stats -- Sidearm is 1x everywhere (identical to the old flat constants) for
-    // any guard/sniper nobody's built an Armory for yet.
-    const tier = WEAPON_TIERS[roster.weaponOf(idOf(i))] || WEAPON_TIERS.Sidearm;
+    // any guard/sniper nobody's built an Armory for yet. weaponKey (the raw string, e.g. 'Rifle')
+    // kept alongside the resolved tier object -- BURST_SHOTS_BY_WEAPON above is keyed by this
+    // string, not by the tier object itself.
+    const weaponKey = roster.weaponOf(idOf(i));
+    const tier = WEAPON_TIERS[weaponKey] || WEAPON_TIERS.Sidearm;
     // Suppression (see tickSuppression's doc comment above) -- read once, applied to whichever
     // branch below actually takes a shot (lethal or non-lethal).
     const supMult = suppressionAccuracyMult(citizens.suppression[i] || 0);
 
     // Stun Baton (security.js WeaponTier.StunBaton): a melee tool already -- the ammo mechanic
     // deliberately doesn't touch it (see AMMO_PER_SHOT_GUARD's doc comment), so this branch is
-    // unchanged from before this feature existed except for the added suppression multiplier.
+    // unchanged from before this feature existed except for the added suppression AND range-based
+    // accuracy multipliers.
     if (tier.nonLethal) {
       const range = (kind === 'Sniper' ? SNIPER_RANGE : GUARD_RANGE) * tier.rangeMult;
       const targetI = nearestAliveAttacker(attackers, citizens.x[i], citizens.y[i], range);
       if (targetI >= 0) {
         citizens._staffCooldown[i] = Math.round((kind === 'Sniper' ? SNIPER_COOLDOWN : GUARD_COOLDOWN) * tier.cooldownMult);
-        if (rollsHit(rng, accuracyMult * supMult) && attackers.isAliveAt(targetI) && rng() < tier.stunChance) {
+        const dist = Math.hypot(attackers.x[targetI] - citizens.x[i], attackers.y[targetI] - citizens.y[i]);
+        const rMult = rangeAccuracyMult(dist, range);
+        if (rollsHit(rng, accuracyMult * supMult * rMult) && attackers.isAliveAt(targetI) && rng() < tier.stunChance) {
           applyStun(attackers, targetI, tier.stunDurationTicks);
         }
       }
@@ -1039,7 +1337,10 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKi
 
     const baseDamage = kind === 'Sniper' ? SNIPER_DAMAGE : GUARD_DAMAGE;
     const range = hasAmmo ? (kind === 'Sniper' ? SNIPER_RANGE : GUARD_RANGE) * tier.rangeMult : GUARD_FALLBACK_RANGE;
-    const damage = (hasAmmo ? baseDamage * tier.damageMult : baseDamage * GUARD_FALLBACK_DAMAGE_MULT) * augmentDamageMultFor(citizens, i);
+    // Guard rank promotion (security.js, real Prison Architect guardrank_settings.txt): Officer/
+    // Specialist attack-power bonus stacks on top of augment/tier/ammo-fallback multipliers.
+    const damage = (hasAmmo ? baseDamage * tier.damageMult : baseDamage * GUARD_FALLBACK_DAMAGE_MULT)
+      * augmentDamageMultFor(citizens, i) * guardRankCombatMult(roster, idOf(i)).attackMult;
     const cooldown = Math.round((kind === 'Sniper' ? SNIPER_COOLDOWN : GUARD_COOLDOWN) * (hasAmmo ? tier.cooldownMult : 1));
     // Guards carry conventional sidearms (Kinetic); snipers carry the long-range armor-piercing
     // rifle (Energy), so a sniper line is the personnel answer to Brutes/Bosses. A dry-fallback
@@ -1054,15 +1355,29 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKi
     const targetI = nearestAliveAttacker(attackers, citizens.x[i], citizens.y[i], range);
     if (targetI >= 0) {
       citizens._staffCooldown[i] = cooldown;
-      const landed = rollsHit(rng, accuracyMult * supMult);
-      // Ammo is spent on pulling the trigger (a real shot was taken), not just on a confirmed hit
-      // -- same "a shot was fired" framing tickTurrets already uses for its own cooldown. A dry
-      // fallback melee swing costs nothing (there's no ammo left to spend).
-      if (hasAmmo) consumeAmmo?.(ammoPerShot);
-      if (landed && damageAttacker(attackers, targetI, damage, dtype, penetration, rng)) {
-        citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]] * ageBandFor(citizens.age[i]).skillGainMult;
-        onScrap?.(SCRAP_PER_KILL);
-        onKill?.();
+      // Range-based accuracy falloff (see ACCURACY_BAND_MULT's doc comment above) -- distance is
+      // measured once per activation, not re-measured per burst shot below (the target isn't
+      // moving mid-tick).
+      const dist = Math.hypot(attackers.x[targetI] - citizens.x[i], attackers.y[targetI] - citizens.y[i]);
+      const rMult = rangeAccuracyMult(dist, range);
+      // Burst fire (BURST_SHOTS_BY_WEAPON above): a dry fallback melee swing never bursts (no
+      // ammo left to spend on extra shots, and it's fists/a knife, not a gun) -- Sidearm and any
+      // future tier not listed there also default to the old single-shot behavior.
+      const burstShots = hasAmmo ? (BURST_SHOTS_BY_WEAPON[weaponKey] || 1) : 1;
+      let target = targetI;
+      for (let shot = 0; shot < burstShots; shot++) {
+        if (!attackers.isAliveAt(target)) break; // target's already down -- nothing left for the rest of this burst to hit
+        const landed = rollsHit(rng, accuracyMult * supMult * rMult);
+        // Ammo is spent on pulling the trigger (a real shot was taken), not just on a confirmed
+        // hit -- same "a shot was fired" framing tickTurrets already uses for its own cooldown,
+        // now applied per burst shot. A dry fallback melee swing costs nothing (burstShots is 1).
+        if (hasAmmo) consumeAmmo?.(ammoPerShot);
+        if (landed && damageAttacker(attackers, target, damage, dtype, penetration, rng)) {
+          citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]] * ageBandFor(citizens.age[i]).skillGainMult;
+          onScrap?.(SCRAP_PER_KILL);
+          onKill?.();
+          break; // target's dead -- rest of the burst has nothing left to hit
+        }
       }
     }
   }

@@ -146,10 +146,30 @@ function isNearActiveNuclearGenerator(structures, x, y) {
   return false;
 }
 
+// SolarFlare-style grid blackout (real RimWorld GameCondition_DisableElectricity -- see
+// weather.js's tickSolarFlareCondition, the map-wide hazard condition that drives this flag).
+// Module-level rather than threaded through as a parameter: isPoweredAt/hasPoweredBonus are
+// called as (structures, x, y) from siege.js/world.js/vehicles.js with no `world` reference in
+// scope at those call sites, and adding one would mean editing every call site across files this
+// task doesn't own -- so this mirrors the module-level mutable-cache pattern this file already
+// uses for _cachedSignature/_cachedEnergized/_cachedOverloadSignature above, just for a flag
+// instead of a cache. Set every tick from weather.js's tickSolarFlareCondition (mirrors
+// world.solarFlareActive 1:1); defaults false so a caller that never touches solar-flare code
+// (e.g. any existing test) sees unchanged behavior.
+let _solarFlareActive = false;
+
+/** Called once per tick by weather.js's tickSolarFlareCondition. While true, isPoweredAt (and
+ *  therefore hasPoweredBonus, which gates through it below) reports no power anywhere on the
+ *  map -- real DisableElectricity hits every electrical device map-wide, not a targeted subset. */
+export function setSolarFlareActive(active) {
+  _solarFlareActive = !!active;
+}
+
 // A consumer draws power if it sits on, or orthogonally touches, an energized tile -- so a
 // turret can either hug the generator directly or be fed by a wire run from across the map --
 // or if it's simply within a nuclear generator's wireless radius (no wire needed at all).
 export function isPoweredAt(structures, x, y) {
+  if (_solarFlareActive) return false; // grid-wide blackout -- see setSolarFlareActive above
   if (isNearActiveNuclearGenerator(structures, x, y)) return true;
   const energized = energizedTiles(structures);
   if (energized.size === 0) return false;

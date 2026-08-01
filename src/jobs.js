@@ -20,7 +20,8 @@ import { dependencyRateMultFor } from './supplies.js';
 import { epidemicMoveMultFor } from './epidemic.js';
 import { findJoinableSite, applyAttendingTick, completeSession, roomPostFor, isSiteStaffed, PROGRAM_DEFS } from './programs.js';
 import { tryClaimForcedJob } from './forcejob.js';
-import { hazardRefillMult } from './weather.js';
+import { hazardRefillMult, coldConstructionWorkRateMult, coldGardeningWorkRateMult } from './weather.js';
+import { inspirationWorkSpeedMultFor } from './inspirations.js';
 
 const ROOM_REFILL_BONUS = 1.3; // RimWorld/PA-style: an actually-enclosed room works better than open ground
 // Water grid payoff (water.js): a Food or Recreation zone tile fed by a pump/pipe run refills
@@ -145,6 +146,27 @@ export const WORK_CATEGORY_FIELD = {
   [WorkCategory.Animal]: 'workPriorityAnimal',
   [WorkCategory.Cleaning]: 'workPriorityCleaning',
 };
+// disabledWork lookup (traits.js's optional disabledWork array, RimWorld's real disabledWorkTags
+// pattern -- see that file's top-of-file doc comment): plain key-name strings, NOT
+// WORK_CATEGORY_LABELS' own display text just above (that has independent wording, e.g. 'Animal
+// Handling' with a space) -- a separate small map so trait data stays decoupled from label copy.
+const WORK_CATEGORY_NAME = {
+  [WorkCategory.Construction]: 'Construction',
+  [WorkCategory.Processing]: 'Processing',
+  [WorkCategory.Hauling]: 'Hauling',
+  [WorkCategory.Harvesting]: 'Harvesting',
+  [WorkCategory.Animal]: 'Animal',
+  [WorkCategory.Cleaning]: 'Cleaning',
+};
+// True if citizen i's trait flatly disallows this WorkCategory -- checked before a category is
+// ever attempted, both by the Work Priorities custom-order loop and the legacy fixed ladder below,
+// same "trait gate checked first" precedent as breakRateMultFor/needsThrottleMultFor elsewhere in
+// this file's rate chains. Farming/Restaurant are deliberately NOT covered (they're not part of
+// the WorkCategory enum at all -- see the existing "not yet part of the Work Priorities system"
+// comments at their own tryClaim*/Idle-branch call sites below).
+function isWorkDisabledFor(store, i, cat) {
+  return !!store.trait[i]?.disabledWork?.includes(WORK_CATEGORY_NAME[cat]);
+}
 
 const SEEK_SOCIAL_THRESHOLD = 0.35;
 const SEEK_HUNGER_THRESHOLD = 0.45;
@@ -831,7 +853,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // even if it's the only thing available.
       if (store.hasWorkPriorities[i]) {
         const order = WORK_CATEGORY_ORDER
-          .filter(cat => store[WORK_CATEGORY_FIELD[cat]][i] > 0)
+          .filter(cat => store[WORK_CATEGORY_FIELD[cat]][i] > 0 && !isWorkDisabledFor(store, i, cat))
           .sort((a, b) => store[WORK_CATEGORY_FIELD[a]][i] - store[WORK_CATEGORY_FIELD[b]][i]);
         for (const cat of order) {
           if (WORK_CATEGORY_CLAIM[cat](store, i, structures, resourceNodes, world, idOf, allowedCheck)) break;
@@ -839,7 +861,12 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         continue;
       }
 
-      const blueprint = findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i), allowedCheck);
+      // disabledWork (traits.js, RimWorld's real disabledWorkTags pattern -- see isWorkDisabledFor's
+      // own doc comment above): checked once per category, right before that category's finder
+      // would otherwise run, same "trait gate first" placement the Work Priorities branch above
+      // already uses.
+      const constructionDisabled = isWorkDisabledFor(store, i, WorkCategory.Construction);
+      const blueprint = constructionDisabled ? null : findNearestBlueprint(structures, store.x[i], store.y[i], idOf(i), allowedCheck);
       if (blueprint) {
         blueprint.claimedBy = idOf(i);
         store.jobState[i] = JobState.SeekingBuild;
@@ -855,7 +882,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // gather more raw material that just piles up further behind it. tryClaimProcessing already
       // no-ops when there's no scrap banked or no unstaffed station, so this never steals an idle
       // citizen away from real hauling/harvesting work when there's nothing to process yet.
-      if (tryClaimProcessing(store, i, structures, world, idOf, allowedCheck)) continue;
+      if (!isWorkDisabledFor(store, i, WorkCategory.Processing) && tryClaimProcessing(store, i, structures, world, idOf, allowedCheck)) continue;
 
       // Farming (Agronomy research node, see FARM_CYCLE_TICKS above): checked right after
       // Processing, same "a built staffed producer beats going to fetch more raw material" logic
@@ -880,8 +907,8 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // idle-citizen's attention. With resource nodes almost always available, checking this
       // after harvesting meant no citizen ever reached it in testing -- a real bug, not a
       // priority nuance.
-      const vehicle = findUndrivenVehicle(world.vehicles, store.x[i], store.y[i], allowedCheck);
-      const node = findNearestNode(resourceNodes, store.x[i], store.y[i], allowedCheck);
+      const vehicle = isWorkDisabledFor(store, i, WorkCategory.Hauling) ? null : findUndrivenVehicle(world.vehicles, store.x[i], store.y[i], allowedCheck);
+      const node = isWorkDisabledFor(store, i, WorkCategory.Harvesting) ? null : findNearestNode(resourceNodes, store.x[i], store.y[i], allowedCheck);
 
       // Passion tie-break (RimWorld-style): only when there's a genuine choice -- both an idle
       // truck and a harvestable node are actually available this tick -- a citizen who burns for
@@ -913,7 +940,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // the idle-fallback jobs -- an idle wild animal to approach only matters once there's
       // nothing else productive to do, same reasoning as vehicle/node above but one rung further
       // down, since taming doesn't feed the scrap economy the way those two do.
-      const animal = findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i], allowedCheck);
+      const animal = isWorkDisabledFor(store, i, WorkCategory.Animal) ? null : findNearestTameableAnimal(world.wildAnimals || [], store.x[i], store.y[i], allowedCheck);
       if (animal) {
         animal.claimedBy = idOf(i);
         store.jobState[i] = JobState.SeekingAnimal;
@@ -926,7 +953,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // real 17-category list -- below Construction/Hauling/Harvesting, ahead of only Research):
       // lowest rung of the whole idle-fallback ladder, one further down than Taming. A mess only
       // gets swept once there's genuinely nothing else productive for an idle citizen to do.
-      const messyRoom = findNearestMessyRoom(world.rooms, world.grid, store.x[i], store.y[i], allowedCheck);
+      const messyRoom = isWorkDisabledFor(store, i, WorkCategory.Cleaning) ? null : findNearestMessyRoom(world.rooms, world.grid, store.x[i], store.y[i], allowedCheck);
       if (messyRoom) {
         const target = roomCentroid(messyRoom, world.grid);
         store.jobState[i] = JobState.SeekingClean;
@@ -1115,7 +1142,9 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // work-speed factors -- urgently hungry/tired citizens build measurably slower even before
       // they're miserable enough to actually go on break.
       const buildRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i) * inspirationWorkSpeedMultFor(store, i, world?.currentTick ?? 0)
+        // Deep Freeze Construction work-rate reduction (weather.js, real PA deepfreezesystem.txt).
+        * coldConstructionWorkRateMult(world);
       // bp.buildWorkMult (siege.js's Structure, per-kind construction work) slows the flat
       // BUILD_RATE down for pricier buildings -- default 1 covers any pre-existing structure
       // from a save saved before this field existed.
@@ -1137,7 +1166,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       const node = store._jobRef?.[i];
       if (!node || node.depleted) { store.jobState[i] = JobState.Idle; continue; }
       const harvestRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i) * inspirationWorkSpeedMultFor(store, i, world?.currentTick ?? 0);
       const take = Math.min(HARVEST_RATE * harvestRateMult, node.amount);
       node.amount -= take;
       onScrapGain?.(take);
@@ -1166,7 +1195,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // (detectRooms rebuilds this.rooms, see world.js) -- same defensive bail as Building's
       // destroyed-blueprint check and Harvesting's depleted-node check above.
       if (!room || !world.rooms.includes(room)) { store.jobState[i] = JobState.Idle; continue; }
-      const cleanRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world) * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i);
+      const cleanRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world) * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * inspirationWorkSpeedMultFor(store, i, world?.currentTick ?? 0);
       room.mess = Math.max(0, (room.mess || 0) - CLEAN_RATE * cleanRateMult);
       if (room.mess <= 0) store.jobState[i] = JobState.Idle;
       continue;
@@ -1193,7 +1222,10 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // bonus/malus, layered on top of the flat rate swap above rather than replacing it.
       if (world?.rng && world.rng() < TEND_VARIANCE_CHANCE) {
         const bonus = world.rng() < 0.5 ? -TEND_VARIANCE_MAG : TEND_VARIANCE_MAG;
-        store.health[targetIdx] = Math.min(1, Math.max(0, store.health[targetIdx] + bonus));
+        // Capped against maxHealth (citizens.js's permanent-scars feature), not a hardcoded 1 --
+        // a scarred citizen's ceiling is genuinely lower, and this bonus roll shouldn't be able
+        // to punch through it.
+        store.health[targetIdx] = Math.min(store.maxHealth[targetIdx] ?? 1, Math.max(0, store.health[targetIdx] + bonus));
       }
       continue;
     }
@@ -1221,7 +1253,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         station._workTimer = WORKSHOP_PROCESS_TICKS;
       }
       const processRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i) * inspirationWorkSpeedMultFor(store, i, world?.currentTick ?? 0);
       station._workTimer -= processRateMult;
       if (station._workTimer <= 0) {
         station._workTimer = 0;
@@ -1248,7 +1280,10 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // accrues real time toward the next cycle, using Structure's generic `_workTimer` field the
       // same way 'workshop' does for its own work-in-progress countdown.
       const farmRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i) * inspirationWorkSpeedMultFor(store, i, world?.currentTick ?? 0)
+        // Deep Freeze Gardening work-rate reduction (weather.js, real PA deepfreezesystem.txt --
+        // this project's Farm Plot tending is the real Gardening work type's closest equivalent).
+        * coldGardeningWorkRateMult(world);
       plot._workTimer = (plot._workTimer || 0) + farmRateMult;
       if (plot._workTimer >= FARM_CYCLE_TICKS) {
         plot._workTimer = 0;
@@ -1277,7 +1312,7 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // (that's what distinguishes this from Processing's raw-scrap-in chain). Reuses Structure's
       // generic `_workTimer` field, same as workshop/farm_plot's own work-in-progress countdown.
       const restaurantRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
-        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i);
+        * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i) * inspirationWorkSpeedMultFor(store, i, world?.currentTick ?? 0);
       station._workTimer = (station._workTimer || 0) + restaurantRateMult;
       if (station._workTimer >= RESTAURANT_CYCLE_TICKS) {
         station._workTimer = 0;

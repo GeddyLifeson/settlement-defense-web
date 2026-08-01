@@ -53,7 +53,7 @@ const CINEMA_SHOWING_GLOW_TICKS = 20;
 // values (computed by hand from the pre-brief hex constants). Full saturation is reserved for
 // hazard/attention states (downed gray, onBreak desaturate(), the Boss's pulsing threat ring/
 // crown), not baseline per-role appearance.
-const ROLE_COLOR = {
+export const ROLE_COLOR = {
   [StaffRoleKind.Guard]: '#e1b93e',
   [StaffRoleKind.Sniper]: '#ba68cf',
   [StaffRoleKind.K9Handler]: '#e1b93e',
@@ -69,7 +69,7 @@ const ROLE_COLOR = {
 
 // Baseline citizen/attacker skin tone (warm), desaturated ~20% from the original #e8c9a0 per the
 // style brief's warm-vs-cool material split -- skin/hair stay warm, uniform/gear tints stay cool.
-const CITIZEN_SKIN = '#e1c8a8';
+export const CITIZEN_SKIN = '#e1c8a8';
 
 const ZONE_BORDER = {
   [ZoneKind.Bedroom]: '#5a6fb0',
@@ -987,7 +987,7 @@ export class Renderer {
     this._droneQueueLength = world.droneFabricationQueue?.length || 0; // read back by the 'fabrication_bay' shape for its work-light pulse
     this._lastTick = world.currentTick; // read back by the 'cinema' shape for its active-showing glow
     for (const s of world.structures) {
-      if (s.destroyed && s.kind === 'trap') continue; // traps vanish once triggered
+      if (s.destroyed && (s.kind === 'trap' || s.kind === 'trap_spike' || s.kind === 'trap_explosive')) continue; // traps vanish once triggered
       const [sx, sy] = this.worldToScreen(s.x, s.y);
       const size = CELL * this.zoom * 0.85;
 
@@ -1080,7 +1080,11 @@ export class Renderer {
       ctx.beginPath(); ctx.arc(sx, sy, size * 0.09, 0, Math.PI * 2); ctx.fill();
       return;
     }
-    if (s.kind === 'trap') {
+    if (s.kind === 'trap' || s.kind === 'trap_spike' || s.kind === 'trap_explosive') {
+      // trap_spike/trap_explosive (siege.js's TRAP_KINDS, real PA trap variety) reuse the
+      // original single trap's sprite/color -- distinct per-kind art is a reasonable future
+      // follow-up, but rendering as the wrong structure entirely (the generic turret fallback
+      // below) would actively mislead the player, so this is the priority fix.
       const drew = drawSprite(ctx, 'trap',
         { FILL: 'rgba(140,20,20,0.55)', FILL_HI: 'rgba(190,40,30,0.55)', TEETH: 'rgba(230,200,180,0.7)', OUTLINE },
         sx, sy, size * 0.75);

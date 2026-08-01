@@ -1,5 +1,6 @@
 // Scrap economy: build costs and combat rewards. Condensed from SD.Siege's scrap balancing.
 import { coveragePlanDiscountMult } from './coverageplans.js';
+import { researchBuildCostMultiplier } from './research.js';
 
 export const BUILD_COST = {
   wall: 2,
@@ -8,7 +9,34 @@ export const BUILD_COST = {
   pipe: 1, // water conduit, mirrors wire's near-free long-run pricing, see water.js
   fence: 3,
   trap: 15,
+  // Trap variety (RimWorld's real deadfall/IED-trap-tier split): trap (above) is kept exactly as
+  // it always was for save-compat -- these are ADDITIONAL sub-kinds, not a replacement, same
+  // "bare kind kept, new variants added" precedent as garage_recycling/garage_garbage's fuel
+  // split above. trap_spike is a cheap melee/Blunt single-target deadfall (real RimWorld spike
+  // trap: cheap, wood-tier); trap_explosive is a costlier small-radius Explosive trap that can
+  // catch more than one attacker at once, priced above plain trap for that AoE upside. See
+  // siege.js's TRAP_KINDS for the actual damage/radius numbers.
+  trap_spike: 8,
+  trap_explosive: 24,
   turret: 25,
+  // Turret tiers (RimWorld's real mini-turret/autocannon/sniper-turret roster, each a genuine
+  // tradeoff instead of a strict upgrade): 'turret' above is kept exactly as it always was for
+  // save-compat AND because world.js still spawns it directly as the wave-4 starter turret --
+  // these three are ADDITIONAL toolbar options. turret_mini: cheap/short-range, priced below
+  // plain turret. turret_auto: longer range and harder-hitting than plain turret, but can't
+  // engage a target inside its minRange (siege.js's TURRET_TIERS) -- the real autocannon
+  // can't-hit-close-targets tradeoff. turret_sniper: the priciest, longest range, single heavy
+  // shot, and the most expensive ammo-per-shot (siege.js's AMMO_PER_SHOT_TURRET_SNIPER) -- real
+  // RimWorld anchor: a sniper-tier turret trades rate-of-fire and cost for range and alpha strike.
+  turret_mini: 15,
+  turret_auto: 38,
+  turret_sniper: 58,
+  // Mortar (RimWorld's real indirect-fire siege weapon): long range, inaccurate (scatter around
+  // the target point rather than a guaranteed hit, see siege.js's MORTAR_SCATTER_RADIUS), high
+  // per-shot damage, slow reload, expensive ammo (AMMO_PER_SHOT_MORTAR) -- priced above every
+  // turret tier including sniper, matching its real-RimWorld role as the most expensive, highest
+  // ceiling defense structure in the roster.
+  mortar: 65,
   bed: 8,
   table: 6,
   door: 5,
@@ -187,6 +215,9 @@ export function buildCost(world, kind) {
   // buildables -- stacks multiplicatively with a trader voucher, same as any other discount
   // layered on top of the base price.
   cost *= coveragePlanDiscountMult(world, kind);
+  // LowerTaxes research node (research.js, real Prison Architect Finance branch): a flat,
+  // permanent construction-cost discount once unlocked, stacks with the above like any other layer.
+  cost *= researchBuildCostMultiplier(world.research);
   return Math.max(0, Math.round(cost));
 }
 
@@ -201,4 +232,30 @@ export function spend(world, kind) {
   if (world.finance) world.finance.buildSpend += cost; // budget-report ledger, see world.js's finance comment
   if (traderVoucherActive(world)) world._traderVoucherUses -= 1; // one use consumed per purchase, discounted or not
   return true;
+}
+
+// Demolish refund (input.js's new Demolish tool -- this project previously had NO way to remove a
+// placed structure or cancel an unfinished blueprint at all, an explicit project-owner ask).
+// A finished structure refunds a real fraction of its cost rather than 100% (removing something
+// you already got value from shouldn't be a free undo) or 0% (a misplaced structure would be a
+// total loss, discouraging the player from ever using the tool) -- 50% lands in the middle, the
+// same "meaningful but not free" fraction RimWorld's own deconstruct-for-partial-materials
+// convention uses. Deliberately keyed off the FLAT BUILD_COST table, not the discount-aware
+// buildCost() above -- a refund based on whatever discount happens to be active AT DEMOLISH TIME
+// (trader voucher, coverage plan) rather than what was actually paid at build time would let a
+// player build at full price then demolish during an active discount window for a bigger refund
+// than they spent, a real scrap-generation exploit; the flat table has no such time-dependence.
+// Ideally this would post to its own `world.finance.demolishRefund` ledger category (matching the
+// existing ratLoss/corruptionLoss pattern), but world.js's finance object isn't owned by this
+// task -- input.js instead applies the refund straight to `world.scrap`, see that file's
+// `_removeStructureAt`. A finance-ledger category for this is a reasonable, low-risk follow-up
+// for whoever next touches world.js.
+export const DEMOLISH_REFUND_FRACTION = 0.5;
+
+/** Scrap refunded for demolishing a FINISHED (not under-construction) structure of `kind`. An
+ *  unbuilt blueprint refunds nothing -- input.js's Demolish tool deletes a blueprint outright
+ *  without calling this at all (no cost was fully spent on it yet beyond what jobs.js's
+ *  construction-progress tracking already accounts for). */
+export function demolishRefund(kind) {
+  return Math.round((BUILD_COST[kind] || 0) * DEMOLISH_REFUND_FRACTION);
 }

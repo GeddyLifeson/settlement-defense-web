@@ -1,7 +1,7 @@
 // Player input: build palette, zone painting, pause/speed. This is what turns the sim into an
 // actual game instead of a passive screensaver -- there was no player agency before this.
 import { ZoneKind } from './zones.js';
-import { BUILD_COST, spend, canAfford } from './economy.js';
+import { BUILD_COST, spend, canAfford, demolishRefund } from './economy.js';
 import { isToolUnlocked, researchNodeForTool } from './research.js';
 import { nearestAliveAttacker } from './siege.js';
 import { issueMoveOrder, issueAttackOrder } from './draft.js';
@@ -162,6 +162,26 @@ export const TOOLS = [
   // shift-digit/shift-punctuation/uppercase-panel-shortcut key up through 'E' is claimed above --
   // SHIFT+H ('H', mnemonic "Hygiene") is the next free one.
   { key: 'H', tool: 'shower', label: 'Shower (needs a water connection)', cost: BUILD_COST.shower },
+  // Turret tiers (siege.js's TURRET_TIERS, real RimWorld mini-turret/autocannon/sniper-turret
+  // roster) -- 'turret' (key '2') is untouched, these are additional tiers. Every unshifted/
+  // shift-digit/shift-punctuation/uppercase-panel-shortcut key up through 'H' is claimed above --
+  // 'K'/'L'/'S' are the next free ones (not intercepted by _onKey's overlay-toggle checks below,
+  // and 'S' isn't the reserved restart key -- only lowercase 'r'/uppercase 'R' are).
+  { key: 'K', tool: 'turret_mini', label: 'Mini Turret', cost: BUILD_COST.turret_mini },
+  { key: 'L', tool: 'turret_auto', label: 'Autocannon Turret (cannot hit adjacent targets)', cost: BUILD_COST.turret_auto },
+  { key: 'S', tool: 'turret_sniper', label: 'Sniper Turret', cost: BUILD_COST.turret_sniper },
+  // Mortar (siege.js's indirect-fire structure, see its own doc comment): 'O' is the next free key.
+  { key: 'O', tool: 'mortar', label: 'Mortar (indirect fire, inaccurate)', cost: BUILD_COST.mortar },
+  // Trap variety (siege.js's TRAP_KINDS) -- 'trap' (key '4') is untouched, these are additional
+  // kinds. 'Q'/'U' are the next free keys.
+  { key: 'Q', tool: 'trap_spike', label: 'Spike Trap (cheap, single-target)', cost: BUILD_COST.trap_spike },
+  { key: 'U', tool: 'trap_explosive', label: 'Explosive Trap (small-radius, hits multiple)', cost: BUILD_COST.trap_explosive },
+  // Demolish (explicit project-owner ask: this project previously had NO way to remove a placed
+  // structure or cancel an unfinished blueprint at all, see _onDown/_demolishAt below). 'X' is
+  // free and reads naturally as "remove". cost: null, same convention as Select/zone tools --
+  // this never spends scrap itself (removing a finished structure REFUNDS scrap instead, see
+  // _removeStructureAt).
+  { key: 'X', tool: 'demolish', label: 'Demolish (click a structure to remove it)', cost: null },
 ];
 
 const TOOL_KEYS = Object.fromEntries(TOOLS.map(t => [t.key, t.tool]));
@@ -448,8 +468,66 @@ export class InputController {
       }
     }
 
+    // Demolish (see _demolishAt below): special-cased in _onDown ONLY, same "act once per
+    // mousedown, not on every _place() call during a drag" pattern as Power Switch above -- unlike
+    // toggling a switch back and forth (harmless), demolish is a real, only-partially-refunded
+    // destructive action, so a paint-drag across several tiles must never rapid-demolish every
+    // structure it crosses. Returns unconditionally -- demolish never falls into the generic
+    // _painting/_place() buildable-placement pipeline below.
+    if (this.tool === 'demolish') {
+      this._updateHover(e);
+      const world = this.getWorld();
+      if (world && this.hoverGridX != null) this._demolishAt(world, this.hoverGridX, this.hoverGridY);
+      return;
+    }
+
     this._painting = true;
     this._place();
+  }
+
+  // Shared removal logic (see _demolishAt below AND _place()'s blueprint-override branch, which
+  // both need "remove whatever structure is at this array slot" with the exact same refund rule --
+  // an unbuilt blueprint is deleted outright (no cost was fully spent on it yet beyond what
+  // jobs.js's construction-progress tracking already accounts for); a FINISHED structure refunds
+  // DEMOLISH_REFUND_FRACTION (economy.js's demolishRefund, 50%) of its BUILD_COST back to
+  // world.scrap directly -- there's no dedicated finance-ledger category for this refund because
+  // that object lives in world.js, which this task doesn't own (see economy.js's demolishRefund
+  // doc comment for the fuller note on that).
+  _removeStructureAt(world, idx) {
+    const s = world.structures[idx];
+    const wasBlueprint = s.underConstruction;
+    world.structures.splice(idx, 1);
+    if (wasBlueprint) return { refund: 0, wasBlueprint };
+    const refund = demolishRefund(s.kind);
+    if (refund > 0) world.scrap += refund;
+    return { refund, wasBlueprint };
+  }
+
+  // Demolish tool's actual click handler (see the _onDown special-case above). Only ever removes
+  // entries in world.structures -- a FINISHED wall is a real, known gap: once a wall blueprint
+  // completes, world.js's own structures-filter pass converts it into `grid.wallThingId` and drops
+  // it from world.structures entirely (see that file's own comment on the wall/garage handoff), so
+  // there's no structure object left here to find/remove. grid.js/world.js aren't owned by this
+  // task, so a finished wall can't be demolished yet -- surfaced as an honest toast below instead
+  // of a silent no-op, rather than pretending it worked.
+  _demolishAt(world, x, y) {
+    // Same bounds guard _place() applies before ever touching grid.wallThingId -- without it, an
+    // out-of-range (x,y) (reachable in practice: the camera can pan/zoom so a click near the
+    // canvas edge maps to a world cell outside the grid) reads past the end of the typed array,
+    // gets back `undefined`, and `undefined !== 0` would misreport "finished wall" for empty space
+    // outside the map entirely.
+    if (x < 0 || y < 0 || x >= world.width || y >= world.height) { this.onToast?.('Nothing to demolish here'); return; }
+    const idx = world.structures.findIndex(s => !s.destroyed && Math.floor(s.x) === x && Math.floor(s.y) === y);
+    if (idx < 0) {
+      if (world.grid.wallThingId[world.grid.index(x, y)] !== 0) {
+        this.onToast?.('Cannot demolish a finished wall yet');
+      } else {
+        this.onToast?.('Nothing to demolish here');
+      }
+      return;
+    }
+    const { refund, wasBlueprint } = this._removeStructureAt(world, idx);
+    this.onToast?.(wasBlueprint ? 'Blueprint cancelled' : (refund > 0 ? `Demolished -- refunded ${refund} scrap` : 'Demolished'));
   }
 
   _onUp(e) {
@@ -542,10 +620,10 @@ export class InputController {
       return;
     }
 
+    // A finished wall still hard-blocks placement -- see _demolishAt's doc comment above for why
+    // (it's not even a world.structures entry anymore by the time it's finished, this project has
+    // no way to un-wall a tile without touching grid.js/world.js).
     if (world.grid.wallThingId[world.grid.index(x, y)] !== 0) { this.onToast?.('Already occupied'); return; }
-    for (const s of world.structures) {
-      if (!s.destroyed && Math.floor(s.x) === x && Math.floor(s.y) === y) { this.onToast?.('Already occupied'); return; }
-    }
 
     // Tech gate (research.js) -- checked BEFORE the scrap check so a locked buildable reports the
     // real reason rather than a misleading "Not enough scrap". Fails open for ungated tools.
@@ -556,6 +634,18 @@ export class InputController {
     }
 
     if (!canAfford(world, this.tool)) { this.onToast?.('Not enough scrap'); return; }
+
+    // Blueprint override (explicit project-owner ask: "the ability to override one blueprint with
+    // another"): placing a new buildable on a tile that already holds a structure or an unbuilt
+    // blueprint now REPLACES it instead of silently blocking placement, reusing the exact same
+    // demolish-refund rule _removeStructureAt uses everywhere else (delete outright if it was
+    // still a blueprint, 50% BUILD_COST refund if it was finished) rather than a second, diverging
+    // removal path. Deliberately done AFTER the tech-gate/afford checks above, not before -- a
+    // placement that's about to fail (locked or too poor) must not demolish whatever was already
+    // standing there for nothing.
+    const existingIdx = world.structures.findIndex(s => !s.destroyed && Math.floor(s.x) === x && Math.floor(s.y) === y);
+    if (existingIdx >= 0) this._removeStructureAt(world, existingIdx);
+
     spend(world, this.tool);
     // Every buildable -- including walls -- is placed as a blueprint that a citizen has to
     // walk over and actually construct (see jobs.js JobState.Building), not instant placement.
@@ -809,6 +899,9 @@ export class InputController {
     // uppercase-only convention -- lowercase 'i' is already the Recycling Garage (Gas)
     // buildable's hotkey.
     if (e.key === 'I') { this.onToggleCoverage?.(); return; }
+    // Field Contracts overlay (quests.js, surfaced in main.js). SHIFT+Q, same uppercase-only
+    // convention -- lowercase 'q' is already the trap_spike buildable's hotkey.
+    if (e.key === 'Q') { this.onToggleQuests?.(); return; }
     // Onboarding reference panel (tutorial.js, surfaced in main.js). F1 and '?' are both free --
     // '?' is Shift+/ and appears in no TOOL_KEYS entry, and F1 collides with nothing here or in
     // main.js's F5/F9 save/load bindings. F1 needs preventDefault or the browser opens its own help.
@@ -821,6 +914,7 @@ export class InputController {
     if (e.key === 'Escape' && this.onToggleGrants) { this.onCloseGrants?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onToggleDrones) { this.onCloseDrones?.(); /* falls through to clear tool */ }
     if (e.key === 'Escape' && this.onToggleCoverage) { this.onCloseCoverage?.(); /* falls through to clear tool */ }
+    if (e.key === 'Escape' && this.onToggleQuests) { this.onCloseQuests?.(); /* falls through to clear tool */ }
     if (e.key in TOOL_KEYS) { this.setTool(TOOL_KEYS[e.key]); return; }
     if (e.key === ' ') { e.preventDefault(); this.togglePause(); return; }
     if (e.key === '+' || e.key === '=') { this.setSpeedIndex(this.speedIndex + 1); return; }

@@ -77,16 +77,23 @@ export const CLIQUES = [
     id: 'scrappers', name: 'Scrappers', color: '#c96a3e',
     preferredMisbehaviour: 'Scrapping', // reskin of real Vipers/Fighting -- short tempers, not violence against staff
     affinityTraits: ['Tough', 'Neurotic'],
+    // PreferredContraband flavor tag (see DEALER_TRADE_* below) -- this project has one unified
+    // currency (world.scrap; confirmed via economy.js's flat scrap-cost buildable list, there's no
+    // separate resource-type inventory to hoard a literal different item), so this is a label for
+    // what gets pilfered/fenced, not a second resource pool.
+    preferredResource: 'Scrap Metal',
   },
   {
     id: 'wreckers', name: 'Wreckers', color: '#9a4f9a',
     preferredMisbehaviour: 'Wrecking', // reskin of real BoneBreakers/Destroying -- property damage, reskinned genre-neutral
     affinityTraits: ['Hardy', 'Glutton'],
+    preferredResource: 'Salvaged Components',
   },
   {
     id: 'runners', name: 'Runners', color: '#3e8fc9',
     preferredMisbehaviour: 'Slipping Off', // reskin of real Jackals/Escaping -- abandoning duty, not a prison break
     affinityTraits: ['Fast', 'Loner'],
+    preferredResource: 'Spare Parts',
   },
 ];
 
@@ -135,6 +142,88 @@ const FOODFIGHT_DAMAGE_HEALTH_HIT = 0.08;
 const FOODFIGHT_MOOD_HIT = 0.05;
 const FOODFIGHT_MAX_PARTICIPANTS = 3;
 
+// ---------------------------------------------------------------------------------------------
+// Refinement pass 2 (gangsystem.txt/gangdemands.txt granularity the first two passes didn't cover
+// yet): PreferredResource dealer-trading, a singular Leader distinct from the Lieutenant
+// hierarchy, targeted rival-clique friction, a PreferredTerritoryModifier so territory doesn't
+// flip on marginal headcount noise, a one-perk rank ladder, and an Informant mechanic. Same
+// honest real-number-ported-and-scaled convention as every block above -- see each constant's own
+// doc comment for the source number and the scaling logic.
+
+// PreferredResource + dealer trading (real gangdemands.txt: TradeContrbandToDealerPercentage 60,
+// Limit 5). Layered ON TOP of the existing flat UNMET_DEMAND_SCRAP_LOSS pilfering above as a
+// small, hard-capped bonus loss, not a second independent drain source -- it only ever fires
+// alongside that already-rare unmet-demand consequence (itself gated by the full demand
+// lifecycle/cooldown), never on its own tick-driven cadence. See applyUnmetConsequence below.
+const DEALER_TRADE_CHANCE = 0.6; // real TradeContrbandToDealerPercentage 60
+const DEALER_TRADE_CAP = 5;      // real Limit 5 -- small and absolute, same order of magnitude as a single foodfight/checkpoint-reduced sub-effect elsewhere in this file
+
+// Leader role (real gangsystem.txt: a singular Leader per gang, distinct from the Lieutenant
+// hierarchy above -- LIEUTENANT_SPAN promotes several, this promotes exactly one). Needs its own
+// store.flags bit: citizens.js's CitizenFlags occupies bits 0-4 of that Uint8Array column
+// (confirmed via a full-codebase grep for `.flags[` before adding this -- nothing else claims bit
+// 5+), but this task is scoped to factions.js only, so rather than editing citizens.js's frozen
+// CitizenFlags export, the next three new roles this pass adds (Leader/SneakThief/Informant) each
+// take one of the three remaining free bits as a local raw constant.
+const LEADER_FLAG = 1 << 5;
+// LeaderDeathPeriodMinutes 360 real-minutes, scaled the same way FACTION_DEMAND_COOLDOWN_TICKS
+// above already scales real minutes against this file's DEMAND_BASE_WINDOW_TICKS anchor (720
+// real-minutes = one base demand window) -- 360/720 is a clean exactly-half.
+const LEADER_DEATH_WINDOW_TICKS = Math.round(DEMAND_BASE_WINDOW_TICKS * (360 / 720));
+const LEADER_DEATH_UNREST_BUMP = 0.15; // one-time, slightly above UNMET_DEMAND_UNREST_BUMP (0.12) -- losing a leader outright hits harder than one missed demand
+const LEADER_DEATH_MOOD_HIT = 0.12;    // one-time, applied to every alive clique member -- between GRAFFITI_CLEANUP_MOOD_HIT (0.1) and the Scrapping branch's 0.15
+
+// Targeted friction (real gangsystem.txt: TargetStartFightPercentage 5, TargetFightCooldownMinutes
+// 1440). Reuses the exact mood/OnBreak shape the existing Scrapping unmet-demand branch already
+// established in applyUnmetConsequence below, rather than inventing a new violence mechanic --
+// no health loss, no scrap, purely a real mood hit + OnBreak work-speed penalty (same mechanisms,
+// smaller/rarer than a foodfight).
+const TARGET_FRICTION_CHECK_INTERVAL_TICKS = 100; // throttle, same order as FOODFIGHT_CHECK_INTERVAL_TICKS
+const TARGET_FRICTION_CHANCE = 0.05; // real TargetStartFightPercentage 5, kept unscaled -- dimensionless probability, same precedent as the FOODFIGHT_* percentages' own doc comment
+// The leader-death "aggression spike" window (LEADER_DEATH_WINDOW_TICKS) manifests here rather
+// than as a separate standalone spike system: while a clique is leaderless, its members are twice
+// as likely to start targeted friction. See applyLeaderDeathConsequence/tickTargetedFriction below.
+const TARGET_FRICTION_LEADER_DEATH_MULT = 2;
+const TARGET_FRICTION_COOLDOWN_TICKS = Math.round(DEMAND_BASE_WINDOW_TICKS * (1440 / 720)); // real 1440/720 = exactly 2x a base demand window, same anchor as LEADER_DEATH_WINDOW_TICKS
+const TARGET_FRICTION_MOOD_HIT = 0.12;
+
+// PreferredTerritoryModifier (real gangsystem.txt: 10.0, a bonus weight toward a clique's
+// currently-held territory when a room is contested). Real PA cliques run tens of members deep,
+// where a flat 10.0 is a meaningful-but-not-absolute thumb on the scale; this project's per-room
+// headcounts are single digits (TERRITORY_MIN_MEMBERS is 3), so the literal number would be
+// unbeatable -- scaled down to a flat +1, enough to require a clear (not marginal, e.g. 4-vs-3)
+// headcount win to flip an already-claimed room, without making a flip impossible outright. See
+// tickTerritory below for exactly where this applies (only to the CURRENT holder's weighted
+// count, so a room's very first claim is unaffected).
+const PREFERRED_TERRITORY_BONUS = 1;
+
+// Rank ladder + one perk (real gangsystem.txt: PromotionRep/UpgradeRep/SpecialRep gate a clique
+// member's perks as they rack up reputation -- this pass implements exactly one perk, per the task
+// brief's own "one is enough for a first pass" instruction). Rep is earned the same "genuinely
+// earned by real play" way demand progress itself already is -- see tickDemandProgress below -- a
+// member gains rep only when their own Recreating job genuinely counts toward their clique's
+// active demand, never on a timer.
+const REP_PER_CONTRIBUTION = 1;
+const REP_PERK_THRESHOLD = 15; // ~15 genuine demand contributions -- reachable in a session, not trivial
+// Sneak Thief perk (the simplest real PA gang-member perk tier, per the task brief's own example):
+// a perked member's clique gets a GUARANTEED-success dealer trade (DEALER_TRADE_CHANCE above)
+// instead of a 60% roll -- higher RELIABILITY of an already-capped, already-bounded small pilfer,
+// never a bigger cap and never a new income/loss source of its own.
+const SNEAK_THIEF_FLAG = 1 << 6;
+
+// Informant mechanic (real gangsystem.txt: InformantCoverageBoost 20, CooldownDecreaseEachRecruiter
+// 10 capped 30) -- a citizen secretly informing on their own clique shortens that clique's demand
+// cooldown. This codebase has no concept of a "warning lead time" distinct from the cooldown
+// itself (tickDemandLifecycle below is the only place a new demand's timing is decided), so both
+// real PA fields collapse into the one effect that actually exists here: a shorter wait before the
+// clique's next demand. Bit 7 is the last free bit in the flags byte (LEADER_FLAG/SNEAK_THIEF_FLAG
+// above already claimed bits 5-6) -- widening that Uint8Array column is out of scope for this task.
+const INFORMANT_FLAG = 1 << 7;
+const INFORMANT_CHECK_INTERVAL_TICKS = 200; // rare, low-frequency roll -- informants are meant to stay uncommon
+const INFORMANT_CHANCE_PER_CHECK = 0.02; // per clique per check, not per member -- bounds this to roughly 0-1 informants per clique over a long game
+const INFORMANT_COOLDOWN_REDUCTION_PER = 0.10; // real CooldownDecreaseEachRecruiter 10, unscaled fraction
+const INFORMANT_COOLDOWN_REDUCTION_CAP = 0.30;  // real cap 30
+
 function demandDesc(tier) {
   return tier === 'escalated'
     ? `Give us MORE time in the Recreation zone -- ${DEMAND_ESCALATED_TARGET} visits within the window, or else.`
@@ -172,11 +261,18 @@ export class FactionState {
     this.completions = {};         // clique id -> lifetime count of satisfied demands (UI/debug only)
     this.cooldownUntil = {};       // clique id -> tick before which a new demand won't be issued
     this._recreatingLastTick = new Set(); // citizen ids that were JobState.Recreating last tick (transition detector)
+    this.leaderId = {};                    // clique id -> citizen id of its current Leader, or null (syncLeader)
+    this.volatileUntil = {};               // clique id -> tick before which its leader-death aggression spike is active (syncLeader/applyLeaderDeathConsequence)
+    this.targetFrictionCooldownUntil = {}; // clique id -> tick before which targeted friction won't roll again (tickTargetedFriction)
+    this.rep = new Map();                  // citizen id -> lifetime rep count toward the rank-ladder perk (tickDemandProgress)
     for (const c of CLIQUES) {
       this.demand[c.id] = null;
       this.demandTier[c.id] = 'base';
       this.completions[c.id] = 0;
       this.cooldownUntil[c.id] = 0;
+      this.leaderId[c.id] = null;
+      this.volatileUntil[c.id] = 0;
+      this.targetFrictionCooldownUntil[c.id] = 0;
     }
   }
 
@@ -250,6 +346,39 @@ function applyUnmetConsequence(clique, factions, world) {
   const scrapLossTarget = screened ? UNMET_DEMAND_SCRAP_LOSS * (1 - CHECKPOINT_CONSEQUENCE_REDUCTION) : UNMET_DEMAND_SCRAP_LOSS;
   const scrapLoss = Math.min(world.scrap, scrapLossTarget);
   world.scrap -= scrapLoss;
+  // This pilfering loss was never wired into world.finance's expense rollup (corruptionLoss/
+  // ratLoss both are, via security.js/rats.js) -- an untracked passive drain in exactly this
+  // function was flagged as a contributor to a prior balance regression. Tracked now under a new
+  // `factionLoss` bucket, same additive-bookkeeping pattern world.addScrap's own doc comment
+  // describes. NOTE: this task is scoped to factions.js only, so `factionLoss` could NOT be added
+  // to world.finance's constructor field list or its totalExpense/history rollup (both live in
+  // world.js) -- the field is created here on first write (plain JS object, no predeclaration
+  // required) and round-trips through save/load fine (finance is serialized wholesale), but stays
+  // invisible to the in-game budget report's total until world.js is updated to include it.
+  // Flagged in this task's final report for whoever next touches world.js.
+  let scrapDrainThisEvent = scrapLoss;
+
+  // PreferredResource dealer trading (see DEALER_TRADE_* above): a small, hard-capped bonus loss
+  // layered on top of the pilfering above, flavored by this clique's preferredResource -- never a
+  // second independent drain, only ever fires alongside this same rare unmet-demand event. A Sneak
+  // Thief-perked member (SNEAK_THIEF_FLAG, see the rank-ladder perk in tickDemandProgress below)
+  // makes it succeed guaranteed AND unnoticed -- skips both the 60% roll and the checkpoint
+  // reduction below, but is still hard-capped at the exact same DEALER_TRADE_CAP as the unperked
+  // roll, never a bigger amount.
+  const hasSneakThief = members.some(i => (world.citizens.flags[i] & SNEAK_THIEF_FLAG) !== 0);
+  let dealerLoss = 0;
+  if (hasSneakThief) {
+    dealerLoss = Math.min(world.scrap, DEALER_TRADE_CAP);
+  } else if (world.rng() < DEALER_TRADE_CHANCE) {
+    const dealerLossTarget = screened ? DEALER_TRADE_CAP * (1 - CHECKPOINT_CONSEQUENCE_REDUCTION) : DEALER_TRADE_CAP;
+    dealerLoss = Math.min(world.scrap, dealerLossTarget);
+  }
+  if (dealerLoss > 0) {
+    world.scrap -= dealerLoss;
+    scrapDrainThisEvent += dealerLoss;
+    pushMilestone(world, `The ${clique.name} fenced some ${clique.preferredResource} to an outside dealer.`);
+  }
+  if (world.finance) world.finance.factionLoss = (world.finance.factionLoss || 0) + scrapDrainThisEvent;
 
   if (clique.preferredMisbehaviour === 'Scrapping') {
     // Fighting-analog: a couple of members get worked up -- a real mood/OnBreak hit (feeds
@@ -311,8 +440,38 @@ function tickDemandProgress(factions, world) {
     const demand = factions.demand[cliqueId];
     if (!demand) continue;
     demand.progress = Math.min(demand.target, demand.progress + 1);
+
+    // Rank ladder (see REP_PER_CONTRIBUTION/REP_PERK_THRESHOLD above): rep earned the same
+    // genuinely-by-real-play way demand progress itself just was, one point per contribution.
+    // Past the threshold, unlocks the one Sneak Thief perk this pass implements (consumed by
+    // applyUnmetConsequence's dealer-trade sub-effect above) -- a one-way promotion, same
+    // never-demoted convention Lieutenant already uses elsewhere in this file.
+    const rep = (factions.rep.get(id) || 0) + REP_PER_CONTRIBUTION;
+    factions.rep.set(id, rep);
+    if (rep >= REP_PERK_THRESHOLD && (store.flags[i] & SNEAK_THIEF_FLAG) === 0) {
+      store.flags[i] |= SNEAK_THIEF_FLAG;
+      const clique = CLIQUES.find(c => c.id === cliqueId);
+      pushMilestone(world, `${store.name[i] || 'A citizen'} has earned enough standing among the ${clique ? clique.name : 'clique'} to become a Sneak Thief.`);
+    }
   }
   factions._recreatingLastTick = nowRecreating;
+}
+
+// Informant mechanic (see INFORMANT_* above): counts this clique's currently-alive, currently-
+// flagged informants and returns a shortened cooldown -- FACTION_DEMAND_COOLDOWN_TICKS reduced by
+// INFORMANT_COOLDOWN_REDUCTION_PER per informant, capped at INFORMANT_COOLDOWN_REDUCTION_CAP.
+// Zero informants (the common case) returns FACTION_DEMAND_COOLDOWN_TICKS unchanged.
+function informantAdjustedCooldownTicks(clique, factions, world) {
+  const store = world.citizens;
+  let informants = 0;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i)) continue;
+    if (factions.memberOf.get(store.id[i]) !== clique.id) continue;
+    if ((store.flags[i] & INFORMANT_FLAG) !== 0) informants++;
+  }
+  if (informants === 0) return FACTION_DEMAND_COOLDOWN_TICKS;
+  const reduction = Math.min(INFORMANT_COOLDOWN_REDUCTION_CAP, informants * INFORMANT_COOLDOWN_REDUCTION_PER);
+  return Math.round(FACTION_DEMAND_COOLDOWN_TICKS * (1 - reduction));
 }
 
 // Issues, resolves (reward), or fails (consequence) each clique's demand. Called every tick from
@@ -327,12 +486,12 @@ function tickDemandLifecycle(factions, world) {
         world.addScrap(reward, 'faction');
         factions.completions[clique.id]++;
         factions.demandTier[clique.id] = 'escalated'; // real PA: repeat satisfaction spawns the harder _Escalated variant
-        factions.cooldownUntil[clique.id] = world.currentTick + FACTION_DEMAND_COOLDOWN_TICKS;
+        factions.cooldownUntil[clique.id] = world.currentTick + informantAdjustedCooldownTicks(clique, factions, world);
         factions.demand[clique.id] = null;
         pushMilestone(world, `${clique.name} demand satisfied -- +${reward} scrap. They'll want more next time.`);
       } else if (world.currentTick >= active.deadlineTick) {
         applyUnmetConsequence(clique, factions, world);
-        factions.cooldownUntil[clique.id] = world.currentTick + FACTION_DEMAND_COOLDOWN_TICKS;
+        factions.cooldownUntil[clique.id] = world.currentTick + informantAdjustedCooldownTicks(clique, factions, world);
         factions.demand[clique.id] = null;
         pushMilestone(world, `${clique.name} demand went unmet -- unrest rises, and they help themselves to some scrap.`);
       }
@@ -386,6 +545,138 @@ function syncLieutenants(factions, world) {
   }
 }
 
+// Leader role (see LEADER_FLAG's doc comment above): same promote-from-pool shape syncLieutenants
+// above already uses, but targetCount is always exactly 1, and -- unlike Lieutenant -- losing the
+// role is a real, detected event (applyLeaderDeathConsequence below), not just a silent headcount
+// rebalance. factions.leaderId[clique.id] is the source of truth for "who was the leader as of
+// last tick"; this function's whole job is reconciling that against who's actually still alive
+// and flagged this tick.
+function syncLeader(factions, world) {
+  const store = world.citizens;
+  for (const clique of CLIQUES) {
+    const members = [];
+    let aliveLeaderIdx = -1;
+    for (let i = 0; i < store.count; i++) {
+      if (!store.isAliveAt(i)) continue;
+      if (factions.memberOf.get(store.id[i]) !== clique.id) continue;
+      members.push(i);
+      if ((store.flags[i] & LEADER_FLAG) !== 0) aliveLeaderIdx = i;
+    }
+
+    const hadLeader = factions.leaderId[clique.id] != null;
+    if (hadLeader && aliveLeaderIdx === -1) {
+      // The leader recorded as of last tick is no longer alive-and-flagged -- a real death (siege.js/
+      // weather.js's own alive[i]=0/CitizenFlags.Dead paths, same death detection every other
+      // isAliveAt() check in this file already relies on), not a first-formation no-op (hadLeader
+      // guards that case).
+      applyLeaderDeathConsequence(clique, factions, world);
+      factions.leaderId[clique.id] = null;
+    }
+
+    if (aliveLeaderIdx === -1) {
+      if (members.length === 0) continue;
+      const pick = members[Math.floor(world.rng() * members.length)];
+      store.flags[pick] |= LEADER_FLAG;
+      factions.leaderId[clique.id] = store.id[pick];
+      pushMilestone(world, `${store.name[pick] || 'A citizen'} has become the leader of the ${clique.name}.`);
+    } else {
+      factions.leaderId[clique.id] = store.id[aliveLeaderIdx]; // keep in sync defensively
+    }
+  }
+}
+
+// Leader-death aggression spike (real gangsystem.txt: LeaderDeathPeriodMinutes 360, see
+// LEADER_DEATH_WINDOW_TICKS above). Two effects: an immediate, one-time, bounded unrest bump +
+// mood hit to every alive clique member (grief -- same world.unrestLevel/citizens.mood mechanisms
+// applyGraffitiCleanupConsequence already uses, just larger since losing a leader is a bigger deal
+// than a scrubbed wall), and a timed window (factions.volatileUntil) during which
+// tickTargetedFriction below rolls at TARGET_FRICTION_LEADER_DEATH_MULT the normal chance. No
+// scrap involved either way -- this consequence is unrest/mood/violence-only by design.
+function applyLeaderDeathConsequence(clique, factions, world) {
+  world.unrestLevel = Math.min(1, world.unrestLevel + LEADER_DEATH_UNREST_BUMP);
+  const store = world.citizens;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i)) continue;
+    if (factions.memberOf.get(store.id[i]) !== clique.id) continue;
+    store.mood[i] = Math.max(0, store.mood[i] - LEADER_DEATH_MOOD_HIT);
+  }
+  factions.volatileUntil[clique.id] = world.currentTick + LEADER_DEATH_WINDOW_TICKS;
+  pushMilestone(world, `The ${clique.name}'s leader has fallen -- the clique is volatile and looking for a fight.`);
+}
+
+// Targeted friction (see TARGET_FRICTION_* above): a small per-check chance for one member to
+// start a scuffle with a specific rival-clique member, reusing the exact mood/OnBreak shape the
+// Scrapping unmet-demand branch in applyUnmetConsequence already established (checkpoint reduction
+// included, same per-citizen screening precision). Throttled and cooldown-gated per clique, same
+// two-layer "cheap check, rare actual event" pattern tickFoodFights/tickTerritory already use.
+function tickTargetedFriction(factions, world) {
+  if (world.currentTick % TARGET_FRICTION_CHECK_INTERVAL_TICKS !== 0) return;
+  const store = world.citizens;
+
+  for (const clique of CLIQUES) {
+    if (world.currentTick < (factions.targetFrictionCooldownUntil[clique.id] || 0)) continue;
+
+    const volatile = world.currentTick < (factions.volatileUntil[clique.id] || 0);
+    const chance = volatile ? Math.min(1, TARGET_FRICTION_CHANCE * TARGET_FRICTION_LEADER_DEATH_MULT) : TARGET_FRICTION_CHANCE;
+    if (world.rng() >= chance) continue;
+
+    const members = [];
+    const rivals = [];
+    for (let i = 0; i < store.count; i++) {
+      if (!store.isAliveAt(i)) continue;
+      const cid = factions.memberOf.get(store.id[i]);
+      if (cid === clique.id) members.push(i);
+      else if (cid) rivals.push(i);
+    }
+    if (members.length === 0 || rivals.length === 0) continue;
+
+    const instigator = members[Math.floor(world.rng() * members.length)];
+    const target = rivals[Math.floor(world.rng() * rivals.length)];
+    const rivalClique = CLIQUES.find(c => c.id === factions.memberOf.get(store.id[target]));
+
+    for (const i of [instigator, target]) {
+      const nearCp = isNearCheckpoint(world.structures, store.x[i], store.y[i]);
+      const moodHit = nearCp ? TARGET_FRICTION_MOOD_HIT * (1 - CHECKPOINT_CONSEQUENCE_REDUCTION) : TARGET_FRICTION_MOOD_HIT;
+      store.mood[i] = Math.max(0, store.mood[i] - moodHit);
+    }
+    store.flags[instigator] |= CitizenFlags.OnBreak;
+
+    factions.targetFrictionCooldownUntil[clique.id] = world.currentTick + TARGET_FRICTION_COOLDOWN_TICKS;
+    pushMilestone(world, `${store.name[instigator] || 'A ' + clique.name + ' member'} started a scuffle with a ${rivalClique ? rivalClique.name : 'rival clique'} member.`);
+  }
+}
+
+// Informant mechanic (see INFORMANT_* above): a rare, throttled roll to flag one existing,
+// unflagged, non-leader member of each clique as an Informant -- a one-way status (never removed
+// here, matching the file's other one-way promotions) consumed by informantAdjustedCooldownTicks
+// above. No mood/scrap/unrest effect of its own -- purely a timing modifier on the clique's own
+// next demand.
+function tickInformants(factions, world) {
+  if (world.currentTick % INFORMANT_CHECK_INTERVAL_TICKS !== 0) return;
+  const store = world.citizens;
+
+  for (const clique of CLIQUES) {
+    if (world.rng() >= INFORMANT_CHANCE_PER_CHECK) continue;
+
+    const pool = [];
+    for (let i = 0; i < store.count; i++) {
+      if (!store.isAliveAt(i)) continue;
+      if (factions.memberOf.get(store.id[i]) !== clique.id) continue;
+      if ((store.flags[i] & INFORMANT_FLAG) !== 0) continue;
+      if ((store.flags[i] & LEADER_FLAG) !== 0) continue; // flavor: the leader doesn't secretly inform on their own clique
+      pool.push(i);
+    }
+    if (pool.length === 0) continue;
+
+    const pick = pool[Math.floor(world.rng() * pool.length)];
+    store.flags[pick] |= INFORMANT_FLAG;
+    // Deliberately no milestone log here -- the whole point of an informant is that nobody
+    // announces it; the effect (a shorter cooldown before the clique's next demand) is the only
+    // player-visible signal, same "quiet mechanical effect, no fanfare" choice this file already
+    // makes for e.g. syncLieutenants' demotions.
+  }
+}
+
 // Physical territory-claiming + graffiti-style marking (see TERRITORY_MIN_MEMBERS/
 // TERRITORY_MIN_TABLES's doc comment above for the real PA numbers and how they were scaled).
 // Reuses world.rooms as the "zone" unit -- rooms.js's detectRooms flood-fill enclosed regions are
@@ -428,12 +719,19 @@ function tickTerritory(factions, world) {
       if (cliqueId && counts[cliqueId] != null) counts[cliqueId]++;
     }
 
+    // PreferredTerritoryModifier (see PREFERRED_TERRITORY_BONUS above): the room's CURRENT holder
+    // (if any) gets a flat bonus added to its raw headcount before comparing, so a rival needs a
+    // clear win, not a marginal one, to flip an already-claimed room. Only the weighted total
+    // (bestCount) is inflated -- the MIN_MEMBERS gate below only ever matters for a genuine change
+    // of holder (the `room.territoryClique !== bestId` check already no-ops when the incumbent
+    // wins), so a challenger still has to clear TERRITORY_MIN_MEMBERS on its own real headcount.
     let bestId = null, bestCount = 0;
     for (const c of CLIQUES) {
-      if (counts[c.id] > bestCount) { bestCount = counts[c.id]; bestId = c.id; }
+      const weighted = counts[c.id] + (room.territoryClique === c.id ? PREFERRED_TERRITORY_BONUS : 0);
+      if (weighted > bestCount) { bestCount = weighted; bestId = c.id; }
     }
 
-    if (bestId && bestCount >= TERRITORY_MIN_MEMBERS && room.territoryClique !== bestId) {
+    if (bestId && counts[bestId] >= TERRITORY_MIN_MEMBERS && room.territoryClique !== bestId) {
       const prevClique = room.territoryClique;
       room.territoryClique = bestId;
       room.territoryGraffiti = 1;
@@ -527,6 +825,7 @@ export function tickFactions(world) {
     factions.formed = true;
     recruit(factions, world);
     syncLieutenants(factions, world);
+    syncLeader(factions, world);
     pushMilestone(world, 'Rival cliques have formed among the settlement\'s citizens.');
     return; // cliques exist now, but wait a tick before demands can start (matches other systems'
              // "form this tick, act next tick" convention, e.g. world.js's overload-milestone gate)
@@ -536,10 +835,13 @@ export function tickFactions(world) {
   // (Map.has check per alive citizen) so no throttle needed.
   recruit(factions, world);
   syncLieutenants(factions, world);
+  syncLeader(factions, world);
   tickDemandProgress(factions, world);
   tickDemandLifecycle(factions, world);
   tickTerritory(factions, world);
   tickFoodFights(factions, world);
+  tickTargetedFriction(factions, world);
+  tickInformants(factions, world);
 }
 
 export function serializeFactions(factions) {
@@ -550,6 +852,10 @@ export function serializeFactions(factions) {
     demandTier: factions.demandTier,
     completions: factions.completions,
     cooldownUntil: factions.cooldownUntil,
+    leaderId: factions.leaderId,
+    volatileUntil: factions.volatileUntil,
+    targetFrictionCooldownUntil: factions.targetFrictionCooldownUntil,
+    rep: Array.from(factions.rep.entries()),
   };
 }
 
@@ -558,11 +864,17 @@ export function deserializeFactions(json) {
   if (!json) return factions;
   factions.formed = json.formed || false;
   if (json.memberOf) factions.memberOf = new Map(json.memberOf);
+  if (json.rep) factions.rep = new Map(json.rep);
   for (const c of CLIQUES) {
     if (json.demand && json.demand[c.id] !== undefined) factions.demand[c.id] = json.demand[c.id];
     if (json.demandTier && json.demandTier[c.id]) factions.demandTier[c.id] = json.demandTier[c.id];
     if (json.completions && json.completions[c.id] != null) factions.completions[c.id] = json.completions[c.id];
     if (json.cooldownUntil && json.cooldownUntil[c.id] != null) factions.cooldownUntil[c.id] = json.cooldownUntil[c.id];
+    if (json.leaderId && json.leaderId[c.id] !== undefined) factions.leaderId[c.id] = json.leaderId[c.id];
+    if (json.volatileUntil && json.volatileUntil[c.id] != null) factions.volatileUntil[c.id] = json.volatileUntil[c.id];
+    if (json.targetFrictionCooldownUntil && json.targetFrictionCooldownUntil[c.id] != null) {
+      factions.targetFrictionCooldownUntil[c.id] = json.targetFrictionCooldownUntil[c.id];
+    }
   }
   return factions;
 }

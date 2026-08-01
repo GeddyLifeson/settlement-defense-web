@@ -168,6 +168,11 @@
   #toolbar .tool-btn.active .cost { color: #4a3c1f; }
   #toolbar .key { opacity: 0.6; margin-right: 6px; }
   #toolbar-select-btn { margin-bottom: 2px; }
+  /* Demolish (explicit project-owner ask): same always-visible top-level treatment as Select
+     above, but red-tinted to read as a destructive action rather than a neutral mode switch. */
+  #toolbar-demolish-btn { margin-bottom: 2px; border-color: #6b2c24; color: #d99089; }
+  #toolbar-demolish-btn:hover { background: #3a2320; }
+  #toolbar-demolish-btn.active { background: #a83a2e; color: #fff2ef; border-color: #a83a2e; }
 
   /* Category icon row -- always visible whenever the body is expanded, per the build-panel's
      category -> items -> detail hierarchy. */
@@ -732,6 +737,31 @@
   #grants .invest-actions button:disabled { background: #3a342f; color: var(--text-dim); cursor: not-allowed; }
   #grants .invest-pending { margin-top: 8px; font-size: 10.5px; color: var(--text-dim); }
 
+  /* ---- Field Contracts overlay (quests.js) -- same full-screen-overlay convention and .node
+     card shape as #grants above; two grids (offers/active) instead of one. ---- */
+  #quests {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.78);
+    display: flex; align-items: center; justify-content: center; z-index: 20;
+  }
+  #quests.hidden { display: none; }
+  #quests .box { width: min(760px, 94vw); max-height: 86vh; overflow-y: auto; }
+  #quests .quests-sub { font-size: 11px; color: var(--text-dim); margin-bottom: 10px; }
+  #quests .quests-section { margin-top: 10px; }
+  #quests .quests-subhead { font-weight: 700; font-size: 13px; margin-bottom: 6px; }
+  #quests .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+  #quests .node { background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px; padding: 9px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 6px; }
+  #quests .node .rname { font-weight: 700; font-size: 13px; line-height: 1.2; }
+  #quests .node .badge { font-size: 10.5px; color: var(--accent); }
+  #quests .node .desc { font-size: 10.5px; color: var(--text-dim); line-height: 1.35; }
+  #quests .node .unlocks { font-size: 10px; color: var(--text-dim); margin-top: auto; }
+  #quests .node .quest-actions { display: flex; gap: 6px; margin-top: 4px; }
+  #quests .node .quest-actions button {
+    flex: 1; background: var(--accent); color: #201a10; border: none; border-radius: 4px;
+    padding: 5px 7px; font-size: 11px; font-weight: 600; cursor: pointer;
+  }
+  #quests .node .quest-actions button.decline { background: #3a342f; color: var(--text); }
+  #quests .legend { margin-top: 14px; font-size: 11px; color: var(--text-dim); }
+
   /* ---- Fabrication / Labor Drones overlay (drones.js) -- same full-screen-overlay convention
      and .node card shape as #research/#grants above. ---- */
   #drones {
@@ -1036,6 +1066,10 @@
     background: #23201d; border: 1px solid var(--panel-border); border-radius: 6px;
     padding: 9px 10px; font-size: 12px; display: flex; flex-direction: column; gap: 6px;
   }
+  #colonist-setup .node .csprite {
+    display: block; width: 64px; height: 64px; margin: 0 auto; background: #1a1815;
+    border: 1px solid var(--panel-border); border-radius: 6px;
+  }
   #colonist-setup .node .cname-input {
     width: 100%; background: #1a1815; color: var(--text); border: 1px solid var(--panel-border);
     border-radius: 4px; padding: 5px 7px; font-size: 12.5px; font-weight: 600; font-family: inherit;
@@ -1229,6 +1263,7 @@
     <button id="btn-factions" title="Cliques -- rival citizen cliques and their demands [Shift+F]">🤝 Cliques</button>
     <button id="btn-programs" title="Programs -- Skills Workshop / Wellness Counseling / Community Circle status [Shift+P]">📋 Programs</button>
     <button id="btn-grants" title="Outpost Charter Contracts -- milestone grants and time-locked investments [Shift+G]">📜 Charters</button>
+    <button id="btn-quests" title="Field Contracts -- accept a real timed risk/reward deal, fail it and only the reward is lost [Shift+Q]">📋 Contracts</button>
     <button id="btn-coverage" title="Coverage Plans -- pre-purchased discount bundles that unlock threshold-gated emergency call-ins [Shift+I]">🧯 Coverage</button>
     <button id="btn-drones" title="Fabrication -- build a Fabrication Bay to unlock drone capacity, then fabricate labor drones [Shift+N]">🛠 Drones</button>
     <button id="btn-help" title="Reference -- job priorities, building, waves, resources and every building category [F1 or ?]">❓ Help</button>
@@ -1570,6 +1605,33 @@
   </div>
 </div>
 
+<!-- Field Contracts overlay (quests.js -- RimWorld-style risk-bearing, real-deadline timed quests,
+     distinct from the Charter Contracts panel above: charters can never fail, these genuinely can.
+     Same full-screen-overlay-with-a-toggle-button convention as every panel above. -->
+<div id="quests" class="hidden report-panel">
+  <div class="box panel">
+    <div class="quests-head report-head">
+      <h2>Field Contracts</h2>
+      <div class="spacer"></div>
+      <button class="close-btn" id="btn-quests-close">Close [Shift+Q]</button>
+    </div>
+    <div class="quests-sub" id="quests-sub"></div>
+    <div class="quests-section">
+      <div class="quests-subhead">Offered</div>
+      <div class="grid" id="quests-offers-grid"></div>
+    </div>
+    <div class="quests-section">
+      <div class="quests-subhead">Active</div>
+      <div class="grid" id="quests-active-grid"></div>
+    </div>
+    <div class="legend">
+      A Field Contract has a real deadline. Miss it (or lose a citizen mid-Survival contract) and
+      the contract just fails -- the reward is lost, nothing else about the settlement changes.
+      Accepting one is free; declining an offer costs nothing either.
+    </div>
+  </div>
+</div>
+
 <!-- Fabrication / Labor Drones overlay (drones.js -- RimWorld Biotech DLC's mech-companion labor
      drone, reskinned per SEA:R's salvage-tech aesthetic rather than robot/AI framing). Same
      full-screen-overlay convention as #research/#grants/#coverage above. Build a Fabrication Bay
@@ -1688,10 +1750,11 @@
     <div class="set-section">
       <h3 class="report-section-title">Accessibility</h3>
       <label class="set-check"><input type="checkbox" id="settings-highcontrast"> High-contrast mode (shape/pattern cues for attackers vs. citizens and zone kinds, not just color)</label>
+      <label class="set-check"><input type="checkbox" id="settings-uiscale-auto"> Auto-fit UI size to window</label>
       <div class="field">
         <div class="label"><span>UI size</span><span class="val" id="settings-textsize-val">100%</span></div>
         <input type="range" id="settings-textsize" min="85" max="150" step="5" value="100">
-        <div class="hint">Scales every full-screen panel (this one included) up or down.</div>
+        <div class="hint">Scales every full-screen panel (this one included) up or down. Dragging this switches off auto-fit above.</div>
       </div>
     </div>
 

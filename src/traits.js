@@ -11,6 +11,46 @@
 // citizen starts breaking down at a *higher* mood (breaks more easily) and a negative offset means
 // they tolerate lower mood before breaking. Real range +0.08 to +0.14 (Neurotic); we also allow a
 // small negative for the calm counterpart. Undefined/omitted == 0 (no change).
+//
+// forcedPassion / conflictingPassion: RimWorld's real TorturedArtist.forcedPassions (guarantees a
+// skill starts at Burning-tier Passion, no roll at all) and Brawler.conflictingPassions (that one
+// skill can never roll Burning -- capped at Minor). Read by backstories.js's randomPassions(rng,
+// backstory, trait) -- see that file's own doc comment on rollPassion for exactly how the override
+// interacts with a backstory's normal favoredSkill-biased roll. forcedPassion is `{ skill }` with
+// no explicit tier field -- it's always Burning (RimWorld's forcedPassions mechanic always forces
+// the top tier), which conveniently means traits.js never needs to import backstories.js's Passion
+// enum (backstories.js loads AFTER traits.js in build.py's ORDER, so importing back would be the
+// same forward-reference hazard citizens.js's _sickOffset doc comment already documents for
+// sickness.js -- sidestepped entirely here instead of worked around). conflictingPassion is just a
+// skill-name string ('combat' | 'construction'). Both undefined/omitted == no override, the normal
+// independent per-skill roll in backstories.js applies unchanged.
+//
+// disabledWork: RimWorld's real disabledWorkTags pattern (e.g. Pyromaniac -> Firefighting) -- a
+// trait can flatly refuse an entire category of work rather than just being slower at it
+// (workSpeedMult above). This project has no Firefighting job (fire.js is autonomous/self-limiting,
+// see that file's header comment -- no citizen-firefighter mechanic exists to disable), so this is
+// applied to a WorkCategory that actually exists here instead. Values are plain strings matching
+// jobs.js's WorkCategory key names ('Construction' | 'Processing' | 'Hauling' | 'Harvesting' |
+// 'Animal' | 'Cleaning'), NOT WORK_CATEGORY_LABELS' own display text (which has independent
+// wording, e.g. 'Animal Handling' with a space) -- deliberately decoupled from label copy so a
+// future label wording change can't silently break trait data. jobs.js's tickJobs Idle branch
+// checks this before ever attempting a category, both for the Work-Priorities custom order and the
+// legacy fixed ladder. Undefined/omitted == no restriction (every category still available), same
+// null-safe convention as every other optional field here.
+//
+// meleeAccuracyOffset / rangedAccuracyOffset / dodgeChanceOffset / painThresholdOffset: RimWorld's
+// real Brawler (+4% melee hit / -10% shooting), Nimble (+15% melee dodge), and Wimp (pain-shock
+// threshold 0.8 -> 0.3, i.e. a -0.50 offset on that same 0-1 scale) combat stats. DATA ONLY here --
+// no citizens.js/jobs.js logic reads these, a separate combat-system pass wires them into siege.js
+// (that file already owns every other combat-stat lookup, e.g. resolveCitizenArmorRoll/healthMult),
+// reading them defensively (`trait.dodgeChanceOffset ?? 0`) the same null-safe way every other
+// per-trait field in this codebase is already read. Undefined/omitted == 0 (no change) for every
+// trait that doesn't specify a given one of these four fields.
+//
+// skillRustMult: RimWorld's real GreatMemory trait (halves the real game's skill-decay-from-disuse
+// rate). Read by citizens.js's tickNeedsAndMood (see that function's SKILL_RUST_RATE doc comment)
+// as a multiplier on the disuse-decay rate -- 0.5 halves it, matching GreatMemory's real number.
+// Undefined/omitted == 1 (no change), same null-safe convention as workSpeedMult etc. above.
 export const TRAITS = [
   { name: 'Tough', healthMult: 1.3, hungerMult: 1, restMult: 1, socialGainMult: 1 },
   { name: 'Fast', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, speedMult: 1.3 },
@@ -31,6 +71,37 @@ export const TRAITS = [
   // threshold) but works faster while stable, so it's a genuine risk/reward pick rather than a
   // strict downgrade.
   { name: 'Neurotic', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, workSpeedMult: 1.15, breakThresholdOffset: 0.12 },
+  // Brawler (RimWorld): melee-focused fighter -- flat combat-stat split rather than a needs/mood
+  // nudge like most traits above (item 4's meleeAccuracyOffset/rangedAccuracyOffset, see this
+  // file's top-of-file doc comment; a separate combat-system pass reads these from siege.js, not
+  // this file). Real numbers used verbatim: +4% melee hit, -10% shooting.
+  { name: 'Brawler', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, meleeAccuracyOffset: 0.04, rangedAccuracyOffset: -0.10 },
+  // Nimble (RimWorld): +15% real melee dodge chance, used verbatim. Pure upside, same precedent as
+  // Tough above (not every trait needs a paired downside -- RimWorld's own trait list isn't
+  // perfectly symmetric either).
+  { name: 'Nimble', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, dodgeChanceOffset: 0.15 },
+  // Wimp (RimWorld): real pain-shock threshold default 0.8 -> 0.3 for this trait, i.e. -0.50 on
+  // that same 0-1 scale -- goes down/incapacitated far more easily under injury. Pure downside,
+  // same asymmetric-trait precedent as Insomniac/Glutton above (no compensating upside grafted on).
+  { name: 'Wimp', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, painThresholdOffset: -0.50 },
+  // Driven: this project's closest available analog to RimWorld's TorturedArtist (forcedPassions)
+  // -- no Artistic skill exists here to force, so the guarantee lands on construction (building
+  // things is the nearest "making something" skill this codebase tracks) instead. Paired with a
+  // genuine tradeoff (conflictingPassion on combat, capped at Minor -- never Burning) rather than
+  // shipping as a strict upgrade, matching the file's existing "genuine risk/reward" ethos (see
+  // Neurotic's own doc comment above) -- a citizen who's obsessively fixated on their craft reads
+  // as plausibly indifferent to ever mastering a fight.
+  { name: 'Driven', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, forcedPassion: { skill: 'construction' }, conflictingPassion: 'combat' },
+  // Great Memory (RimWorld): halves the new skill-rust disuse-decay rate (citizens.js's
+  // SKILL_RUST_RATE) -- see this file's top-of-file doc comment on skillRustMult. Pure upside,
+  // same asymmetric-trait precedent as Nimble/Tough above.
+  { name: 'Great Memory', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, skillRustMult: 0.5 },
+  // Squeamish: this project's closest available analog to RimWorld's disabledWorkTags pattern (see
+  // this file's top-of-file doc comment on disabledWork for why it's not literally Pyromaniac ->
+  // Firefighting) -- can't stand handling real mess/gore, flatly refuses Cleaning work rather than
+  // just being slower at it. A pure downside (no compensating field), same precedent as
+  // Insomniac/Glutton/Wimp above.
+  { name: 'Squeamish', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, disabledWork: ['Cleaning'] },
 ];
 
 export function randomTrait(rng) {

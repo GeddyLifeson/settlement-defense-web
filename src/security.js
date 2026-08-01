@@ -13,7 +13,7 @@ import { ZoneKind } from './zones.js';
 // Staff Vetting research node (research.js) -- lowers the crooked-staff ratio, see the
 // corruption section near the bottom of this file. research.js precedes security.js in
 // build.py's ORDER, so this named import is safe in the flat-concatenated bundle too.
-import { isNodeUnlocked } from './research.js';
+import { isNodeUnlocked, payPerUseCost, contrabandScreeningDiversionMult } from './research.js';
 // Staff training-program dispatch (see tickStaffTraining near the bottom of this file):
 // programs.js comes AFTER security.js in build.py's ORDER, same "later-ordered module, function-
 // body-only usage" shape as the JobState import from jobs.js right above (jobs.js itself imports
@@ -45,6 +45,17 @@ export const WeaponTier = Object.freeze({
   // guard/sniper into via the existing manual-override system, not a strictly-better tier that
   // more Armories should auto-issue.
   StunBaton: 'StunBaton',
+  // Specialist-tier firearm (real PA anchor: guardrank_settings.txt's "Specialist gun cost 600" --
+  // see SPECIALIST_WEAPON_COST/purchaseSpecialistWeapon near the GuardRank section below for how
+  // the real dollar figure maps onto this project's scrap economy). Deliberately NOT part of
+  // WEAPON_TIER_ORDER's armory-stock progression, same reasoning as StunBaton just above: Rifle/
+  // Heavy are a free entitlement once enough Armories exist, but this tier is gated on TWO things
+  // tickArmoryIssuance checks explicitly instead -- the citizen must already hold GuardRank.
+  // Specialist (see the guard-rank ladder below) AND the player must have actually spent
+  // SPECIALIST_WEAPON_COST on them via purchaseSpecialistWeapon. A real one-time expense gated by
+  // promotion, not an automatic armory-count entitlement -- matches the task brief's "a real,
+  // expensive upgrade" framing.
+  Specialist: 'Specialist',
 });
 
 // penetrationBonus (0-100, same units as siege.js's ARMOR_RATING/armorPenetration scale): added
@@ -72,6 +83,18 @@ export const WEAPON_TIERS = Object.freeze({
   [WeaponTier.StunBaton]: Object.freeze({
     label: 'Stun Baton', damageMult: 0, rangeMult: 0.85, cooldownMult: 25, penetrationBonus: 0,
     nonLethal: true, stunChance: 0.4, stunDurationTicks: 30,
+  }),
+  // Specialist Rifle (see WeaponTier.Specialist above): priced/gated as the single most expensive
+  // per-citizen item in the game (SPECIALIST_WEAPON_COST), so its stats sit at the top of this
+  // ladder too -- but as a real tradeoff, not a strict upgrade over Heavy, matching this project's
+  // established "each tier is a genuine choice" philosophy (see this section's header comment).
+  // Heavy already claims "biggest single hit, worst range/cooldown"; Specialist instead reads as a
+  // precision-marksman option -- less raw damageMult than Heavy(2.4) but noticeably better
+  // rangeMult/cooldownMult (a real sniper-adjacent guard weapon, not a repeat of the Sniper role's
+  // own SNIPER_RANGE/SNIPER_PENETRATION baseline) and the highest penetrationBonus of any tier,
+  // reflecting a rank-gated elite loadout rather than just "a bigger gun."
+  [WeaponTier.Specialist]: Object.freeze({
+    label: 'Specialist Rifle', damageMult: 2.0, rangeMult: 1.25, cooldownMult: 1.3, penetrationBonus: 25,
   }),
 });
 
@@ -122,6 +145,15 @@ export class StaffRoster {
     // one-way "already trained" flag tickStaffTraining reads so it stops re-dispatching a
     // graduate, matching the task's "cheap item" scope: one course, not a repeatable grind.
     this._trainingGraduated = new Set();
+
+    // Guard/Officer/Specialist promotion ladder (Prison Architect's real guardrank_settings.txt,
+    // see the GuardRank section near the bottom of this file for the full mechanic). Lives on the
+    // roster, not the citizen store, same "staff-specific state belongs here" convention as
+    // _weaponById/_corruptEligible above -- distinct from ranks.js's unrelated RimWorld Royalty
+    // citizen-wide title system (store.citizenRank[i], every citizen, skill-based).
+    this._guardRankById = new Map();          // citizenId -> GuardRank tier, absent = Base
+    this._guardHireTickById = new Map();      // citizenId -> tick first observed as Guard/Sniper ("hired")
+    this._specialistWeaponPurchasedById = new Set(); // citizenId who've paid SPECIALIST_WEAPON_COST
   }
 
   // post may be a single {x, y} (backward compat / old save shape) or an array of 2-4 {x, y}
@@ -217,6 +249,15 @@ export class StaffRoster {
   // ---- staff training (see tickStaffTraining below) ----
   isTrainingGraduated(citizenId) { return this._trainingGraduated.has(citizenId); }
   markTrainingGraduated(citizenId) { this._trainingGraduated.add(citizenId); }
+
+  // ---- guard rank ladder (see tickGuardRankPromotion/GuardRank below) ----
+  // Absent entry = GuardRank.Base(0), same map-absence-means-default convention as weaponOf/kindOf
+  // above -- hardcoded 0 rather than importing GuardRank to avoid a load-bearing forward reference
+  // (GuardRank is declared further down this same file, after this class).
+  guardRankOf(citizenId) { return this._guardRankById.get(citizenId) ?? 0; }
+  setGuardRank(citizenId, rank) { this._guardRankById.set(citizenId, rank); }
+  guardHireTick(citizenId) { return this._guardHireTickById.get(citizenId); }
+  hasSpecialistWeapon(citizenId) { return this._specialistWeaponPurchasedById.has(citizenId); }
 }
 
 // Armory issuance. Originally (per FEATURE_RESEARCH.md) scoped as no per-citizen pick-a-tier UI
@@ -239,18 +280,27 @@ export class StaffRoster {
 // downgrades everyone (auto AND manual-but-now-unsupported) back rather than leaving them
 // permanently over-equipped -- no weapon is ever "created out of thin air" beyond what the
 // armory count actually backs.
-export function tickArmoryIssuance(roster, structures) {
+export function tickArmoryIssuance(world, roster, structures) {
   let armoryCount = 0;
   for (const s of structures) {
     if (s.kind === 'armory' && !s.destroyed && !s.underConstruction) armoryCount++;
   }
   const stockTierIndex = Math.min(WEAPON_TIER_ORDER.length - 1, armoryCount);
   const autoTier = WEAPON_TIER_ORDER[stockTierIndex];
+  // Small Arms Doctrine's real per-use cost (research.js, no-ops for free if unresearched/no
+  // costPerUse): the "use" is an Armory actually (re)issuing a DIFFERENT tier to a staffer, not
+  // this function's own every-tick re-confirmation of an unchanged tier -- change-gated so a
+  // stable roster with a stable Armory count never gets charged.
+  const chargeIfChanged = (citizenId, before, after) => {
+    if (armoryCount >= 1 && after !== before) payPerUseCost(world, 'small_arms_doctrine');
+  };
   for (const [citizenId, kind] of roster._roleById.entries()) {
     if (kind !== StaffRoleKind.Guard && kind !== StaffRoleKind.Sniper) continue;
+    const beforeTier = roster.weaponOf(citizenId);
     const manualTier = roster.manualWeaponOf(citizenId);
     if (manualTier == null) {
       roster.equip(citizenId, autoTier);
+      chargeIfChanged(citizenId, beforeTier, autoTier);
       continue;
     }
     // Stun Baton (WeaponTier.StunBaton): outside WEAPON_TIER_ORDER's stock-rung progression, so
@@ -261,14 +311,33 @@ export function tickArmoryIssuance(roster, structures) {
     // DOES support (same queueing behavior as an unsupported Rifle/Heavy request) if no Armory
     // exists yet.
     if (manualTier === WeaponTier.StunBaton) {
-      roster.equip(citizenId, armoryCount >= 1 ? WeaponTier.StunBaton : autoTier);
+      const grantedBaton = armoryCount >= 1 ? WeaponTier.StunBaton : autoTier;
+      roster.equip(citizenId, grantedBaton);
+      chargeIfChanged(citizenId, beforeTier, grantedBaton);
+      continue;
+    }
+    // Specialist Rifle (see WeaponTier.Specialist's doc comment above): outside WEAPON_TIER_ORDER
+    // like StunBaton, but gated on rank + a real purchase instead of armory stock -- a manual
+    // request for it only actually issues once BOTH roster.hasSpecialistWeapon (the player spent
+    // SPECIALIST_WEAPON_COST via purchaseSpecialistWeapon) and roster.guardRankOf (the promotion
+    // ladder below) currently read Specialist are true. Falls back to the best armory-stock tier
+    // in the meantime (same queueing shape as an unsupported Rifle/Heavy request) rather than a
+    // hard reject, so the request isn't silently lost if purchased before the rank lands or vice
+    // versa -- re-checked every tick same as everything else in this function.
+    if (manualTier === WeaponTier.Specialist) {
+      const granted = roster.hasSpecialistWeapon(citizenId) && roster.guardRankOf(citizenId) === GuardRank.Specialist;
+      const grantedTier = granted ? WeaponTier.Specialist : autoTier;
+      roster.equip(citizenId, grantedTier);
+      chargeIfChanged(citizenId, beforeTier, grantedTier);
       continue;
     }
     const manualIndex = WEAPON_TIER_ORDER.indexOf(manualTier);
     // Clamp to whatever the armory actually stocks right now -- issues the requested tier
     // immediately if stock covers it, otherwise the best available tier while the request queues.
     const grantedIndex = Math.min(manualIndex, stockTierIndex);
-    roster.equip(citizenId, WEAPON_TIER_ORDER[grantedIndex]);
+    const grantedTier = WEAPON_TIER_ORDER[grantedIndex];
+    roster.equip(citizenId, grantedTier);
+    chargeIfChanged(citizenId, beforeTier, grantedTier);
   }
 }
 
@@ -658,6 +727,13 @@ const CORRUPTION_DIVERSION_AMOUNT = 0.6; // small per-siphon amount -- a few scr
 const CORRUPTION_DISCOVERY_CHECK_INTERVAL_TICKS = 240; // ~1 in-game hour (GAME_DAY_TICKS/10)
 const CORRUPTION_DISCOVERY_CHANCE = 0.05; // per check, only while a bribe is actively running
 export const CORRUPTION_FIRE_REWARD = 13; // real ~500, scaled ~40x to this project's scrap economy
+// Deterministic backstop (crookedguards_settings.txt's real "Corrupt Every Nth Hired Guard 6"),
+// alongside (not replacing) the CORRUPTION_BASE_RATIO probabilistic roll just above: guarantees at
+// least 1-in-6 corrupt-eligible staff over a long hiring run, where the pure 1/6 probabilistic roll
+// alone can (rarely but really) string together long zero-corrupt streaks. See the one-time
+// hire-ratio evaluation loop in tickStaffCorruption below for how this is applied without a
+// separate hire-order counter field.
+const CORRUPT_EVERY_NTH_HIRE = 6;
 
 function corruptionRatio(world) {
   return isNodeUnlocked(world.research, 'staff_vetting') ? CORRUPTION_VETTED_RATIO : CORRUPTION_BASE_RATIO;
@@ -707,7 +783,16 @@ export function tickStaffCorruption(world) {
     if (!CORRUPTION_ELIGIBLE_ROLES.has(kind)) continue;
     if (roster._corruptEvaluated.has(id)) continue;
     roster._corruptEvaluated.add(id);
-    if (world.rng() < corruptionRatio(world)) roster._corruptEligible.add(id);
+    // Staff Vetting's real per-use cost (research.js, no-ops for free if unresearched/no
+    // costPerUse) -- this one-time-per-staffer evaluation IS the "use" of the vetting check.
+    payPerUseCost(world, 'staff_vetting');
+    // Deterministic Nth-hire backstop (CORRUPT_EVERY_NTH_HIRE, see its doc comment above) runs
+    // alongside the probabilistic roll -- either one flags eligible. roster._corruptEvaluated.size
+    // right after this guard's own .add() above IS this guard's 1-indexed hire-evaluation ordinal
+    // (Set insertion order is stable/monotonic), so no separate hire-order counter is needed to
+    // know "is this the Nth guard evaluated so far."
+    const isNthHire = roster._corruptEvaluated.size % CORRUPT_EVERY_NTH_HIRE === 0;
+    if (isNthHire || world.rng() < corruptionRatio(world)) roster._corruptEligible.add(id);
   }
 
   // Periodic bribe-activation roll.
@@ -735,7 +820,10 @@ export function tickStaffCorruption(world) {
       // physically standing/patrolling within a Checkpoint's screening radius right now gets a
       // real, measured cut to what they're able to quietly siphon this tick.
       const screened = isNearCheckpoint(world.structures, store.x[idx], store.y[idx]);
-      const baseAmt = Math.min(world.scrap, CORRUPTION_DIVERSION_AMOUNT);
+      // Contraband Screening research (research.js): cuts how much a bribed staffer can siphon per
+      // incident, stacking with the Checkpoint screening cut above -- distinct from Staff Vetting's
+      // effect on the odds of being bribable at all.
+      const baseAmt = Math.min(world.scrap, CORRUPTION_DIVERSION_AMOUNT) * contrabandScreeningDiversionMult(world.research);
       const amt = screened ? baseAmt * (1 - CHECKPOINT_DIVERSION_REDUCTION) : baseAmt;
       if (amt > 0) {
         world.scrap -= amt;
@@ -819,6 +907,194 @@ export function forceActivateCorruption(world, citizenId) {
   roster._corruptEligible.add(citizenId);
   roster._corruptActiveUntil.set(citizenId, world.currentTick + CORRUPTION_BRIBE_DURATION_TICKS);
   return true;
+}
+
+// --- Guard rank ladder (Prison Architect's real guard promotion system, guardrank_settings.txt,
+// reskinned non-carceral -- a civil-defense staff seniority ladder for Guard/Sniper roster
+// members ONLY. Explicitly NOT ranks.js -- that file is a wholly different, unrelated mechanic
+// (RimWorld Royalty's title/favor system, store.citizenRank[i], applies to every citizen off
+// skillConstruction+skillCombat) that happens to share the word "rank"; kept fully separate here
+// per the task brief despite the similar name, no merge. ) ---
+//
+// Real numbers this was ported from, and how they map onto this project:
+//  - Ratio of Officer-tier guards: 0.40 of the guard roster. Ratio of Specialist-tier: 0.333.
+//    Read as nested targets (Specialist's 0.333 < Officer's 0.40), matching Specialist's longer
+//    hire-time requirement below -- 40% of the roster reaches Officer-OR-HIGHER, and within that,
+//    33.3% of the total roster keeps climbing all the way to Specialist (so ~6.7% sit at
+//    Officer-only, ~33.3% at Specialist, the rest at base Guard).
+//  - Min hired-time before promotion-eligible: 10 days (Officer), 20 days (Specialist) -- this
+//    project has no dedicated "hire" event (staff are assigned via roster.assign from several call
+//    sites: world.js's constructor, programs.js's staff dispatch, a future hire UI), so
+//    tickGuardRankPromotion below stamps each Guard/Sniper's hire tick itself, the first tick it
+//    observes them on the roster -- same one-time-first-tick-seen surrogate already established by
+//    tickStaffCorruption's _corruptEvaluated above, converted via this file's own GAME_DAY_TICKS.
+//  - Promotion is BY SENIORITY, not a per-tick coin flip: tickGuardRankPromotion sorts eligible
+//    guards oldest-hired-first and fills the ratio-derived slot counts in that order, same
+//    "longest-serving first" requirement the task brief calls out explicitly. One-way once granted
+//    (never demoted, even if the roster later shrinks below a rank's target count) -- same
+//    established convention as this file's own training-graduated flag and ranks.js's tryRankUp,
+//    neither of which has a demotion path either.
+//  - Combat: the real source line reads "Senior/Officer/Specialist get +10%/+30%/+50% attack and
+//    +15%/+40%/+70% toughness" -- three slash-separated numbers against what this port's own scope
+//    (an "Officer/Specialist" 2-tier ladder, see the task brief) names as only two ranks. Read
+//    positionally (word i <-> number i: Senior=1st/Officer=2nd/Specialist=3rd) and per the 2-tier
+//    implementation scope, GUARD_RANK_DEFS below uses the 2nd value for Officer and the 3rd for
+//    Specialist, dropping the 1st ("Senior") value as the informal/unimplemented tier the 2-tier
+//    scope already excludes -- a judgment call flagged here for a reviewer with the original data
+//    file on hand to double check.
+//  - Wage: Officer +$25/day, Specialist +$50/day -- stored below as real data (wagePerDay) for a
+//    future wage system to consume, but NOT wired into any periodic scrap deduction: this codebase
+//    has no ongoing staff-upkeep cost anywhere (checked economy.js's BUILD_COST -- one-time
+//    construction spend only -- and world.js's finance object -- buildSpend/corruptionLoss/
+//    ratLoss, no periodic wage/upkeep bucket at all). Per the task brief's own instruction, this
+//    does NOT invent a whole new wage-drain system from scratch to hang these numbers on.
+//  - Specialist-tier guns cost $600 -- see WeaponTier.Specialist/WEAPON_TIERS above (extends the
+//    existing armory weapon-tier pattern) and SPECIALIST_WEAPON_COST/purchaseSpecialistWeapon below.
+//  - Specialist suppression bonus: +15% -- stored below (suppressionBonus) as real data but likewise
+//    not wired into siege.js's suppression-accuracy pipeline (citizens.suppression /
+//    suppressionAccuracyMult) since that's a siege.js edit outside this task's file scope and
+//    outside the 5 numbered implementation items in the task brief; see this file's header/the
+//    accompanying report for the one-line hook a reviewer could add at siege.js's existing
+//    `const supMult = suppressionAccuracyMult(citizens.suppression[i] || 0);` line in
+//    tickStaffCombat (roster/idOf already in scope there, same as the attackMult hook below).
+export const GuardRank = Object.freeze({ Base: 0, Officer: 1, Specialist: 2 });
+
+// Guard/Sniper only -- this project's two weapon-issued combat-staff roles (WEAPON_TIERS/
+// tickArmoryIssuance already treat exactly this pair as "carries an armory-issued weapon").
+// Deliberately narrower than CORRUPTION_ELIGIBLE_ROLES above (which also includes Monitor) --
+// a CCTV monitor doesn't carry a weapon and has no real-PA guard-rank equivalent to promote into.
+const GUARD_RANK_ELIGIBLE_ROLES = new Set([StaffRoleKind.Guard, StaffRoleKind.Sniper]);
+
+const OFFICER_MIN_HIRE_DAYS = 10;
+const SPECIALIST_MIN_HIRE_DAYS = 20;
+const OFFICER_MIN_HIRE_TICKS = OFFICER_MIN_HIRE_DAYS * GAME_DAY_TICKS;
+const SPECIALIST_MIN_HIRE_TICKS = SPECIALIST_MIN_HIRE_DAYS * GAME_DAY_TICKS;
+
+const OFFICER_RATIO = 0.40;
+const SPECIALIST_RATIO = 0.333;
+
+// attackMult/healthMult follow this file's/ranks.js's shared "1.0 = no change" convention --
+// healthMult is read the same direction as ranks.js's rankHealthMultFor (siege.js divides incoming
+// damage by it, so >1 means MORE resistant, i.e. "toughness"). wagePerDay/suppressionBonus are
+// real data, not currently wired to any live system -- see this section's header comment above for
+// exactly why (no wage-drain system exists; suppression wiring needs a siege.js edit out of scope).
+export const GUARD_RANK_DEFS = Object.freeze({
+  [GuardRank.Base]:       Object.freeze({ label: 'Guard',      attackMult: 1.0,  healthMult: 1.0,  wagePerDay: 0,  suppressionBonus: 0 }),
+  [GuardRank.Officer]:    Object.freeze({ label: 'Officer',    attackMult: 1.30, healthMult: 1.40, wagePerDay: 25, suppressionBonus: 0 }),
+  [GuardRank.Specialist]: Object.freeze({ label: 'Specialist', attackMult: 1.50, healthMult: 1.70, wagePerDay: 50, suppressionBonus: 0.15 }),
+});
+
+// Real PA "Specialist gun cost 600" -- NOT run through the ~40x scale this file's
+// CORRUPTION_FIRE_REWARD uses (that factor was calibrated against a one-time REWARD payout, not a
+// purchase price, and would land at an implausibly cheap ~15 scrap that undersells the "genuinely
+// expensive" framing the task brief calls out). Anchored instead against this project's own
+// existing purchase-price ceiling for a single item -- mortar (65, economy.js BUILD_COST),
+// turret_sniper (58), K9_UPGRADE_SCRAP_COST (25) -- landing at the very top of that real range so
+// it reads as the single most expensive per-citizen purchase in the game, matching "a real,
+// expensive upgrade." Balance judgment call, flagged for a reviewer to retune.
+export const SPECIALIST_WEAPON_COST = 60;
+
+export function guardRankOf(roster, citizenId) {
+  return roster.guardRankOf(citizenId);
+}
+
+export function guardRankLabel(roster, citizenId) {
+  return (GUARD_RANK_DEFS[roster.guardRankOf(citizenId)] ?? GUARD_RANK_DEFS[GuardRank.Base]).label;
+}
+
+// Per-citizen combat multiplier lookup (the task brief's own suggested shape/name, adjusted from
+// `guardRankCombatMult(store, id)` to `guardRankCombatMult(roster, citizenId)` -- guard rank is
+// staff-specific state that lives on the roster, same place weaponOf/isCorruptEligible/kindOf
+// already live, not on the citizen store, so this matches THIS file's own established per-citizen
+// accessor convention (roster-side functions take a citizenId) rather than ranks.js's/augments.js's
+// store-side convention (store + typed-array index) which has nowhere to keep roster-only state.
+// Read-only, side-effect-free -- safe to call from anywhere (a UI tooltip, siege.js's combat tick,
+// a soak-test script) without needing world/currentTick.
+export function guardRankCombatMult(roster, citizenId) {
+  const def = GUARD_RANK_DEFS[roster.guardRankOf(citizenId)] ?? GUARD_RANK_DEFS[GuardRank.Base];
+  return { attackMult: def.attackMult, healthMult: def.healthMult, suppressionBonus: def.suppressionBonus };
+}
+
+// Called once per world tick (world.js, alongside tickStaffCorruption -- see this file's report
+// for the exact call-site addition needed). Cheap: two passes over the (small) roster, same cost
+// class as tickStaffCorruption/tickArmoryIssuance right above/below it in this file.
+export function tickGuardRankPromotion(world) {
+  const roster = world.roster;
+  const store = world.citizens;
+
+  // One-time hire-tick stamp -- see this section's header comment for why this file has to
+  // self-derive "hired" rather than reading a real hire event.
+  for (const [id, kind] of roster._roleById.entries()) {
+    if (!GUARD_RANK_ELIGIBLE_ROLES.has(kind)) continue;
+    if (!roster._guardHireTickById.has(id)) roster._guardHireTickById.set(id, world.currentTick);
+  }
+
+  // Current alive, on-roster, Guard/Sniper population, oldest-hired first -- promotions below are
+  // handed out in exactly this order so a settlement that's under its target ratio (e.g. right
+  // after a fresh batch of hires, or after firing corrupt staff shrinks the roster) never bumps a
+  // fresher hire ahead of someone who's genuinely served longer, per the task brief's explicit
+  // "promote the longest-serving eligible guards first" requirement.
+  const eligible = [];
+  for (const [id, kind] of roster._roleById.entries()) {
+    if (!GUARD_RANK_ELIGIBLE_ROLES.has(kind)) continue;
+    const idx = findCitizenIndexById(store, id);
+    if (idx < 0 || !store.isAliveAt(idx)) continue;
+    eligible.push(id);
+  }
+  if (eligible.length === 0) return;
+  eligible.sort((a, b) => (roster._guardHireTickById.get(a) ?? 0) - (roster._guardHireTickById.get(b) ?? 0));
+
+  const specialistSlots = Math.floor(eligible.length * SPECIALIST_RATIO);
+  const officerOrAboveSlots = Math.floor(eligible.length * OFFICER_RATIO);
+
+  let specialistFilled = 0;
+  let officerOrAboveFilled = 0;
+  // Pass 1: Specialist, the higher bar -- filled first from the senior end so the most-tenured
+  // guards land at the top rank before anyone below them claims what would otherwise look like an
+  // Officer-only slot in pass 2.
+  for (const id of eligible) {
+    if (roster.guardRankOf(id) === GuardRank.Specialist) { specialistFilled++; officerOrAboveFilled++; continue; }
+    const servedTicks = world.currentTick - (roster._guardHireTickById.get(id) ?? 0);
+    if (specialistFilled < specialistSlots && servedTicks >= SPECIALIST_MIN_HIRE_TICKS) {
+      roster.setGuardRank(id, GuardRank.Specialist);
+      specialistFilled++; officerOrAboveFilled++;
+    }
+  }
+  // Pass 2: Officer -- fills whatever's left of officerOrAboveSlots not already claimed by a
+  // Specialist above (Specialist counts toward officerOrAboveSlots too, the nested-ratio shape
+  // this section's header comment explains).
+  for (const id of eligible) {
+    const rank = roster.guardRankOf(id);
+    if (rank === GuardRank.Specialist || rank === GuardRank.Officer) continue;
+    const servedTicks = world.currentTick - (roster._guardHireTickById.get(id) ?? 0);
+    if (officerOrAboveFilled < officerOrAboveSlots && servedTicks >= OFFICER_MIN_HIRE_TICKS) {
+      roster.setGuardRank(id, GuardRank.Officer);
+      officerOrAboveFilled++;
+    }
+  }
+}
+
+// Player-facing purchase (mirrors upgradeDog's exact shape above: validate, spend scrap, flip a
+// flag) for the Specialist Rifle (WeaponTier.Specialist/WEAPON_TIERS above). Only a citizen who's
+// ALREADY reached GuardRank.Specialist through tickGuardRankPromotion can be issued this tier --
+// real PA gates the gun by rank, not just cost, so a fresh recruit can't be geared up on day one no
+// matter how much scrap the player has. On success, sets the roster's existing manual-weapon-
+// override plumbing (setManualWeapon) so tickArmoryIssuance's normal per-tick re-derivation picks
+// it up on its own (see that function's new Specialist branch above) -- no separate issuance path
+// needed. Returns { ok: true } or { ok: false, reason }.
+export function purchaseSpecialistWeapon(world, citizenId) {
+  const roster = world.roster;
+  if (!roster.isStaff(citizenId)) return { ok: false, reason: 'not staff' };
+  const kind = roster.kindOf(citizenId);
+  if (kind !== StaffRoleKind.Guard && kind !== StaffRoleKind.Sniper) return { ok: false, reason: 'not a guard/sniper' };
+  if (roster.guardRankOf(citizenId) !== GuardRank.Specialist) return { ok: false, reason: 'not Specialist rank yet' };
+  if (roster.hasSpecialistWeapon(citizenId)) return { ok: false, reason: 'already purchased' };
+  if (world.scrap < SPECIALIST_WEAPON_COST) return { ok: false, reason: 'cost' };
+  world.scrap -= SPECIALIST_WEAPON_COST;
+  if (world.finance) world.finance.buildSpend += SPECIALIST_WEAPON_COST;
+  roster._specialistWeaponPurchasedById.add(citizenId);
+  roster.setManualWeapon(citizenId, WeaponTier.Specialist);
+  return { ok: true };
 }
 
 // --- Staff training-program track (Prison Architect reform_programs_dlc.txt's real staff-facing

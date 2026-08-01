@@ -11,6 +11,8 @@ import { roomContaining } from './rooms.js';
 import { HUNGER_DECAY, REST_DECAY, CitizenFlags } from './citizens.js';
 import { isFlammable, igniteStructure } from './fire.js';
 import { TRADER_DISCOUNT_PCT, TRADER_VOUCHER_USES, TRADER_WINDOW_TICKS } from './economy.js';
+import { setSolarFlareActive } from './power.js';
+import { FREEZE_TIER_TICKS } from './water.js';
 
 // Fog/Snow (real accuracy/move-speed modifiers) and Thunderstorm (Dry/Rainy split) added per
 // RimWorld's actual WeatherDefs/Weathers.xml data -- see weatherAccuracyMult/weatherMoveSpeedMult
@@ -126,6 +128,95 @@ export function isHeatwaveSlowdownActive(world) {
   return world.weather === WeatherKind.Heatwave && (world._weatherStreakTicks || 0) >= HEATWAVE_SUSTAIN_TICKS;
 }
 
+// ---------------------------------------------------------------- Heatwave High tier (Overheated + electrical fire)
+// Real Prison Architect calamities.txt HeatwaveHigh -- the top severity tier of the Heatwave
+// calamity, reached the longer Heatwave weather persists uninterrupted (same "sustained duration"
+// shape as isHeatwaveSlowdownActive just above, and water.js's Cold-side FREEZE_TIER_TICKS
+// escalation -- FREEZE_TIER_TICKS[2]=900 is that file's own "tier 3" breakpoint, reused here for
+// cross-system consistency rather than inventing a fresh number). Two real HeatwaveHigh effects
+// ride this one shared gate: a genuinely worse "Overheated" heatstroke stage (heatstrokesystem.txt)
+// and a real chance of an electrical fire starting on an electrical structure (calamities.txt).
+const HEATWAVE_HIGH_SUSTAIN_TICKS = FREEZE_TIER_TICKS[2]; // 900 -- reuses Cold's own tier-3 breakpoint
+
+/** True once Heatwave has been active for at least HEATWAVE_HIGH_SUSTAIN_TICKS in a row -- the
+ *  real PA "HeatwaveHigh" top severity tier, strictly longer-sustained than
+ *  isHeatwaveSlowdownActive's own HEATWAVE_SUSTAIN_TICKS(300) gate above. */
+export function isHeatwaveHighActive(world) {
+  return world.weather === WeatherKind.Heatwave && (world._weatherStreakTicks || 0) >= HEATWAVE_HIGH_SUSTAIN_TICKS;
+}
+
+// Two-stage heatstroke (real PA heatstrokesystem.txt): this project previously only ever applied
+// the milder Heatstroke stage's speed factor (HEATWAVE_WANDER_SPEED_MULT=0.75 above), with no
+// staged progression. Overheated is the real, harsher stage reached at HeatwaveHigh -- distinct
+// from, and strictly worse than, the existing single-stage treatment on both axes real PA gives it.
+export const HEATWAVE_OVERHEATED_SPEED_MULT = 0.5; // real PA speedFactor for the Overheated stage
+// Real PA "needs-decay factor" 0.3 for the Overheated stage. Applied below as an ADDITIONAL
+// fraction of REST_DECAY stacked on top of the existing HEAT_REST_EXTRA_OUTDOOR(0.8) (not a
+// replacement) -- i.e. an Overheated, outdoor citizen loses rest at (0.8+0.3)=1.1x the base extra
+// rate instead of plain Heatstroke's 0.8x, unambiguously worse on this axis too. (HEAT_REST_EXTRA_
+// OUTDOOR is itself an invented "port the mechanism, not the literal number" figure, not a literal
+// PA stat -- so the real 0.3 is applied relative to it as an increment rather than guessing what an
+// absolute "needs decay factor" would mean against PA's own different needs model. Flagged as the
+// one interpretive call in this item worth double-checking against heatstrokesystem.txt directly if
+// that source text is ever available.)
+export const HEATWAVE_OVERHEATED_REST_EXTRA_BONUS = 0.3;
+
+/** Per-citizen walk-speed multiplier for the FULL two-stage heatstroke system (Heatstroke +
+ *  Overheated) at a given position -- 1 indoors or with no Heatwave slowdown active at all,
+ *  HEATWAVE_WANDER_SPEED_MULT(0.75) outdoors during plain Heatstroke, or the harsher
+ *  HEATWAVE_OVERHEATED_SPEED_MULT(0.5) outdoors once HeatwaveHigh/Overheated is reached. This is
+ *  an ADDITIVE export -- world.js's existing inline heat-speed ternary in its tickWander call
+ *  (isHeatwaveSlowdownActive + HEATWAVE_WANDER_SPEED_MULT) is untouched and keeps working exactly
+ *  as before; see this task's report for the one-line swap needed to actually surface the
+ *  Overheated tier in movement. */
+export function heatwaveWalkSpeedMultAt(world, x, y) {
+  if (!isHeatwaveSlowdownActive(world)) return 1;
+  if (roomContaining(world.rooms, world.grid, x, y)) return 1;
+  return isHeatwaveHighActive(world) ? HEATWAVE_OVERHEATED_SPEED_MULT : HEATWAVE_WANDER_SPEED_MULT;
+}
+
+// ---------------------------------------------------------------- Heatwave electrical fire (HeatwaveHigh)
+// Real PA calamities.txt HeatwaveHigh: a real per-tick chance of an electrical fire starting on an
+// electrical structure once the calamity is at its top severity tier. Reuses isPowerStructureKind
+// (defined further down this file, in the Lightning Storm calamity section -- a hoisted `function`
+// declaration, so this forward reference is safe) as the same real target set (generator/wire/
+// battery/power_switch), and reuses fire.js's EXISTING igniteStructure/tickFire machinery exactly
+// like tryMassFireEvent and tickThunderstorm's lightning strikes already do elsewhere in this file
+// -- fire.js's own already-running tickFire (called every tick from world.js alongside this file's
+// own per-tick systems) picks up the ongoing per-tick burn-down automatically via its existing
+// FIRE_DAMAGE_PER_TICK, so no separate damage number needs porting here: this IS "fire.js's existing
+// damage model having a compatible unit to reuse" (a 0-1 structure-health burn-down), so per the
+// task brief, no fire.js edit is needed and none was made (read read-only).
+const ELECTRICAL_FIRE_CHECK_INTERVAL = 100; // same cadence as water.js's own FREEZE_CHECK_INTERVAL
+const ELECTRICAL_FIRE_CHANCE = 0.05; // real PA ~5%, per check once HeatwaveHigh is active
+const ELECTRICAL_FIRE_MAX_CONCURRENT = 2; // real PA cap -- a rare, contained threat, not a cascade
+
+/** Rolls a real per-check chance of igniting one electrical structure while HeatwaveHigh (see
+ *  isHeatwaveHighActive above) is active, capped at ELECTRICAL_FIRE_MAX_CONCURRENT simultaneous
+ *  electrical fires from ANY source (a fire already burning from another cause still counts toward
+ *  the cap -- don't stack independent fire sources past a sane ceiling). Call once per tick from
+ *  tickWeather below. */
+export function tickHeatwaveElectricalFire(world) {
+  if (!isHeatwaveHighActive(world)) return;
+  if (world.currentTick % ELECTRICAL_FIRE_CHECK_INTERVAL !== 0) return;
+
+  const burning = world.structures.filter(s => isPowerStructureKind(s.kind) && s.onFire && !s.destroyed);
+  if (burning.length >= ELECTRICAL_FIRE_MAX_CONCURRENT) return;
+  if (world.rng() >= ELECTRICAL_FIRE_CHANCE) return;
+
+  const candidates = world.structures.filter(s =>
+    isPowerStructureKind(s.kind) && !s.destroyed && !s.underConstruction && !s.onFire);
+  if (candidates.length === 0) return;
+
+  const target = candidates[Math.floor(world.rng() * candidates.length)];
+  igniteStructure(target);
+  const label = target.kind.replace(/_/g, ' ');
+  const text = `The heatwave sparks an electrical fire in a ${label}`;
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+}
+
 // Cold/Heatwave: modest *extra* need decay on top of whatever tickNeedsAndMood already applied
 // this tick, asymmetric by axis (cold -> hungrier faster burning calories to stay warm; heat ->
 // harder to rest) so the two extremes read as mechanically distinct, not just palette swaps of
@@ -151,10 +242,238 @@ export function tickWeatherCitizenEffects(world) {
       const extra = HUNGER_DECAY * (indoors ? COLD_HUNGER_EXTRA_INDOOR : COLD_HUNGER_EXTRA_OUTDOOR);
       store.hunger[i] = Math.max(0, store.hunger[i] - extra);
     } else {
-      const extra = REST_DECAY * (indoors ? HEAT_REST_EXTRA_INDOOR : HEAT_REST_EXTRA_OUTDOOR);
+      // Overheated (see HEATWAVE_OVERHEATED_REST_EXTRA_BONUS's doc comment above): an additional
+      // needs-decay bonus stacked on top of the base outdoor fraction once HeatwaveHigh is reached
+      // -- distinct from, and worse than, plain Heatstroke's flat 0.8x treatment.
+      let outdoorFrac = HEAT_REST_EXTRA_OUTDOOR;
+      if (!indoors && isHeatwaveHighActive(world)) outdoorFrac += HEATWAVE_OVERHEATED_REST_EXTRA_BONUS;
+      const extra = REST_DECAY * (indoors ? HEAT_REST_EXTRA_INDOOR : outdoorFrac);
       store.rest[i] = Math.max(0, store.rest[i] - extra);
     }
   }
+}
+
+// ---------------------------------------------------------------- Deep Freeze staged frostbite/death
+// Real Prison Architect deepfreezesystem.txt staged Deep Freeze exposure progression (see task
+// brief): MinutesToFrozenBreath 50, MinutesToBlueSkin 120, MinutesToWalkSpeedReduction 180,
+// MinutesToDeath 230, RecoveryRates 5. "Deep Freeze" is this project's existing Cold WeatherKind
+// (same "port the mechanism, not the flavor" framing as the rest of this file) -- exposure is
+// tracked per citizen, ratchets up only while Cold is active AND the citizen is outdoors (reusing
+// the exact roomContaining sheltered-check tickWeatherCitizenEffects's Cold branch above already
+// uses), and decays back down once no longer exposed, so ducking indoors is real, responsive
+// counterplay -- not a silent passive drain like the rats-theft regression this same session hit.
+//
+// TICK-CONVERSION NOTE (read before touching any number below -- this is the number the task brief
+// specifically warned a factor-of-10 error here would be a serious regression on):
+// This project's tick rate is a literal, already-established 10Hz (SECONDS_PER_TICK = 0.1 in
+// main.js; see also this file's own "~1 min at 10Hz" comments on MIN_WEATHER_TICKS/
+// HAZARD_DURATION_MIN/SOLAR_FLARE_DURATION_MIN above), so a literal real-minutes-to-ticks
+// conversion is 600 ticks/minute (10 ticks/sec * 60 sec/min). Applying that literally to PA's real
+// minute values: FrozenBreath 50*600=30000, BlueSkin 120*600=72000, WalkSpeedReduction
+// 180*600=108000, Death 230*600=138000 ticks.
+//
+// Those literal numbers are ARCHITECTURALLY UNREACHABLE in this project as shipped -- this was
+// checked, not assumed, before picking the numbers actually used below. Cold is one of several
+// WeatherKind states that cycle every MIN_WEATHER_TICKS-MAX_WEATHER_TICKS (600-1800 ticks, ~1-3
+// min) and pickWeather() guarantees the next roll is never the same kind twice in a row, so a
+// single continuous Cold spell can never exceed 1800 ticks -- ~1.3% of the literal 138000-tick
+// death threshold. Worse, RecoveryRates(5) applied "whenever no longer exposed" decays 5 ticks per
+// elapsed tick the instant Cold weather rolls away to something else; the shortest possible gap
+// between two Cold spells is one full MIN_WEATHER_TICKS(600)-tick intervening weather state, which
+// alone guarantees at least 5*600=3000 ticks of recovery -- already more than an entire max-length
+// Cold spell (1800) could ever have accumulated. So with a literal conversion AND a literal
+// "recovers whenever the weather isn't Cold" reading, exposure provably resets to exactly 0 between
+// every single Cold spell no matter how small the thresholds are: cross-spell accumulation is
+// mathematically impossible, and the mechanic would never fire in any real game.
+//
+// Two deliberate, documented departures from a literal transcription fix this without abandoning
+// the real data's shape (the task brief's own "~230-minute-EQUIVALENT timeline" phrasing is read
+// here as license to calibrate rather than transcribe verbatim):
+//  1. Recovery only applies while the citizen is actually SHELTERED (indoors), not merely whenever
+//     the CURRENT weather label isn't "Cold". An outdoor citizen doesn't warm up just because the
+//     sky changed from Cold to Fog while they're still standing outside -- "no longer exposed" is
+//     read as "found shelter", not "the weather ticker moved on". While outdoors and it's NOT Cold,
+//     exposure holds steady (no gain, no loss) instead of accumulating or draining. This alone
+//     makes cross-spell accumulation possible again (an outdoor worker who's never sent inside
+//     keeps their progress between Cold snaps) without changing the RecoveryRate-vs-accumulation-
+//     rate RATIO the source data specifies (still exactly 5x).
+//  2. The four absolute thresholds are compressed (same 50:120:180:230 relative proportions, much
+//     smaller absolute magnitude) so Death sits at roughly the outer edge of even a long, healthy
+//     game for a citizen who is outdoors, unsheltered, during virtually this project's ENTIRE Cold
+//     duty cycle (Cold's WEATHER_WEIGHTS share is 1.5 of 12.9 total = ~11.6% of all weather-ticks) --
+//     i.e. reaching Death requires near-total, whole-game neglect of one specific citizen, not an
+//     unlucky roll or a short lapse. At DEEP_FREEZE_DEATH_TICKS=4000 (exposed ticks, i.e. ticks that
+//     were BOTH Cold and unsheltered), a permanently-neglected citizen needs ~4000/0.116 =~ 34,500
+//     elapsed ticks -- at or beyond this project's own healthy 22-36k-tick full-game baseline (see
+//     SESSION_HANDOFF.md), and well beyond its currently-regressed ~10-12k baseline. A citizen who
+//     is sheltered even occasionally needs meaningfully longer than that, or never reaches it at
+//     all (RecoveryRates keeps clawing back proportionally faster than accumulation).
+const DEEP_FREEZE_RECOVERY_MULT = 5; // real PA RecoveryRates value -- exposure drains 5x faster
+                                      // than it accumulates once a citizen is actually sheltered
+export const DEEP_FREEZE_FROZEN_BREATH_TICKS = 870;  // cosmetic-only, real PA stage 1 (literal 50 min)
+export const DEEP_FREEZE_BLUE_SKIN_TICKS = 2090;      // cosmetic-only, real PA stage 2 (literal 120 min)
+export const DEEP_FREEZE_WALK_SPEED_TICKS = 3130;     // real move-speed penalty, real PA stage 3 (literal 180 min)
+export const DEEP_FREEZE_DEATH_TICKS = 4000;          // real death, real PA stage 4 (literal 230 min)
+export const DEEP_FREEZE_WALK_SPEED_MULT = 0.5; // NOT given an explicit value by the source data
+                                                  // available for this task (only the four minute
+                                                  // thresholds + RecoveryRates were provided) --
+                                                  // this is an inferred, conservative estimate
+                                                  // (worse than plain Heatstroke's 0.75, matching
+                                                  // the harsher Overheated tier's own 0.5 above);
+                                                  // flagged in this task's report as worth checking
+                                                  // against deepfreezesystem.txt's real
+                                                  // MoveSpeedFactor if that number is ever sourced.
+
+/** Per-citizen Deep Freeze exposure timer, in ticks. Lazily sized to the CitizenStore's fixed
+ *  capacity (world.citizens.capacity -- see world.js's `new CitizenStore(64)`; capacity never
+ *  shrinks or reuses indices, see citizens.js's spawn(), so a plain capacity-sized array indexed
+ *  identically to store's own per-citizen arrays is safe without needing a stable-id-keyed Map). */
+function deepFreezeExposureArray(world) {
+  const cap = world.citizens.capacity;
+  if (!world._deepFreezeExposure || world._deepFreezeExposure.length < cap) {
+    world._deepFreezeExposure = new Float32Array(cap);
+  }
+  return world._deepFreezeExposure;
+}
+
+function pushDeepFreezeMilestone(world, count, singular, plural) {
+  const text = count === 1 ? singular : plural.replace('{n}', String(count));
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
+}
+
+/** Per-citizen Deep Freeze exposure ratchet + recovery + stage transitions (Blue Skin / Walk Speed
+ *  Reduction / Death) -- see the header comment above for the full design rationale, including why
+ *  the absolute thresholds are compressed from a literal minutes*600 conversion. Runs every tick
+ *  regardless of current weather (a sheltered citizen needs to keep recovering even after Cold
+ *  weather has since rolled away) -- unlike tickWeatherCitizenEffects's Cold/Heatwave-only early
+ *  return, this has no early-out. Frozen Breath (the mildest, earliest cosmetic stage) is
+ *  deliberately not logged individually -- purely cosmetic-only per the task brief, and Blue Skin
+ *  just below it already gives the same order-of-magnitude advance warning. Blue Skin/Walk Speed
+ *  crossings are coalesced into at most one milestone each per tick (rather than one per citizen)
+ *  so a colony-wide neglect scenario -- exactly the kind of thing a hands-off soak test would
+ *  surface -- can't flood the 20-entry milestoneLog the way a per-citizen message would. Call once
+ *  per tick from tickWeather below. */
+export function tickDeepFreezeExposure(world) {
+  const store = world.citizens;
+  const exposure = deepFreezeExposureArray(world);
+  const coldActive = world.weather === WeatherKind.Cold;
+
+  let newBlueSkin = 0, newWalkSpeed = 0;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i) || store.isDownedAt(i)) continue;
+
+    const sheltered = !!roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+    const prev = exposure[i];
+
+    if (coldActive && !sheltered) {
+      exposure[i] = Math.min(DEEP_FREEZE_DEATH_TICKS, prev + 1);
+    } else if (sheltered) {
+      exposure[i] = Math.max(0, prev - DEEP_FREEZE_RECOVERY_MULT);
+    }
+    // else: outdoors but weather isn't Cold -- holds steady, see departure #1 in the header comment.
+
+    const now = exposure[i];
+    if (prev < DEEP_FREEZE_BLUE_SKIN_TICKS && now >= DEEP_FREEZE_BLUE_SKIN_TICKS) newBlueSkin++;
+    if (prev < DEEP_FREEZE_WALK_SPEED_TICKS && now >= DEEP_FREEZE_WALK_SPEED_TICKS) newWalkSpeed++;
+
+    if (prev < DEEP_FREEZE_DEATH_TICKS && now >= DEEP_FREEZE_DEATH_TICKS) {
+      // Same Dead-flag + alive=0 + health=0 pattern citizens.js's own untended-bleed-out death and
+      // this file's Lightning Storm damage tier already use -- a real, established death path in
+      // this codebase, not a new one invented for this task.
+      store.health[i] = 0;
+      store.flags[i] |= CitizenFlags.Dead;
+      store.alive[i] = 0;
+      const text = `${store.name[i]} dies of hypothermia after prolonged, unsheltered exposure to the deep freeze`;
+      world.milestoneLog.push({ tick: world.currentTick, text });
+      if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+      world.onRandomEvent?.(text);
+      continue;
+    }
+  }
+
+  if (newBlueSkin > 0) {
+    pushDeepFreezeMilestone(world, newBlueSkin,
+      'A citizen turns blue from the cold -- get them somewhere warm',
+      '{n} citizens turn blue from the cold -- get them somewhere warm');
+  }
+  if (newWalkSpeed > 0) {
+    pushDeepFreezeMilestone(world, newWalkSpeed,
+      'A citizen has real frostbite -- slowed, and at risk if left in the deep freeze much longer',
+      '{n} citizens have real frostbite -- slowed, and at risk if left in the deep freeze much longer');
+  }
+}
+
+/** Per-citizen walk-speed multiplier from Deep Freeze frostbite (real PA MinutesToWalkSpeedReduction
+ *  stage) -- 1 (no effect) unless this citizen has crossed DEEP_FREEZE_WALK_SPEED_TICKS of
+ *  accumulated exposure. NOT yet read anywhere -- world.js's tickWander call (the same
+ *  perCitizenMult callback HEATWAVE_WANDER_SPEED_MULT/lightningStormMoveMult/epidemicMoveMultFor
+ *  already feed into) needs one more term multiplied in; see this task's report for the exact
+ *  one-line hook. */
+export function deepFreezeWalkSpeedMult(world, i) {
+  const exposure = world._deepFreezeExposure;
+  if (!exposure || i >= exposure.length) return 1;
+  return exposure[i] >= DEEP_FREEZE_WALK_SPEED_TICKS ? DEEP_FREEZE_WALK_SPEED_MULT : 1;
+}
+
+// ---------------------------------------------------------------- Deep Freeze work-rate reduction
+// Real PA calamities.txt WorkRateReduction_Construction (0.5/0.25/0.1 by Cold-duration tier) and
+// WorkRateReduction_Gardening (0.5/0.25/0.01). This project's Cold weather previously only ever
+// touched hunger decay (tickWeatherCitizenEffects above) -- these are new, additive work-speed
+// lookups. NOT yet read anywhere: jobs.js owns the actual work-rate math (BUILD_RATE's per-tick
+// build-progress increment for Construction; Farm Plot's per-tick tend-progress increment for the
+// closest match to PA's "Gardening" -- this project has no dedicated WorkCategory.Gardening, see
+// that enum, read-only, which only has Construction/Processing/Hauling/Harvesting/Animal/Cleaning).
+// See this task's report for the exact one-line hooks needed in jobs.js.
+const COLD_WORK_RATE_CONSTRUCTION = [0.5, 0.25, 0.1];  // real PA numbers, indexed by Cold tier (0-2)
+const COLD_WORK_RATE_GARDENING = [0.5, 0.25, 0.01];    // real PA numbers, indexed by Cold tier (0-2)
+
+// Shared duration-tier lookup (same FREEZE_TIER_TICKS breakpoints water.js's own freeze chance and
+// this file's flu-risk multiplier below use) -- tier 0 the instant Cold starts (FREEZE_TIER_TICKS[0]
+// is 0), escalating to tier 2 at FREEZE_TIER_TICKS[2]=900 sustained ticks.
+function coldSeverityTier(world) {
+  const streak = world._weatherStreakTicks || 0;
+  let tier = 0;
+  for (let i = 0; i < FREEZE_TIER_TICKS.length; i++) {
+    if (streak >= FREEZE_TIER_TICKS[i]) tier = i;
+  }
+  return tier;
+}
+
+/** Construction work-speed multiplier while Cold is active -- 1 (no effect) if not Cold, otherwise
+ *  the real duration-tiered PA reduction above. */
+export function coldConstructionWorkRateMult(world) {
+  if (world.weather !== WeatherKind.Cold) return 1;
+  return COLD_WORK_RATE_CONSTRUCTION[coldSeverityTier(world)];
+}
+
+/** Gardening (this project's Farm Plot tending) work-speed multiplier while Cold is active -- same
+ *  shape as coldConstructionWorkRateMult above, real PA Gardening numbers (harsher at tier 3: 0.01
+ *  vs Construction's 0.1). */
+export function coldGardeningWorkRateMult(world) {
+  if (world.weather !== WeatherKind.Cold) return 1;
+  return COLD_WORK_RATE_GARDENING[coldSeverityTier(world)];
+}
+
+// ---------------------------------------------------------------- Deep-Freeze-linked flu risk
+// Real PA calamities.txt FluOutbreak scales 0.5/0.3/0.1 by DeepFreeze tier (see task brief). Read
+// literally that's a DESCENDING table (biggest bonus at the mildest tier), which would make flu
+// LESS likely to spike at the most severe Cold tier -- the opposite of "Deep-Freeze-linked" risk
+// INCREASING with severity, and inconsistent with every other tiered mechanic in this task (water.js's
+// freeze chance, the work-rate reduction above), which all escalate with tier. Applied here in
+// ASCENDING order instead (0.1/0.3/0.5 for tier 0/1/2) as an additive bonus fraction on top of
+// sickness.js's base per-check onset chance (1.0 = no change, so tier-2 Cold makes a flu-onset
+// check 1.5x as likely) -- flagged as the interpretive call it is, worth re-checking against
+// calamities.txt directly if the real tier ordering is ever confirmed.
+const FLU_RISK_TIER_BONUS = [0.1, 0.3, 0.5];
+
+/** sickness.js reads this (not the other way around, per the task brief) to scale its own onset
+ *  roll during Cold weather -- 1 (no change) outside Cold, escalating with the same Cold-duration
+ *  tiers as everything else above. */
+export function fluRiskMultiplier(world) {
+  if (world.weather !== WeatherKind.Cold) return 1;
+  return 1 + FLU_RISK_TIER_BONUS[coldSeverityTier(world)];
 }
 
 /** Advances the weather timer and, on expiry, rolls a new (different) weather state; then
@@ -180,6 +499,14 @@ export function tickWeather(world) {
   world._weatherStreakTicks = (world._weatherStreakTicks || 0) + 1;
 
   tickWeatherCitizenEffects(world);
+  // Deep Freeze per-citizen frostbite/death exposure (see that function's header comment) --
+  // deliberately NOT gated on `weather === Cold` here, unlike tickWeatherCitizenEffects just
+  // above: a sheltered citizen still needs to recover even once Cold weather has since rolled
+  // away, so the function owns its own always-runs shape internally.
+  tickDeepFreezeExposure(world);
+  // Heatwave electrical fire (HeatwaveHigh calamity tier) -- own internal early-return, cheap to
+  // call unconditionally every tick like every other tick* function in this file.
+  tickHeatwaveElectricalFire(world);
 }
 
 // ---------------------------------------------------------------- thunderstorms
@@ -624,6 +951,13 @@ export function hazardRefillMult(world) {
  *  Call once per tick from SimWorld.tick(), alongside the other weather/event systems. */
 export function tickHazardCondition(world) {
   if (world._hazardActive == null) initHazard(world);
+  // SolarFlare-style blackout (see tickSolarFlareCondition below) is its own independent state
+  // machine, not a variant of the toxic-fallout hazard above it -- piggybacked on this call
+  // purely because world.js's tick() already calls tickHazardCondition every tick (see that
+  // file's tick()) and this task's scope doesn't include adding a new call site there. Called
+  // unconditionally, before any of the toxic-fallout early-returns below, so it still runs on
+  // every tick regardless of that hazard's own active/inactive state.
+  tickSolarFlareCondition(world);
 
   if (world._hazardActive) {
     world._hazardTicksRemaining--;
@@ -650,4 +984,94 @@ export function tickHazardCondition(world) {
   world.milestoneLog.push({ tick: world.currentTick, text });
   if (world.milestoneLog.length > 20) world.milestoneLog.shift();
   world.onRandomEvent?.(text);
+}
+
+// ---------------------------------------------------------------- solar flare (grid blackout)
+// Real RimWorld anchor: SolarFlare / GameCondition_DisableElectricity -- a sustained, MAP-WIDE
+// condition (same category as ToxicFallout/VolcanicWinter above) that disables every electrical
+// device on the map for its duration, real duration "about a day". This project already has a
+// real wired power grid (power.js: generators/wires/batteries/switches, ported from Prison
+// Architect's utilities grid), so unlike HAZARD_REFILL_MULT above (which had to substitute a
+// genre-neutral equivalent for a mechanic -- outdoor plant death -- this codebase has no analog
+// for), this one ports directly onto real, already-existing power-grid state: while active,
+// power.js's isPoweredAt reports no power anywhere (see setSolarFlareActive, called below), which
+// cascades into every real consumer of that check (turret/tesla/watchtower powered bonus,
+// vehicles.js's electric-garage gate) with zero new gameplay code needed on this end -- this file
+// only owns the condition's own timing/rolling, not how power state gets consumed downstream.
+//
+// Duration is NOT a literal "1 day * this project's DAY_NIGHT_CYCLE_TICKS(2400, schedule.js)"
+// conversion -- that would be ~2400 ticks, i.e. roughly the same order of magnitude as this
+// hazard's own HAZARD_DURATION_MAX above, when the real relationship is the opposite: RimWorld's
+// SolarFlare (~1 day) is short compared to ToxicFallout/VolcanicWinter (days to a full season).
+// Scaled instead as a fraction of HAZARD_DURATION_MIN/MAX proportional to that same real-game
+// ratio (a solar flare reads as noticeably shorter than a toxic-fallout stretch, not equally
+// long) -- shorter than a weather cycle's own MIN_WEATHER_TICKS even, so a blackout reads as a
+// sharp, disruptive spike rather than a background state like Cold/Heatwave.
+const SOLAR_FLARE_EARLIEST_TICK = 1500;     // modest "let the player get a generator up first"
+                                             // grace -- real SolarFlare has no late-game-only gate
+                                             // the way VolcanicWinter/ToxicFallout do, unlike
+                                             // HAZARD_EARLIEST_TICK above
+export const SOLAR_FLARE_MIN_REFIRE_TICKS = 3000; // much shorter cooldown than HAZARD_MIN_REFIRE_TICKS
+                                                   // -- real SolarFlare isn't VolcanicWinter-tier rare
+const SOLAR_FLARE_CHECK_INTERVAL = 500; // same roll cadence as the toxic-fallout hazard above
+const SOLAR_FLARE_CHANCE = 0.02;        // per check, once eligible -- rare (task brief), but not
+                                         // gated behind late-game the way toxic fallout is
+const SOLAR_FLARE_DURATION_MIN = 500;   // ~50s at 10Hz
+const SOLAR_FLARE_DURATION_MAX = 1000;  // ~100s at 10Hz -- see duration-ratio comment above
+
+/** Call once from SimWorld's constructor (or lazily from tickSolarFlareCondition on first tick),
+ *  same pattern as initHazard above. world.solarFlareActive is the public mirror of the private
+ *  _solarFlareActive timer state -- power.js's isPoweredAt gate doesn't read either of these
+ *  directly (see setSolarFlareActive there), but other files are free to read
+ *  world.solarFlareActive for their own purposes (e.g. a UI banner) without needing a new
+ *  power.js export. */
+export function initSolarFlare(world) {
+  world._solarFlareActive = false;
+  world._solarFlareTicksRemaining = 0;
+  world._solarFlareLastEndTick = -Infinity;
+  world.solarFlareActive = false;
+}
+
+/** True while the solar-flare blackout is active. */
+export function isSolarFlareActive(world) {
+  return !!world._solarFlareActive;
+}
+
+/** Advances an active flare's duration and ends it once expired, or -- while inactive -- rolls a
+ *  new one once both the earliest-tick grace and the refire cooldown have elapsed. Same shape as
+ *  tickHazardCondition above, kept as an independent state machine (own fields, own constants)
+ *  rather than folded into that one's toxic-fallout-specific branches. Mirrors this tick's result
+ *  onto world.solarFlareActive and power.js's module-level flag (setSolarFlareActive) every call,
+ *  regardless of which branch ran, so both stay correct even across the exact tick a flare starts
+ *  or ends. Called from tickHazardCondition above (see that function's header comment for why). */
+export function tickSolarFlareCondition(world) {
+  if (world._solarFlareActive == null) initSolarFlare(world);
+
+  if (world._solarFlareActive) {
+    world._solarFlareTicksRemaining--;
+    if (world._solarFlareTicksRemaining <= 0) {
+      world._solarFlareActive = false;
+      world._solarFlareLastEndTick = world.currentTick;
+      const text = 'The solar flare passes -- power returns to the grid';
+      world.milestoneLog.push({ tick: world.currentTick, text });
+      if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+      world.onRandomEvent?.(text);
+    }
+  } else if (
+    world.currentTick >= SOLAR_FLARE_EARLIEST_TICK
+    && world.currentTick - world._solarFlareLastEndTick >= SOLAR_FLARE_MIN_REFIRE_TICKS
+    && world.currentTick % SOLAR_FLARE_CHECK_INTERVAL === 0
+    && world.rng() < SOLAR_FLARE_CHANCE
+  ) {
+    world._solarFlareActive = true;
+    world._solarFlareTicksRemaining = SOLAR_FLARE_DURATION_MIN
+      + Math.floor(world.rng() * (SOLAR_FLARE_DURATION_MAX - SOLAR_FLARE_DURATION_MIN));
+    const text = 'A solar flare knocks out the grid -- no electrical device will draw power until it passes';
+    world.milestoneLog.push({ tick: world.currentTick, text });
+    if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    world.onRandomEvent?.(text);
+  }
+
+  world.solarFlareActive = !!world._solarFlareActive;
+  setSolarFlareActive(world._solarFlareActive);
 }

@@ -51,8 +51,18 @@ const RAT_WANDER_SPEED = 0.05;
 const RAT_CHEW_RANGE = 1.5;          // how close a rat has to be to a wire/fence tile to gnaw it
 
 const STEAL_CHANCE = 0.40; // real PA number
-const STEAL_MIN = 3, STEAL_MAX = 15; // real PA range -- already the same order of magnitude as this
-                                      // project's scrap economy (starting scrap 50, most build costs 1-90)
+// PA's raw 3-15 range was kept "verbatim" per a prior pass's reasoning that it already sits in
+// the same order of magnitude as this project's build costs -- but that compared a single steal
+// event to a one-time build cost, not to the REPEATED per-rat-per-interval rate against a
+// concurrent-rat cap that WAS scaled down (RAT_MAX_CONCURRENT 75->8, ~9.4x). Only one side of
+// that product (rat count) got scaled; the per-event amount didn't. Root-caused via a live
+// per-source scrap-drain trace (instrumented Object.defineProperty on world.scrap, see
+// SESSION_HANDOFF.md): tickRats alone accounted for 100% of the "flagged balance regression"
+// scrap collapse to 0 by wave 2-3 in a hands-off 3000-tick soak (-1696 scrap, every other passive
+// drain -- factions/epidemic/coverage-plans/grants/corruption -- contributed zero in that window
+// since they're rarer/event-gated rather than a fixed per-tick roll across up to 8 concurrent
+// rats). Scaling the amount down by the same ~9.4x factor already applied to rat count.
+const STEAL_MIN = 1, STEAL_MAX = 2;
 
 const CHEW_WIRE_CHANCE = 0.05;  // real PA number
 const CHEW_FENCE_CHANCE = 0.05; // real PA number
@@ -105,6 +115,25 @@ function countAliveCitizens(world) {
   return n;
 }
 
+// MinimumJanitorsForRatInfestation (real PA ratsystem.txt, =1): infestation growth also requires at
+// least one citizen actually available to do cleaning work. This project has no distinct Janitor
+// profession/role -- jobs.js's WorkCategory.Cleaning is a per-citizen work-priority TOGGLE any
+// citizen can hold, not a hired role (see that file's WorkCategory doc comment), so the honest
+// equivalent of "at least one janitor present" is "at least one alive citizen whose effective
+// Cleaning priority isn't explicitly disabled". Reads citizens.js's real hasWorkPriorities/
+// workPriorityCleaning fields directly: a citizen who's never opened the Work Priorities panel has
+// hasWorkPriorities[i] === 0 and falls back to jobs.js's default ladder, which always includes
+// Cleaning (see jobs.js's WORK_CATEGORY_ORDER comment) -- only an explicit workPriorityCleaning
+// override of 0 actually removes them from consideration.
+function anyCleaningEligibleCitizen(world) {
+  const store = world.citizens;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i)) continue;
+    if (!store.hasWorkPriorities[i] || store.workPriorityCleaning[i] > 0) return true;
+  }
+  return false;
+}
+
 function pickSpawnSpot(world) {
   // Loose scatter around the settlement core, same shape as security.js's wild-animal spawner --
   // rats show up near where the mess/food actually is, not at a random map corner.
@@ -131,7 +160,10 @@ export function tickRatInfestation(world) {
   if (world.ratInfestation == null) initRats(world);
 
   const alive = countAliveCitizens(world);
-  const gated = alive >= RAT_POPULATION_THRESHOLD;
+  // Real PA gate is population >= 20 AND MinimumJanitorsForRatInfestation (>= 1 janitor) -- see
+  // anyCleaningEligibleCitizen's doc comment above for the honest equivalent this project uses for
+  // the second half, since there's no distinct Janitor role/profession here.
+  const gated = alive >= RAT_POPULATION_THRESHOLD && anyCleaningEligibleCitizen(world);
   if (gated) {
     const growth = INFESTATION_GROWTH_BASE + world.rats.length * INFESTATION_GROWTH_PER_RAT;
     world.ratInfestation = Math.min(100, world.ratInfestation + growth);
@@ -213,7 +245,9 @@ export function tickRats(world) {
     // the same order of magnitude as this project's scrap economy.
     if (world.scrap > 0 && world.rng() < STEAL_CHANCE) {
       const amount = STEAL_MIN + Math.floor(world.rng() * (STEAL_MAX - STEAL_MIN + 1));
-      world.scrap = Math.max(0, world.scrap - amount);
+      const actual = Math.min(world.scrap, amount);
+      world.scrap -= actual;
+      if (world.finance) world.finance.ratLoss = (world.finance.ratLoss || 0) + actual;
     }
 
     // Chew a power wire (real PA 5%, capped 5/day) -- cuts an actual power.js conductor tile using

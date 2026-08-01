@@ -75,17 +75,30 @@ export const PASSION_ICON = ['', ' ·', ' 🔥']; // none / minor (dot) / burnin
 const BASE_WEIGHTS = [0.6, 0.25, 0.15]; // None, Minor, Burning
 const FAVORED_WEIGHTS = [0.35, 0.3, 0.35];
 
-function rollPassion(rng, favored) {
+// trait (traits.js's optional forcedPassion/conflictingPassion, RimWorld's real TorturedArtist/
+// Brawler mechanics -- see traits.js's own top-of-file doc comment): a hard override on ONE
+// specific skill, checked before the backstory-biased roll below since a trait guarantee is a
+// stronger claim than a backstory's soft bias. forcedPassion always resolves to Burning (no tier
+// field on the trait data itself -- see traits.js's doc comment for why); conflictingPassion caps
+// this skill's roll at Minor, so a would-be Burning result is simply demoted rather than re-rolled
+// (keeps the None/Minor split proportions from the normal roll intact instead of skewing them).
+function rollPassion(rng, favored, skillName, trait) {
+  if (trait?.forcedPassion?.skill === skillName) return Passion.Burning;
   const weights = favored ? FAVORED_WEIGHTS : BASE_WEIGHTS;
   const r = rng();
   if (r < weights[0]) return Passion.None;
+  if (trait?.conflictingPassion === skillName) return Passion.Minor; // Burning disallowed for this skill
   if (r < weights[0] + weights[1]) return Passion.Minor;
   return Passion.Burning;
 }
 
-export function randomPassions(rng, backstory) {
+// trait: optional 3rd arg (citizens.js passes the citizen's own randomTrait() result, see that
+// file's spawn()) -- omitted, every call site behaves byte-for-byte as before this feature existed
+// (rollPassion's trait?.foo reads all come back undefined, same null-safe convention as every other
+// optional field in this codebase).
+export function randomPassions(rng, backstory, trait) {
   return {
-    combat: rollPassion(rng, backstory?.favoredSkill === 'combat'),
-    construction: rollPassion(rng, backstory?.favoredSkill === 'construction'),
+    combat: rollPassion(rng, backstory?.favoredSkill === 'combat', 'combat', trait),
+    construction: rollPassion(rng, backstory?.favoredSkill === 'construction', 'construction', trait),
   };
 }

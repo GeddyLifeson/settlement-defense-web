@@ -46,6 +46,14 @@ export const ProgramKind = Object.freeze({
   // entirely) and the payoff (combat-skill gain plus, on full-course graduation, a real reduction
   // in this specific staffer's own bribery odds -- see completeSession below).
   GuardResponseTraining: 'guard_response_training',
+  // Care Clinic (item 4): real PA anchor is Methadone (reform_programs.txt), the one program in
+  // PA's real table flagged BOTH Repeatable and Passive -- an always-on maintenance loop with no
+  // pass/fail graduation, distinct from every kind above (SkillsWorkshop/WellnessCounseling/
+  // CommunityCircle all run a fixed multi-session "course" that ends in a graduation outcome;
+  // CommunityGathering is a single one-shot event). See PROGRAM_DEFS' entry below and
+  // completeSession()'s dedicated (lack of a) branch for this kind for how that's actually
+  // expressed inside this file's existing session-loop machinery, without touching jobs.js at all.
+  CareClinic: 'care_clinic',
 });
 
 // PROGRAM_DEFS: the balance table, PA's real numbers (per the task doc) converted into this
@@ -72,9 +80,19 @@ export const PROGRAM_DEFS = Object.freeze({
     // tick-up from jobs.js -- i.e. attending is a real, if modest, alternative path to the skill
     // gain a citizen would otherwise only get from actually building/harvesting.
     skillGainPerTick: 0.02 / Math.round(120 * MINUTES_TO_TICKS) * 6,
+    requires: [], // item 3: no prerequisite -- the entry-level vocational track
   }),
   [ProgramKind.WellnessCounseling]: Object.freeze({
     label: 'Wellness Counseling',
+    // item 3 (qualification-gated chains): real PA anchor -- GeneralEducation requires
+    // Qualification FoundationEducation. Mirrored here directly on citizen completion rather than
+    // a separate Qualification token (this project has no such token system, and the task's own
+    // framing -- "mirroring how research.js's own nodes already have a requires[] array" -- is
+    // satisfied just as well by requiring the prerequisite PROGRAM's own completion). A citizen
+    // needs baseline group trust from Community Circle before qualifying for deeper 1-on-1-style
+    // counseling. Enforced in findJoinableSite() below via programPrereqsMet() -- see that
+    // function's doc comment for the graduation-tracking it reads from.
+    requires: [ProgramKind.CommunityCircle],
     staffRole: StaffRoleKind.Psychologist,
     roomRole: RoomRole.RecreationRoom, // reuses the existing Recreation Room validation -- see
                                         // the doc comment in rooms.js: only Workshop needed adding.
@@ -89,6 +107,8 @@ export const PROGRAM_DEFS = Object.freeze({
   }),
   [ProgramKind.CommunityCircle]: Object.freeze({
     label: 'Community Circle',
+    requires: [], // item 3: no prerequisite -- the entry-level social track WellnessCounseling gates on
+
     staffRole: StaffRoleKind.Facilitator,
     roomRole: RoomRole.RecreationRoom, // same reuse reasoning as Wellness Counseling above
     sessionCost: 4,                                // PA SpiritualGuidance/FaithProgram SessionCost, low end
@@ -109,6 +129,7 @@ export const PROGRAM_DEFS = Object.freeze({
   }),
   [ProgramKind.CommunityGathering]: Object.freeze({
     label: 'Community Gathering',
+    requires: [], // item 3: no prerequisite -- a real "everyone's invited" event, same as real PA parties
     staffRole: StaffRoleKind.Organizer,
     roomRole: RoomRole.RecreationRoom, // same reuse reasoning as Wellness Counseling/Community
                                         // Circle above -- a gathering is a Recreation-block event,
@@ -132,6 +153,11 @@ export const PROGRAM_DEFS = Object.freeze({
   }),
   [ProgramKind.GuardResponseTraining]: Object.freeze({
     label: 'Guard Response Training',
+    // item 3: no prerequisite. Dispatched entirely by security.js's tickStaffTraining rather than
+    // this file's own findJoinableSite() (see the ProgramKind.GuardResponseTraining doc comment
+    // above), so a requires[] entry here would need that separate, unowned call site to check
+    // programPrereqsMet() itself -- left empty rather than adding data nothing currently enforces.
+    requires: [],
     staffRole: StaffRoleKind.Instructor,
     // Reuses Skills Workshop's RoomRole.Training -- a training room can validate BOTH a citizen
     // Skills Workshop site and this staff-facing site at once (syncProgramSites makes one
@@ -149,11 +175,56 @@ export const PROGRAM_DEFS = Object.freeze({
     // duty) draws on.
     skillGainPerTick: 0.02 / Math.round(90 * MINUTES_TO_TICKS) * 6,
   }),
+  [ProgramKind.CareClinic]: Object.freeze({
+    label: 'Care Clinic',
+    // item 3: gated behind Wellness Counseling rather than left ungated -- "ongoing maintenance
+    // care once initial counseling is behind you" mirrors Methadone's own real-world maintenance-
+    // therapy framing, and (unlike gating an already-ungated PRE-EXISTING program) adding a
+    // prerequisite to a brand-new program can't regress any existing colony's access to anything.
+    requires: [ProgramKind.WellnessCounseling],
+    // No dedicated "nurse"/"clinician" StaffRoleKind exists in core.js (not owned by this pass) --
+    // reuses Wellness Counseling's Psychologist, the closest existing wellness-adjacent role, same
+    // "reuse rather than invent" precedent RoomRole.RecreationRoom already sets by hosting three
+    // different program kinds above. Real staffing tension as a result: a single Psychologist can
+    // staff either this OR Wellness Counseling at once, not both -- an intentional scarcity, not a
+    // bug.
+    staffRole: StaffRoleKind.Psychologist,
+    // RoomRole.Medical (the Infirmary -- rooms.js's Medical zone + >=1 Medical Bed gate), not
+    // RecreationRoom again -- an ongoing wellness-maintenance loop belongs in the same room that
+    // already passively speeds citizen health recovery, and gives this kind a genuinely distinct
+    // room requirement from every other citizen-facing program above.
+    roomRole: RoomRole.Medical,
+    sessionCost: 2,                                // cheap -- real PA Methadone sits near the bottom of its whole SessionCost table
+    places: 6,                                      // an open drop-in clinic, not a small-group session
+    sessionLengthTicks: Math.round(60 * MINUTES_TO_TICKS), // a short "dose"/visit -- shortest session of any program here
+    // Real PA anchor: Methadone is Repeatable + Passive (reform_programs.txt) -- an always-on
+    // maintenance loop with no course-complete graduation event at all. This engine's dispatch
+    // model (jobs.js's SeekingProgram/Attending) has no room-free "Passive" concept to plug into
+    // without touching jobs.js (not owned by this pass), so the closest faithful expression fully
+    // achievable from programs.js alone is: numSessions: 1 (a short, low-barrier single "visit"
+    // rather than a multi-session course) + a permissive citizenBenefits() gate (see below) that
+    // stays true well short of the mood ceiling, so a citizen who still qualifies simply walks
+    // right back in for another short visit the moment they're free -- functionally repeatable
+    // through the existing Idle -> SeekingProgram -> Attending -> Idle loop, no special-cased
+    // "requeue" logic needed. completeSession() below has no dedicated branch for this kind --
+    // see the doc comment there for why that's deliberate, not an oversight.
+    numSessions: 1,
+    scheduleBlock: ScheduleBlock.Recreation,
+    repeatable: true, // self-documenting marker only -- no code branches on this flag; the
+                      // repeat behavior emerges from numSessions:1 + the permissive gate above
+    passive: true,    // self-documenting marker only -- no pass/fail graduation payoff exists for
+                      // this kind, see completeSession()'s doc comment
+    // Deliberately smaller than Wellness Counseling's 0.00025 -- a light maintenance top-up, not a
+    // substitute for real counseling. Bounded by the same Math.min(1, ...) clamp every other mood
+    // effect in this file already uses (applyAttendingTick below), so it can never compound past a
+    // full mood bar no matter how many visits stack up.
+    moodGainPerTick: 0.00015,
+  }),
 });
 
 export const PROGRAM_ORDER = [
   ProgramKind.SkillsWorkshop, ProgramKind.WellnessCounseling, ProgramKind.CommunityCircle,
-  ProgramKind.CommunityGathering, ProgramKind.GuardResponseTraining,
+  ProgramKind.CommunityGathering, ProgramKind.GuardResponseTraining, ProgramKind.CareClinic,
 ];
 
 // Community Gathering's mood-magnitude ladder (see the PROGRAM_DEFS.gatheringMoodDurationTicks
@@ -262,7 +333,54 @@ function citizenBenefits(kind, store, i) {
   // social event rather than a targeted need-refill -- benefits anyone not already thoroughly
   // content, same threshold style as WellnessCounseling's mood gate just above.
   if (kind === ProgramKind.CommunityGathering) return store.mood[i] < 0.9 || store.social[i] < 0.9;
+  // Care Clinic (item 4): deliberately the most permissive threshold of any kind here -- a light
+  // maintenance top-up should keep being "worth a visit" almost up to a full mood bar, unlike
+  // WellnessCounseling's 0.75 (a real, meaningful deficit) -- see PROGRAM_DEFS' doc comment on
+  // this kind for how that permissiveness is what actually makes it read as "repeatable" through
+  // the existing dispatch loop.
+  if (kind === ProgramKind.CareClinic) return store.mood[i] < 0.95;
   return false;
+}
+
+// ---- qualification-gated program chains (item 3) ----
+// Real PA anchor: reform_programs.txt's GeneralEducation requires Qualification FoundationEducation
+// / Carpentry requires Qualification WorkshopInduction. This project has no separate "Qualification"
+// token system, so the prerequisite is checked directly against a citizen's own program-completion
+// history -- see each PROGRAM_DEFS entry's `requires` array above (currently: WellnessCounseling
+// requires CommunityCircle, CareClinic requires WellnessCounseling; everything else is ungated).
+//
+// world.programGraduations: citizenId -> Set<ProgramKind> of every program kind this citizen has
+// ever completed at least once. Lazily created (mirrors world.programSites' own lazy-rebuild
+// precedent in syncProgramSites above) rather than requiring world.js to declare it, since this
+// file is the only one that reads or writes it -- same "attach state to `world` from the one file
+// that owns it" pattern world.programSites itself already uses. NOT persisted across save/load:
+// world.js's serialize()/deserialize() (not owned by this pass) would need a block mirroring how
+// it already persists world.roster._corruptEligible (see world.js's serialize() near
+// `eligible: Array.from(this.roster._corruptEligible)` and its matching deserialize() restore) to
+// survive a reload -- without that, a reloaded save's citizens re-qualify for CareClinic/
+// WellnessCounseling from scratch. Left as a known gap rather than worked around, since silently
+// stuffing this into an existing serialized field would be a worse (harder to find) surprise than
+// a documented one.
+function markGraduated(world, citizenId, kind) {
+  if (!world.programGraduations) world.programGraduations = new Map();
+  let set = world.programGraduations.get(citizenId);
+  if (!set) { set = new Set(); world.programGraduations.set(citizenId, set); }
+  set.add(kind);
+}
+
+/** Whether citizenId has ever completed (graduated) a program of `kind` at least once. */
+export function hasGraduated(world, citizenId, kind) {
+  return !!world.programGraduations?.get(citizenId)?.has(kind);
+}
+
+/** Whether citizenId currently meets every prerequisite program kind for `kind`'s own
+ *  PROGRAM_DEFS.requires -- the programs.js analog of research.js's researchPrereqsMet(). Fail-open
+ *  (true) for a kind with an empty/missing requires array, same fail-open spirit as this file's
+ *  other gates. */
+export function programPrereqsMet(world, citizenId, kind) {
+  const req = PROGRAM_DEFS[kind]?.requires;
+  if (!req || req.length === 0) return true;
+  return req.every(r => hasGraduated(world, citizenId, r));
 }
 
 // jobs.js's Idle branch calls this (after the basic-needs checks, before the fixed work ladder --
@@ -282,6 +400,11 @@ export function findJoinableSite(world, store, i, scheduleBlock, isAllowed = nul
     if (site.attendeeIds.length >= def.places) continue;
     if (!isSiteStaffed(world, site)) continue;
     if (!citizenBenefits(site.kind, store, i)) continue;
+    // item 3: qualification gate -- a citizen who hasn't completed this kind's prerequisite
+    // program(s) yet (PROGRAM_DEFS.requires, see programPrereqsMet()'s doc comment above) simply
+    // skips this site, same "keep looking" shape as every other disqualifying check in this loop
+    // rather than a hard error -- they may still be eligible for a DIFFERENT site later in the list.
+    if (!programPrereqsMet(world, store.id[i], site.kind)) continue;
     if (isAllowed) {
       const post = roomPostFor(site.room, world.grid);
       if (!isAllowed(post.x, post.y)) continue;
@@ -306,6 +429,10 @@ export function applyAttendingTick(site, store, i) {
     store.mood[i] = Math.min(1, store.mood[i] + def.moodGainPerTick);
   } else if (site.kind === ProgramKind.GuardResponseTraining) {
     store.skillCombat[i] += def.skillGainPerTick;
+  } else if (site.kind === ProgramKind.CareClinic) {
+    // Passive/repeatable (item 4) -- same bounded Math.min(1, ...) clamp as WellnessCounseling's
+    // mood gain above, just a smaller per-tick trickle (see PROGRAM_DEFS' doc comment on this kind).
+    store.mood[i] = Math.min(1, store.mood[i] + def.moodGainPerTick);
   }
 }
 
@@ -354,5 +481,20 @@ export function completeSession(world, site, store, i, sessionsDone) {
       world.roster._corruptEligible.delete(citizenId);
     }
   }
+  // Care Clinic (item 4) deliberately has NO branch above -- `graduated` stays at its `let
+  // graduated = true;` default from the top of this function, same "always succeeds, the real
+  // payoff already happened tick-by-tick in applyAttendingTick" shape as SkillsWorkshop/
+  // CommunityCircle/GuardResponseTraining. There's no pass/fail roll and no one-time bonus to add
+  // here (Real PA anchor: Methadone has no graduation outcome at all) -- see PROGRAM_DEFS' doc
+  // comment on this kind for why jobs.js's caller resetting programSessionsDone[i] to 0 on
+  // courseComplete just means "ready for another short visit," not "done forever."
+
+  // item 3: record this graduation for programPrereqsMet() (see that function's doc comment above)
+  // -- every kind here that actually reaches this point completed its course, so mark it
+  // regardless of which branch (if any) ran above. WellnessCounseling is the one kind where
+  // `graduated` can genuinely be false (its Difficulty roll failed) -- only a REAL graduation
+  // should satisfy a downstream prerequisite like CareClinic's, so this is gated on `graduated`,
+  // not on `courseComplete` alone.
+  if (graduated) markGraduated(world, store.id[i], site.kind);
   return { courseComplete: true, graduated, moodMagnitude };
 }

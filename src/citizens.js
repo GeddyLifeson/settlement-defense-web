@@ -7,6 +7,7 @@ import { isWateredAt } from './water.js';
 import { StaffRoleKind } from './core.js';
 import { epidemicHungerMultFor, epidemicRestMultFor } from './epidemic.js';
 import { augmentHungerMultFor, augmentRestMultFor, augmentBreakThresholdOffsetFor } from './augments.js';
+import { rollInspiration, INSPIRATION_CHECK_INTERVAL } from './inspirations.js';
 
 export const CitizenFlags = Object.freeze({
   None: 0,
@@ -24,6 +25,12 @@ export const CitizenFlags = Object.freeze({
 });
 
 const DOWNED_RECOVERY_RATE = 0.0015; // per tick, passive -- no dedicated first-aid job yet
+// The near-zero health floor every Downed-transition site clamps to (siege.js's contact damage/
+// nuclear hazard/held-citizen escalation all use this exact 0.05 literal) -- named here so
+// tickNeedsAndMood's own defensive re-floor (see its doc comment, guarding against weather.js's
+// lightning strike being the one site that doesn't apply it) references the same value by name
+// instead of a second magic-number copy.
+const DOWNED_MIN_HEALTH = 0.05;
 // Exported so coverageplans.js's Medical Response Plan call-in can stabilize a downed citizen to
 // exactly the same "no longer incapacitated" bar this file already uses, rather than duplicating
 // the number.
@@ -34,6 +41,9 @@ export const DOWNED_RECOVER_THRESHOLD = 0.3;
 // untended healing, mirrored here as a flat 4x (0.0015 * 4 = 0.006). store.beingTended (set by
 // jobs.js's Tending job tick, read-then-cleared here every tick -- see the doc comment at its use
 // below) is the single signal this file needs; it doesn't need to know jobs.js's JobState values.
+// NOTE: this is no longer just a speed bonus -- see UNTENDED_BLEED_RATE below. An untended Downed
+// citizen now slowly loses health instead of passively recovering, so this recovery rate (and
+// whether a tender reaches them at all) is now the actual difference between surviving and dying.
 const TEND_RECOVERY_RATE = 0.006;
 // Infirmary bonus (rooms.js RoomRole.Medical, PA full prefab/object catalog): a tended citizen
 // recovers faster while inside a validated Medical room (a Medical zone + at least 1 Medical Bed,
@@ -42,6 +52,83 @@ const TEND_RECOVERY_RATE = 0.006;
 // stacks with an actual tender present; an untended Downed citizen gets no bonus from merely
 // lying in the room, matching "Medical" being about treatment quality, not passive rest).
 const MEDICAL_ROOM_TEND_MULT = 2;
+
+// ---------------------------------------------------------------- untended bleed-out (RimWorld's
+// real bleedRate-on-untended-wounds pattern). Previously an untended Downed citizen only ever
+// recovered -- just slower than a tended one (DOWNED_RECOVERY_RATE vs TEND_RECOVERY_RATE above) --
+// so there was no real stakes to leaving someone down; tending only sped up an outcome that was
+// already guaranteed. UNTENDED_BLEED_RATE replaces that passive recovery with a slow health LOSS
+// instead whenever nobody is actively tending, so tending now decides survival, not just speed.
+// Deliberately tiny: a citizen goes Downed at health ~0.05 (every Downed-transition site in
+// siege.js/weather.js clamps to that same near-zero floor), so this has to leave a real, multi-
+// minute window before bleeding out, not a death sentence in a few seconds --
+// 0.05 / UNTENDED_BLEED_RATE = 5000 ticks (~500s at this project's 10Hz tick rate) from a
+// fresh downing to death with zero tending at all, "usually survivable if help arrives reasonably
+// soon" per the design brief, genuinely fatal only after a long, sustained neglect. Chosen
+// deliberately conservative (err slow, not fast) given SESSION_HANDOFF.md's own caution that this
+// codebase's Downed/tending interactions have produced an unexplained balance regression before
+// (the reverted Hygiene ambient-floor pass) -- this is also a NEW `alive[i] = 0` site (a fourth,
+// alongside siege.js's three combat/hazard ones), worth remembering the next time survival-time is
+// traced across a soak.
+const UNTENDED_BLEED_RATE = 0.00001;
+
+// ---------------------------------------------------------------- wound infection (RimWorld's real
+// untended-wound infection risk). A SEPARATE, distinctly-named mechanic from sickness.js's
+// sickSeverity (a generic illness any living citizen can roll) and epidemic.js's epidemicStage (a
+// proximity-spread contagion) -- this one only ever exists on a currently-Downed citizen, tracks
+// via its own severity scalar (woundInfectionSeverity, 0 = none, >0 = infected, same shape as
+// sickSeverity), and clears the moment they recover (v1 scope -- no lingering post-recovery illness
+// modeled, that would mean overlapping with sickness.js's own separate disease pipeline). Tending
+// materially cuts BOTH the onset chance and reverses the ongoing severity climb (a citizen actively
+// being fought for doesn't just recover HP faster, their infection risk profile flips direction
+// entirely), giving TEND_RECOVERY_RATE's existing recovery-speed bonus a second, independent reason
+// to matter.
+const WOUND_INFECTION_CHANCE_PER_TICK = 0.00003; // per tick, while Downed + untended + not yet infected
+const WOUND_INFECTION_START_SEVERITY = 0.15;
+const WOUND_INFECTION_PROGRESS_RATE = 0.00004;   // per tick, severity climb while untended
+const WOUND_INFECTION_RECOVER_RATE = 0.0002;     // per tick, severity decline while actively tended -- ~5x
+                                                  // the untended climb rate, so tending clearly wins
+const WOUND_INFECTION_MAX_SEVERITY = 1;
+// Extra per-tick health loss = current severity * this rate, layered on top of UNTENDED_BLEED_RATE
+// above (not a replacement for it) -- applies regardless of tended status this exact tick, only the
+// severity trajectory (growing vs receding) depends on that. At the small starting severity
+// (0.15) this is barely perceptible (an infection just starting doesn't kill fast); only after a
+// long stretch of total neglect (severity approaching WOUND_INFECTION_MAX_SEVERITY) does it become
+// a meaningfully faster bleed -- an escalating cost for prolonged neglect, not a second death timer
+// running in parallel from tick 1.
+const WOUND_INFECTION_HEALTH_DRAIN_RATE = 0.00002;
+
+// ---------------------------------------------------------------- permanent scars (RimWorld's real
+// permanent-injury pattern, condensed to a single stacking maxHealth-ceiling reduction rather than a
+// body-part/injury-type catalog this codebase doesn't model). A small chance on every recovery from
+// Downed -- tended or not -- of a lasting mark: getting back up from a near-death low doesn't always
+// mean healing clean. Deliberately rare and small per-instance, and floored (SCAR_MIN_MAX_HEALTH) so
+// a citizen who keeps surviving close calls can't be ground down to a permanently one-hit-from-dead
+// state by this alone.
+const SCAR_CHANCE = 0.08; // per recovery-from-Downed event
+const SCAR_MAX_HEALTH_PENALTY = 0.04; // permanent maxHealth reduction per scar
+const SCAR_MIN_MAX_HEALTH = 0.6; // floor -- at 0.04/scar this takes 10 scars to reach, genuinely rare
+
+// ---------------------------------------------------------------- skill rust (RimWorld's real
+// skill-decay-from-disuse, which GreatMemory halves -- see traits.js's skillRustMult doc comment).
+// citizens.js's own skillCombat/skillConstruction only ever increased before this -- tracked here as
+// a slow per-tick decay once a skill hasn't gained in a long while. Detected via a snapshot-diff
+// (store._skillCombatSnapshot/_skillConstructionSnapshot below) rather than requiring every skill-
+// gain call site across the codebase (jobs.js's Building/Harvesting/Processing/Farming/Restaurant,
+// siege.js's tickStaffCombat kill bonus, draft.js's drafted-attack bonus, programs.js's Skills
+// Workshop/Guard Response Training) to explicitly reset a "last used" timer -- this file only owns
+// citizens.js/jobs.js/traits.js/backstories.js, so a design requiring hooks in siege.js/draft.js/
+// programs.js wasn't viable anyway. Each tick, if a skill's current value is still exactly what it
+// was last tick (no gain happened anywhere), the "ticks since use" counter advances; any gain at all
+// resets it to 0. Deliberately tuned conservative per the design brief ("err on the side of too
+// slow") -- a multi-thousand-tick idle grace period before ANY decay starts, then a tiny per-tick
+// rate: SKILL_RUST_RATE * SKILL_RUST_IDLE_TICKS-worth of continuous disuse loses far less than a
+// single BUILD_SKILL_GAIN (0.02, jobs.js) regains, so this should read as a slow multi-thousand-tick
+// background trend in a soak test, never a moment-to-moment swing.
+const SKILL_RUST_IDLE_TICKS = 3000; // ticks of zero gain before decay starts at all
+const SKILL_RUST_RATE = 0.00001;    // per tick, once past the idle grace period (see traits.js's
+                                     // skillRustMult for the per-trait multiplier on this)
+const SKILL_RUST_EPSILON = 1e-6;    // float-precision slack for the "did it actually gain" comparison
 
 // Exported so weather.js can scale its extra Cold/Heatwave decay proportionally to these base
 // rates rather than hardcoding a second copy of the numbers.
@@ -115,6 +202,16 @@ export const EXERCISE_DECAY = 0.00045; // same order of magnitude as HUNGER_DECA
 // unconnected Shower is inert furniture, exactly the "real plumbing-dependency, not just a flat
 // furniture piece" the task calls for.
 export const HYGIENE_DECAY = 0.00045; // same order of magnitude as REST_DECAY/HYDRATION_DECAY/EXERCISE_DECAY
+// NOTE (see SESSION_HANDOFF.md): a colony that never builds a Shower has no refill path for
+// Hygiene at all (jobs.js's findNearestShower doc comment), so it's guaranteed to hit a hard 0 in
+// a hands-off soak (confirmed: avgHygiene=0.00 by tick 2500, seed 42) and drive OnBreak/unrest up
+// with it. An ambient-floor fix (same shape as the AMMO_BASE_PRODUCTION trickle) was tried and
+// REVERTED: it measurably made survival time worse (seed 42: 11584 -> 7117 ticks), most likely
+// because keeping citizens off OnBreak sends more of them out into harvest/patrol zones exposed
+// to attacker combat, rather than sitting safely idle -- the actual interaction wasn't confirmed
+// before running out of investigation budget this pass. Left as a genuine open problem, not
+// something to re-attempt the same way without first understanding the OnBreak/combat-exposure
+// link.
 
 // ---------------------------------------------------------------- low-hygiene consequence
 // Real, measurable consequence distinct from the mood hit every need already contributes via the
@@ -261,6 +358,14 @@ export class CitizenStore {
     this.hygiene = new Float32Array(capacity).fill(1); // RimWorld QoL-mod-style Hygiene need, see HYGIENE_DECAY above
     this.mood = new Float32Array(capacity).fill(1);
     this.health = new Float32Array(capacity).fill(1);
+    // Permanent scars (see SCAR_* doc comment above) -- health's real ceiling, normally 1 for
+    // every citizen who's never been Downed. Every place health recovery is clamped upward
+    // (this file's Downed-branch recovery, jobs.js's TEND_VARIANCE bonus) clamps against THIS
+    // field, not a hardcoded 1, so a scar's reduced ceiling actually sticks.
+    this.maxHealth = new Float32Array(capacity).fill(1);
+    // Wound infection (see WOUND_INFECTION_* doc comment above) -- 0 = none, >0 = currently
+    // infected, same shape as sickSeverity below but scoped only to a currently-Downed citizen.
+    this.woundInfectionSeverity = new Float32Array(capacity);
     // Vest armor (siege.js's CITIZEN_VEST_ARMOR_RATING/resolveCitizenArmorRoll, economy.js
     // BUILD_COST.vest) -- 1 once a citizen has been equipped via world.buyVest, 0 (Uint8Array
     // zero-init) otherwise. Read by siege.js's tickAttackerVsCitizens every contact-damage tick;
@@ -269,6 +374,10 @@ export class CitizenStore {
     this.hasVest = new Uint8Array(capacity);
     this.flags = new Uint8Array(capacity);
     this.alive = new Uint8Array(capacity);
+    // "Just became Downed" edge detector for tickNeedsAndMood's own defensive health floor (see
+    // that function's justDowned doc comment) -- 1 while the citizen was Downed as of the END of
+    // the last tickNeedsAndMood call, 0 otherwise.
+    this._wasDownedLastTick = new Uint8Array(capacity);
     this._hungerSpiralTicks = new Float32Array(capacity); // ticks spent near-zero hunger, see HUNGER_SPIRAL_*
     // Sickness (sickness.js -- real RimWorld Flu numbers, rescaled): 0 = healthy, >0 = currently
     // sick. _sickOffset staggers the per-citizen onset-roll/mood-refresh check the same way
@@ -308,6 +417,14 @@ export class CitizenStore {
     this.jobState = new Uint8Array(capacity); // JobState from jobs.js
     this.skillCombat = new Float32Array(capacity);
     this.skillConstruction = new Float32Array(capacity);
+    // Skill rust (see SKILL_RUST_* doc comment above): snapshot of each skill's value as of the
+    // last tick's check (used to detect "did this skill gain anywhere since last tick", regardless
+    // of which file did the gaining) and a running "ticks since it last gained" counter per skill.
+    // Both reset together every tick in tickNeedsAndMood -- see that function's own skill-rust block.
+    this._skillCombatSnapshot = new Float32Array(capacity);
+    this._skillConstructionSnapshot = new Float32Array(capacity);
+    this._ticksSinceCombatUse = new Float32Array(capacity);
+    this._ticksSinceConstructionUse = new Float32Array(capacity);
     // Citizen Rank / Prestige (ranks.js -- RimWorld Royalty-style seniority ladder, condensed
     // non-carceral). Index into ranks.js's RANKS array, 0 = 'Settler' (starting rank, no bonus).
     // A plain Uint8Array like breakSeverity above -- 7 tiers fits comfortably, no need for a
@@ -351,6 +468,13 @@ export class CitizenStore {
     this.backstory = new Array(capacity).fill(null); // see backstories.js -- childhood/adult flavor pair + skill nudge
     this.passionCombat = new Uint8Array(capacity); // Passion tier (backstories.js), biases skillCombat gain rate
     this.passionConstruction = new Uint8Array(capacity); // Passion tier, biases skillConstruction gain rate
+
+    // Inspirations (inspirations.js -- see that file's header comment): inspiredUntilTick is a
+    // tick value, same "Until" convention as epidemicImmuneUntil above -- currently inspired while
+    // world.currentTick < this. _inspirationOffset staggers the per-citizen roll the same way
+    // _sickOffset/_epidemicOffset above already do.
+    this.inspiredUntilTick = new Float32Array(capacity);
+    this._inspirationOffset = new Uint16Array(capacity);
 
     // Work Priorities (RimWorld Work-tab-style, see jobs.js's WorkCategory/tickJobs). All four
     // default to 0 (Uint8Array zero-init), but 0 in workPriority* means "disabled" while 0 in
@@ -439,9 +563,12 @@ export class CitizenStore {
     this.hunger[i] = 1; this.rest[i] = 1; this.social[i] = 1; this.hydration[i] = 1; this.exercise[i] = 1;
     this.hygiene[i] = 1;
     this.mood[i] = 1; this.health[i] = 1;
+    this.maxHealth[i] = 1; // no scars yet -- see SCAR_* doc comment above
+    this.woundInfectionSeverity[i] = 0;
     this.flags[i] = CitizenFlags.None;
     this.hasVest[i] = 0;
     this.alive[i] = 1;
+    this._wasDownedLastTick[i] = 0;
     this._hungerSpiralTicks[i] = 0;
     this.sickSeverity[i] = 0;
     this._sickOffset[i] = Math.floor(rng() * 50); // keep '50' in sync with sickness.js's SICKNESS_CHECK_INTERVAL
@@ -459,11 +586,25 @@ export class CitizenStore {
     this.backstory[i] = backstory;
     this.skillCombat[i] = backstory.skillCombatStart ?? 0;
     this.skillConstruction[i] = backstory.skillConstructionStart ?? 0;
+    // Skill rust (see SKILL_RUST_* doc comment above): snapshot starts equal to the starting
+    // skill value (no "gain" to detect until it actually moves above this), idle counters at 0.
+    this._skillCombatSnapshot[i] = this.skillCombat[i];
+    this._skillConstructionSnapshot[i] = this.skillConstruction[i];
+    this._ticksSinceCombatUse[i] = 0;
+    this._ticksSinceConstructionUse[i] = 0;
     this.citizenRank[i] = 0; // ranks.js RANKS[0] 'Settler' -- everyone starts here
     this.augmentMask[i] = 0; // augments.js -- no augments installed at spawn
-    const passions = randomPassions(rng, backstory);
+    const passions = randomPassions(rng, backstory, this.trait[i]);
     this.passionCombat[i] = passions.combat;
     this.passionConstruction[i] = passions.construction;
+    // Inspirations (inspirations.js) -- not inspired at spawn; offset staggers the per-citizen
+    // roll check the same way _sickOffset/_epidemicOffset above do. Unlike those two (which
+    // hardcode their interval's numeric value + a "keep in sync by hand" comment, since
+    // sickness.js/epidemic.js import FROM citizens.js and importing back would be circular),
+    // this file safely imports INSPIRATION_CHECK_INTERVAL directly -- inspirations.js has no
+    // dependency on citizens.js at all, see that file's header comment.
+    this.inspiredUntilTick[i] = 0;
+    this._inspirationOffset[i] = Math.floor(rng() * INSPIRATION_CHECK_INTERVAL);
     // Equal-tier defaults so that if the Work Priorities panel ever flips hasWorkPriorities on
     // without the player touching every cell, the untouched cells tie-break in jobs.js's fixed
     // array order (Construction, Hauling, Harvesting, Animal) -- the same order the legacy ladder
@@ -513,6 +654,20 @@ export class CitizenStore {
 
   isDependentAt(i) {
     return this.dependencySeverity[i] > 0;
+  }
+
+  // Wound infection (see WOUND_INFECTION_* doc comment above) -- distinct from isSickAt/
+  // isEpidemicInfectedAt above, only ever nonzero on a currently-Downed citizen.
+  isWoundInfectedAt(i) {
+    return this.woundInfectionSeverity[i] > 0;
+  }
+
+  // Inspirations (inspirations.js) -- same "Until" comparison convention as isEpidemicImmuneAt
+  // above. jobs.js reads inspirationWorkSpeedMultFor(store, i, currentTick) directly rather than
+  // this method for its own rate-chain multiplier, but this is the cheap glance check for
+  // anything (a future UI hook, e.g.) that just needs a yes/no.
+  isInspiredAt(i, currentTick) {
+    return this.inspiredUntilTick[i] > currentTick;
   }
 
   isOnBreakAt(i) {
@@ -650,6 +805,30 @@ export function computeCitizenUnrestScore(store, i, world) {
   return Math.max(0, Math.min(100, score));
 }
 
+// Skill rust helper (see SKILL_RUST_* doc comment above) -- shared by both skillCombat and
+// skillConstruction's identical snapshot-diff logic rather than duplicating the block twice.
+// skillKey/snapshotKey/idleKey are CitizenStore field names (strings), so this stays a plain SoA
+// read/write against store's own typed arrays, same access shape as every other per-citizen stat
+// in this file. rustMult is the trait's skillRustMult (traits.js), 1 if the trait doesn't specify one.
+function tickSkillRustFor(store, i, skillKey, snapshotKey, idleKey, rustMult) {
+  const skill = store[skillKey], snapshot = store[snapshotKey], idle = store[idleKey];
+  if (skill[i] > snapshot[i] + SKILL_RUST_EPSILON) {
+    // Gained since last tick's check (from ANY source -- jobs.js/siege.js/draft.js/programs.js
+    // all bump these skills independently) -- reset the disuse clock.
+    idle[i] = 0;
+  } else {
+    idle[i]++;
+    if (idle[i] > SKILL_RUST_IDLE_TICKS && skill[i] > 0) {
+      skill[i] = Math.max(0, skill[i] - SKILL_RUST_RATE * rustMult);
+    }
+  }
+  // Re-baseline the snapshot to whatever the skill is NOW (including any decay just applied
+  // above) so next tick's comparison is against the current true value, not a stale pre-decay
+  // one -- otherwise a real future gain could take several ticks to climb back above an inflated
+  // old snapshot, masking renewed use as still-idle.
+  snapshot[i] = skill[i];
+}
+
 // isStaffAt(i) -> bool, used to decide on-duty social fulfillment (guards/snipers don't
 // need to be near others to stay socially fulfilled while working).
 // world (optional, 5th arg) -- passed by world.js as `this` so a citizen's current room quality
@@ -661,34 +840,122 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
 
     store.age[i]++;
 
-    if (store.isDownedAt(i)) {
-      // Incapacitated: needs don't spiral further while down, but health slowly recovers
-      // (RimWorld-style "downed, not dead" reprieve). store.beingTended[i] is set every tick by
-      // jobs.js's Tending job handler (world.js calls tickNeedsAndMood *before* tickJobs each
-      // tick, so this reads the PREVIOUS tick's tend status -- a harmless one-tick lag on a
+    // "Just became Downed" edge detector (see the DOWNED_MIN_HEALTH re-floor use below) -- the
+    // Downed flag itself is set directly by siege.js/weather.js/world.js, not through any
+    // citizens.js function this file could hook, so this is the only way to tell "first tick of
+    // being Downed" apart from "still Downed 4000 ticks later" from inside this file alone.
+    const isDownedNow = store.isDownedAt(i);
+    const justDowned = isDownedNow && !store._wasDownedLastTick[i];
+    store._wasDownedLastTick[i] = isDownedNow ? 1 : 0;
+
+    if (isDownedNow) {
+      // Incapacitated: needs don't spiral further while down. Health recovers if actively tended,
+      // or slowly BLEEDS if not (see UNTENDED_BLEED_RATE's doc comment -- this is the changed part;
+      // it used to always recover, just slower when untended). store.beingTended[i] is set every
+      // tick by jobs.js's Tending job handler (world.js calls tickNeedsAndMood *before* tickJobs
+      // each tick, so this reads the PREVIOUS tick's tend status -- a harmless one-tick lag on a
       // per-tick-continuous system). Read it, then immediately clear it: if a tender is still
       // actively tending this same tick, jobs.js's Tending handler re-sets it before the next
-      // tickNeedsAndMood call; if the tender left, it stays cleared and recovery falls straight
-      // back to the passive rate on the very next tick.
+      // tickNeedsAndMood call; if the tender left, it stays cleared and this falls straight back
+      // to the untended bleed on the very next tick.
+      // Defensive floor: every OTHER Downed-transition site (siege.js's contact damage/nuclear
+      // hazard/held-citizen escalation) clamps health to a 0.05 minimum the instant it sets the
+      // Downed flag, but weather.js's lightning strike doesn't (`Math.max(0, ...)`, can leave
+      // health at literal 0 if the citizen was already wounded when struck) -- without this, the
+      // untended-bleed logic below could read health<=0 on the very FIRST tick a citizen is
+      // Downed and kill them instantly, defeating the entire "usually survivable if help arrives
+      // reasonably soon" point of UNTENDED_BLEED_RATE above. Gated on justDowned (NOT applied every
+      // tick) -- this is a one-time normalization at the moment of transition, not a floor that
+      // would otherwise permanently block the untended bleed from ever working at all.
+      if (justDowned && store.health[i] < DOWNED_MIN_HEALTH) store.health[i] = DOWNED_MIN_HEALTH;
+
       const tended = store.beingTended[i] === 1;
       store.beingTended[i] = 0;
-      let recoveryRate = tended ? TEND_RECOVERY_RATE : DOWNED_RECOVERY_RATE;
-      // Infirmary bonus (see MEDICAL_ROOM_TEND_MULT doc comment above) -- only applies to an
-      // actively-tended citizen who happens to be lying inside a validated Medical room.
-      if (tended && world?.rooms && world?.grid) {
-        const room = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
-        if (room && room.role === RoomRole.Medical && room.roleValid) recoveryRate *= MEDICAL_ROOM_TEND_MULT;
+
+      if (tended) {
+        let recoveryRate = TEND_RECOVERY_RATE;
+        // Infirmary bonus (see MEDICAL_ROOM_TEND_MULT doc comment above) -- only applies to an
+        // actively-tended citizen who happens to be lying inside a validated Medical room.
+        if (world?.rooms && world?.grid) {
+          const room = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+          if (room && room.role === RoomRole.Medical && room.roleValid) recoveryRate *= MEDICAL_ROOM_TEND_MULT;
+        }
+        store.health[i] = Math.min(store.maxHealth[i], store.health[i] + recoveryRate);
+        // Wound infection recedes under active treatment (see WOUND_INFECTION_* doc comment
+        // above) -- tending beats it back down instead of just slowing its climb.
+        if (store.woundInfectionSeverity[i] > 0) {
+          store.woundInfectionSeverity[i] = Math.max(0, store.woundInfectionSeverity[i] - WOUND_INFECTION_RECOVER_RATE);
+        }
+      } else {
+        // Untended bleed-out (see UNTENDED_BLEED_RATE's doc comment above): tending is now the
+        // difference between recovering and dying, not just a speed bonus.
+        store.health[i] = Math.max(0, store.health[i] - UNTENDED_BLEED_RATE);
+        // Wound infection onset + progression (see WOUND_INFECTION_* doc comment above),
+        // untended-only -- an active tender already gets the recede branch above instead.
+        if (store.woundInfectionSeverity[i] > 0) {
+          store.woundInfectionSeverity[i] = Math.min(WOUND_INFECTION_MAX_SEVERITY, store.woundInfectionSeverity[i] + WOUND_INFECTION_PROGRESS_RATE);
+        } else if (rng() < WOUND_INFECTION_CHANCE_PER_TICK) {
+          store.woundInfectionSeverity[i] = WOUND_INFECTION_START_SEVERITY;
+        }
       }
-      store.health[i] = Math.min(1, store.health[i] + recoveryRate);
+
+      // Infection health drain (both branches -- an active infection hurts regardless of whether
+      // someone's tending it THIS exact tick; only its severity trajectory, growing vs receding,
+      // depends on tended status above).
+      if (store.woundInfectionSeverity[i] > 0) {
+        store.health[i] = Math.max(0, store.health[i] - WOUND_INFECTION_HEALTH_DRAIN_RATE * store.woundInfectionSeverity[i]);
+      }
+
+      // Death from bleed-out/infection while Downed and untended -- reuses the exact same
+      // Dead-flag + alive=0 pattern siege.js's tickAttackerVsCitizens already uses for a
+      // downed-then-hit coup-de-grace, just triggered from health hitting 0 via neglect instead
+      // of a second attacker hit. A NEW `alive[i] = 0` site (siege.js has three combat/hazard
+      // ones already) -- see UNTENDED_BLEED_RATE's doc comment above for why this is tuned
+      // deliberately slow.
+      if (store.health[i] <= 0) {
+        store.health[i] = 0;
+        store.flags[i] |= CitizenFlags.Dead;
+        store.alive[i] = 0;
+        store.woundInfectionSeverity[i] = 0;
+        if (store.tendClaimedBy[i] !== -1) store.tendClaimedBy[i] = -1;
+        if (world?.milestoneLog) {
+          const text = `${store.name[i]} dies, untended and alone`;
+          world.milestoneLog.push({ tick: world.currentTick, text });
+          if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+          world.onRandomEvent?.(text);
+        }
+        continue;
+      }
+
       if (store.health[i] >= DOWNED_RECOVER_THRESHOLD) {
         store.flags[i] &= ~CitizenFlags.Downed;
+        store.woundInfectionSeverity[i] = 0; // clears on recovery -- v1 scope, see doc comment above
         if (store.tendClaimedBy[i] !== -1) store.tendClaimedBy[i] = -1; // recovered out from under an active tender
+        // Permanent scars (see SCAR_* doc comment above): a small chance on every recovery from
+        // Downed, tended or not.
+        if (rng() < SCAR_CHANCE) {
+          store.maxHealth[i] = Math.max(SCAR_MIN_MAX_HEALTH, store.maxHealth[i] - SCAR_MAX_HEALTH_PENALTY);
+        }
       }
       continue;
     }
 
     const staffFulfillment = isStaffAt(i) ? ON_DUTY_SOCIAL_FULFILLMENT : 0;
     const trait = store.trait[i];
+
+    // Skill rust (see SKILL_RUST_* doc comment above): snapshot-diff detects a gain from ANY
+    // source (jobs.js/siege.js/draft.js/programs.js all bump skillCombat/skillConstruction in
+    // different places) without needing a reset hook in each of those files. Applied to both
+    // skills every tick, independent of the needs/mood logic below.
+    tickSkillRustFor(store, i, 'skillCombat', '_skillCombatSnapshot', '_ticksSinceCombatUse', trait?.skillRustMult ?? 1);
+    tickSkillRustFor(store, i, 'skillConstruction', '_skillConstructionSnapshot', '_ticksSinceConstructionUse', trait?.skillRustMult ?? 1);
+
+    // Inspirations (inspirations.js) -- staggered per-citizen roll for a new one; a no-op most
+    // ticks (see rollInspiration's own doc comment). currentTick defaults to 0 when no `world` is
+    // passed (matches this function's existing `world?.currentTick ?? 0` convention used for mood
+    // events below), which just means the stagger gate never advances -- an acceptable no-op
+    // fallback for isolated/test call sites that don't pass a real world.
+    rollInspiration(store, i, world?.currentTick ?? 0, rng);
 
     // Hunger spiral (malnutrition, see HUNGER_SPIRAL_* doc comment above): ramps the effective
     // decay multiplier up a little the longer hunger sits pinned near zero, resets the instant

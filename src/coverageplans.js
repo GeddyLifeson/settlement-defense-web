@@ -33,12 +33,72 @@
 //    "temporary backup" framing (FireHeli/EliteOpsHeli/ParamedicsHeli/SoldiersHeli) without
 //    inventing a parallel combat-numbers system the way draft.js's header comment specifically
 //    warned future work not to do.
+//
+// Three more plan types, ported from real PA data this project didn't have yet (coverage_plans.txt/
+// ratsystem.txt/calamity_settings.txt), added in a later pass. Same "discount + threshold-gated
+// call-in" bundle shape as the three above, each mapped onto a real, already-existing system this
+// project's own code produces rather than an invented one:
+//  - Pest Control Plan: real PA's PestControlPlan (gated on RatEnabled) triggers a PestControl/
+//    AirPestControl call-in once Rat infestation level >= 10. rats.js already tracks a live 0-100
+//    `world.ratInfestation` level with a real Medium tier at exactly 10 (rats.js's ratTier/RatTier,
+//    TIER_MEDIUM) -- ported directly as this plan's call-in threshold (10, on rats.js's own real
+//    scale, not a re-derived number) rather than a synthetic one. Discounts rat_trap (economy.js),
+//    the one real rat-countermeasure buildable; the call-in itself takes the "trigger an active
+//    response" half of the task's either/or (not "raise passive trap effectiveness") since that's
+//    the one achievable without reaching into rats.js's own tickRats loop, which this file doesn't
+//    own -- instantly clears every live rat and zeroes the infestation level, same "instant full
+//    resolution of a real crisis state" shape as Fire/Medical's own call-ins.
+//  - Unrest Response Plan: real PA's HealthSafetyPlan actually bundles Paramedics (already ported
+//    above as Medical Response) AND a separate RiotPolice/EliteOps response gated on a rioting/
+//    unrest metric >= 10. world.js's own real unrest system (this.unrestLevel/unrestActive/
+//    unrestTier, see that file's UNREST_* doc comment) is the metric factions.js's clique
+//    consequences (applyUnmetConsequence/applyGraffitiCleanupConsequence) already feed into via
+//    world.unrestLevel -- unrestActive is the real, hysteresis-gated "a sustained crisis is
+//    genuinely underway" flag that system computes for exactly this purpose (world.js keeps its own
+//    trigger/resolve thresholds private, so this reads the already-computed public boolean rather
+//    than re-deriving or duplicating a magic number this file doesn't own). Discounts checkpoint
+//    (economy.js/security.js's isNearCheckpoint), the real buildable factions.js's own unrest-
+//    consequence-reduction mechanic is keyed off. The call-in zeroes world.unrestLevel -- world.js's
+//    own periodic _updateUnrest tick (every GRADING_INTERVAL_TICKS, ~3s) then resolves
+//    unrestActive/unrestTier and any resolution-reward eligibility through its OWN existing logic,
+//    same "own the one state machine, everyone else just nudges the input" respect this file
+//    already shows tickSecurityResponse's countdown.
+//  - Storm Recovery Plan: real PA's RoadMaintenance/ReconstructionSpecialists/DrainageSpecialists
+//    trigger on calamity-surface/damage/flooding thresholds tied to DeepFreeze/Heatwave/
+//    LightningStorm. This project's closest real analog is weather.js's Lightning Storm calamity
+//    (tickLightningStorm), which does real, measurable structural damage -- power-network
+//    structures hit by a strike (LIGHTNING_STRUCTURE_DAMAGE) and lightning-ignited flammable
+//    furniture (bed/table/door, the same fire.js target set weather.js's own tickThunderstorm
+//    reuses). Discounts lightning_rod (weather.js's real PA-style mitigation buildable); the
+//    call-in triggers once enough of those real targets are sitting damaged-but-not-destroyed
+//    (siege.js's own Structure health convention: full health is 1, or 0.6 for a fence) and
+//    instantly restores them to full health, the "repair/recovery from weather damage" the task
+//    asked for -- this engine has no separate repair-cost table distinct from BUILD_COST, so an
+//    instant structural-health restore is the honest equivalent of "reconstruction specialists"
+//    rather than inventing a parallel repair-economy this codebase doesn't have.
+//
+// Two dimensions from the task brief were evaluated and deliberately NOT added:
+//  - wageDiscount: real PA plans also discount themed staff WAGES, not just buildable costs. This
+//    project has no ongoing per-citizen/per-role cost anywhere (grepped wage/salary/stipend/
+//    payroll/upkeep across the whole src/ tree -- zero hits; economy.js's only recurring costs are
+//    one-time buildable purchases, already covered by `discounts` below). Adding a `wageDiscount`
+//    field with nothing behind it would be a fake knob, so it's skipped rather than invented.
+//  - Training-program discount: programs.js's PROGRAM_DEFS does define a `sessionCost` per program,
+//    but it's never actually deducted from world.scrap anywhere in this codebase (grepped
+//    `sessionCost` project-wide -- its only other use is a display-only string in main.js's
+//    tooltip). There's no real spend here for a coverage-plan discount to hook into without either
+//    adding a new deduction to programs.js or changing main.js's display math, and this task owns
+//    neither file -- skipped rather than wiring a discount onto a number nothing ever actually
+//    charges.
 import { CitizenFlags, DOWNED_RECOVER_THRESHOLD } from './citizens.js';
 
 export const CoveragePlanKind = Object.freeze({
   FireResponse: 'fire_response',
   MedicalResponse: 'medical_response',
   SecurityResponse: 'security_response',
+  PestControl: 'pest_control',
+  UnrestResponse: 'unrest_response',
+  StormRecovery: 'storm_recovery',
 });
 
 // Tactical-reinforcement call-in tuning (Security Response Plan). Exported so world.js's tick()
@@ -90,9 +150,49 @@ export const COVERAGE_PLAN_DEFS = Object.freeze({
       thresholdNoun: 'attackers on the field',
     }),
   }),
+  [CoveragePlanKind.PestControl]: Object.freeze({
+    label: 'Pest Control Plan',
+    // Cheaper than Fire/Medical (25) -- its themed buildable (rat_trap: 10) is itself the cheapest
+    // single-purpose-counter tier in economy.js, same "priced relative to what it discounts" logic
+    // as every other plan here.
+    cost: 18,
+    discounts: Object.freeze({ rat_trap: 0.5 }), // rats.js's real countermeasure buildable, 50% off
+    callIn: Object.freeze({
+      label: 'Call In Pest Control',
+      description: 'Instantly clears every rat in the settlement and resets the infestation level.',
+      threshold: 10, // real PA gate: Rat infestation level >= 10 -- rats.js's own Medium tier (ratTier/TIER_MEDIUM)
+      thresholdNoun: 'rat infestation level',
+    }),
+  }),
+  [CoveragePlanKind.UnrestResponse]: Object.freeze({
+    label: 'Unrest Response Plan',
+    // Single-buildable scope, same tier as Medical Response's own single-target discount.
+    cost: 22,
+    discounts: Object.freeze({ checkpoint: 0.5 }), // factions.js's real unrest-consequence-reduction buildable
+    callIn: Object.freeze({
+      label: 'Call In Rapid Response Team',
+      description: "Instantly calms the settlement's unrest crisis.",
+      threshold: 1, // world.js's real unrestActive flag (0/1) -- a genuine sustained crisis, not a momentary spike
+      thresholdNoun: 'unrest crisis active',
+    }),
+  }),
+  [CoveragePlanKind.StormRecovery]: Object.freeze({
+    label: 'Storm Recovery Plan',
+    cost: 20,
+    discounts: Object.freeze({ lightning_rod: 0.5 }), // weather.js's real Lightning Storm mitigation buildable
+    callIn: Object.freeze({
+      label: 'Call In Reconstruction Crew',
+      description: 'Instantly repairs every structure damaged by lightning strikes or storm-driven fires.',
+      threshold: 2, // damaged-but-not-destroyed real weather-damage targets -- same small-colony scale as Fire Response's threshold
+      thresholdNoun: 'storm-damaged structures',
+    }),
+  }),
 });
 
-export const COVERAGE_PLAN_ORDER = [CoveragePlanKind.FireResponse, CoveragePlanKind.MedicalResponse, CoveragePlanKind.SecurityResponse];
+export const COVERAGE_PLAN_ORDER = [
+  CoveragePlanKind.FireResponse, CoveragePlanKind.MedicalResponse, CoveragePlanKind.SecurityResponse,
+  CoveragePlanKind.PestControl, CoveragePlanKind.UnrestResponse, CoveragePlanKind.StormRecovery,
+];
 
 /** True once `kind` has been purchased this run (persists via world.js's serialize/deserialize). */
 export function isPlanActive(world, kind) {
@@ -154,12 +254,56 @@ function activeAttackerCount(world) {
   return n;
 }
 
+/** rats.js's real live infestation level (0-100 scale) -- the Pest Control Plan's call-in gate. */
+function ratInfestationLevel(world) {
+  return world.ratInfestation || 0;
+}
+
+/** world.js's real, hysteresis-gated "a sustained unrest crisis is genuinely underway" flag,
+ *  mirrored as 0/1 so it fits the same live-count/threshold shape every other call-in uses. */
+function unrestActiveCount(world) {
+  return world.unrestActive ? 1 : 0;
+}
+
+// siege.js's Structure constructor convention: every structure starts at health 1 except a fence,
+// which starts at 0.6 (see that file's `this.health = kind === 'fence' ? 0.6 : 1`). Mirrored here
+// rather than imported since siege.js doesn't export a standalone "full health for this kind"
+// helper of its own.
+function structureFullHealth(kind) {
+  return kind === 'fence' ? 0.6 : 1;
+}
+
+// The real targets of weather.js's own Lightning Storm calamity: power-network structures hit by a
+// direct strike (mirrors weather.js's own unexported isPowerStructureKind) and the lightning-
+// ignited flammable furniture set (fire.js's bed/table/door, reused by weather.js's
+// tickThunderstorm/tryMassFireEvent) -- the two real, already-existing sources of "weather damage"
+// in this codebase, not an invented category.
+function isWeatherRepairTargetKind(kind) {
+  return kind === 'wire' || kind === 'battery' || kind === 'power_switch' || kind.startsWith('generator')
+    || kind === 'bed' || kind === 'table' || kind === 'door';
+}
+
+/** Live count of real weather-damage targets currently sitting damaged-but-not-destroyed -- the
+ *  Storm Recovery Plan's call-in gate. */
+function weatherDamagedStructureCount(world) {
+  let n = 0;
+  for (const s of world.structures) {
+    if (s.destroyed || s.underConstruction) continue;
+    if (!isWeatherRepairTargetKind(s.kind)) continue;
+    if (s.health < structureFullHealth(s.kind)) n++;
+  }
+  return n;
+}
+
 /** Current live count feeding `kind`'s call-in threshold, regardless of purchase state -- so a UI
  *  panel can show real "N / threshold" progress even before the plan is bought. */
 export function callInLiveCount(world, kind) {
   if (kind === CoveragePlanKind.FireResponse) return activeFireCount(world);
   if (kind === CoveragePlanKind.MedicalResponse) return downedCitizenCount(world);
   if (kind === CoveragePlanKind.SecurityResponse) return activeAttackerCount(world);
+  if (kind === CoveragePlanKind.PestControl) return ratInfestationLevel(world);
+  if (kind === CoveragePlanKind.UnrestResponse) return unrestActiveCount(world);
+  if (kind === CoveragePlanKind.StormRecovery) return weatherDamagedStructureCount(world);
   return 0;
 }
 
@@ -202,6 +346,39 @@ export function triggerCallIn(world, kind) {
     // "re-triggering refreshes rather than stacks" convention as unrestResolutionBuffTicks
     // elsewhere in world.js.
     world._securityResponseTicksLeft = SECURITY_RESPONSE_WINDOW_TICKS;
+    return true;
+  }
+
+  if (kind === CoveragePlanKind.PestControl) {
+    // Instant full resolution, same shape as Fire/Medical -- clears every live rat (rats.js's own
+    // tickRats catch-cleanup would otherwise only remove them one trap-catch at a time) and zeroes
+    // the infestation level driving future spawns.
+    const cleared = (world.rats || []).length;
+    world.rats = [];
+    world.ratsCaught = (world.ratsCaught || 0) + cleared;
+    world.ratInfestation = 0;
+    return true;
+  }
+
+  if (kind === CoveragePlanKind.UnrestResponse) {
+    // Zeroes the input world.js's own real unrest system reads -- that system's periodic
+    // _updateUnrest tick (every GRADING_INTERVAL_TICKS, ~3s) then resolves unrestActive/unrestTier
+    // (and any resolution-reward eligibility) through its own existing logic, the same
+    // "own the one state machine" respect this file already shows tickSecurityResponse's countdown
+    // rather than reaching in and flipping unrestActive/unrestTier directly.
+    world.unrestLevel = 0;
+    return true;
+  }
+
+  if (kind === CoveragePlanKind.StormRecovery) {
+    // Instant repair, same "instant full resolution of a real crisis state" shape as Fire/Medical --
+    // restores every damaged-but-not-destroyed real weather-damage target back to full health.
+    for (const s of world.structures) {
+      if (s.destroyed || s.underConstruction) continue;
+      if (!isWeatherRepairTargetKind(s.kind)) continue;
+      const full = structureFullHealth(s.kind);
+      if (s.health < full) s.health = full;
+    }
     return true;
   }
 
