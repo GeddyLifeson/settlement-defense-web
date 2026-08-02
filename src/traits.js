@@ -51,17 +51,39 @@
 // rate). Read by citizens.js's tickNeedsAndMood (see that function's SKILL_RUST_RATE doc comment)
 // as a multiplier on the disuse-decay rate -- 0.5 halves it, matching GreatMemory's real number.
 // Undefined/omitted == 1 (no change), same null-safe convention as workSpeedMult etc. above.
+// conflictsWith: RimWorld's real conflicting-trait pairs (e.g. Wimp vs Brawler/Masochist, Ascetic
+// vs Greedy/Jealous/Gourmand, Bloodlust vs Kind/Nervous) prevent a citizen from rolling two
+// thematically opposed traits together (RandomTraitsFor's DisallowedTraits check). This project
+// only assigns ONE trait per citizen right now (see randomTrait below), so this field has no live
+// effect -- it's seeded now as cheap pure data for a plausible future second-trait-slot, matching
+// this file's existing forward-looking fields (forcedPassion/conflictingPassion/disabledWork
+// above all predate any code that reads them the same way). Mapped onto this project's reskinned
+// trait names by CONCEPT, not literal name, since none of the real trait names exist verbatim here:
+//   - tough-vs-fragile: Tough/Brawler (physically hardy, melee-forward) vs Wimp (real RimWorld
+//     Wimp-vs-Brawler pair, used verbatim; Tough added by the same toughness concept).
+//   - generous-vs-greedy: Hardy (reduced hunger/rest needs -- an ascetic, wants-little citizen)
+//     vs Glutton (elevated hunger need -- RimWorld's Gourmand-analog, always wanting more), the
+//     closest available stand-in for the real Ascetic-vs-Gourmand pair since no literal Ascetic
+//     or Greedy trait exists in this table.
+//   - calm-vs-volatile: Steady (negative breakThresholdOffset, harder to push into a break) vs
+//     Neurotic (positive breakThresholdOffset, easier to push into a break) -- both traits already
+//     exist in this file specifically as opposite ends of the same breakThresholdOffset axis (see
+//     each entry's own doc comment above), so this is a direct mechanical opposite, not just a
+//     thematic one.
+// Values are TRAITS[].name strings (not indices/ids -- this table has no separate id field), read
+// bidirectionally via traitsConflict(idA, idB) below. Undefined/omitted == no conflicts, same
+// null-safe convention as every other optional field in this file.
 export const TRAITS = [
-  { name: 'Tough', healthMult: 1.3, hungerMult: 1, restMult: 1, socialGainMult: 1 },
+  { name: 'Tough', healthMult: 1.3, hungerMult: 1, restMult: 1, socialGainMult: 1, conflictsWith: ['Wimp'] },
   { name: 'Fast', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, speedMult: 1.3 },
   { name: 'Sociable', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1.5 },
   { name: 'Insomniac', healthMult: 1, hungerMult: 1, restMult: 1.4, socialGainMult: 1 },
-  { name: 'Glutton', healthMult: 1, hungerMult: 1.4, restMult: 1, socialGainMult: 1 },
-  { name: 'Hardy', healthMult: 1.15, hungerMult: 0.85, restMult: 0.85, socialGainMult: 1 },
+  { name: 'Glutton', healthMult: 1, hungerMult: 1.4, restMult: 1, socialGainMult: 1, conflictsWith: ['Hardy'] },
+  { name: 'Hardy', healthMult: 1.15, hungerMult: 0.85, restMult: 0.85, socialGainMult: 1, conflictsWith: ['Glutton'] },
   { name: 'Loner', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 0.5 },
   // Steady: already a calmer, more even-keeled flavor (reduced hunger/rest/social decay) -- paired
   // here with a negative breakThresholdOffset (RimWorld-style: harder to push into a mental break).
-  { name: 'Steady', healthMult: 1, hungerMult: 0.9, restMult: 0.9, socialGainMult: 0.9, breakThresholdOffset: -0.08 },
+  { name: 'Steady', healthMult: 1, hungerMult: 0.9, restMult: 0.9, socialGainMult: 0.9, breakThresholdOffset: -0.08, conflictsWith: ['Neurotic'] },
   // Industriousness spectrum (work speed only, no needs/mood nudge -- matches RimWorld's own
   // Industriousness trait, which is purely a WorkSpeedGlobal modifier).
   { name: 'Industrious', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, workSpeedMult: 1.35 },
@@ -70,12 +92,12 @@ export const TRAITS = [
   // Neurotic: the real RimWorld tradeoff pairing -- breaks down more easily (raised break
   // threshold) but works faster while stable, so it's a genuine risk/reward pick rather than a
   // strict downgrade.
-  { name: 'Neurotic', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, workSpeedMult: 1.15, breakThresholdOffset: 0.12 },
+  { name: 'Neurotic', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, workSpeedMult: 1.15, breakThresholdOffset: 0.12, conflictsWith: ['Steady'] },
   // Brawler (RimWorld): melee-focused fighter -- flat combat-stat split rather than a needs/mood
   // nudge like most traits above (item 4's meleeAccuracyOffset/rangedAccuracyOffset, see this
   // file's top-of-file doc comment; a separate combat-system pass reads these from siege.js, not
   // this file). Real numbers used verbatim: +4% melee hit, -10% shooting.
-  { name: 'Brawler', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, meleeAccuracyOffset: 0.04, rangedAccuracyOffset: -0.10 },
+  { name: 'Brawler', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, meleeAccuracyOffset: 0.04, rangedAccuracyOffset: -0.10, conflictsWith: ['Wimp'] },
   // Nimble (RimWorld): +15% real melee dodge chance, used verbatim. Pure upside, same precedent as
   // Tough above (not every trait needs a paired downside -- RimWorld's own trait list isn't
   // perfectly symmetric either).
@@ -83,7 +105,7 @@ export const TRAITS = [
   // Wimp (RimWorld): real pain-shock threshold default 0.8 -> 0.3 for this trait, i.e. -0.50 on
   // that same 0-1 scale -- goes down/incapacitated far more easily under injury. Pure downside,
   // same asymmetric-trait precedent as Insomniac/Glutton above (no compensating upside grafted on).
-  { name: 'Wimp', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, painThresholdOffset: -0.50 },
+  { name: 'Wimp', healthMult: 1, hungerMult: 1, restMult: 1, socialGainMult: 1, painThresholdOffset: -0.50, conflictsWith: ['Tough', 'Brawler'] },
   // Driven: this project's closest available analog to RimWorld's TorturedArtist (forcedPassions)
   // -- no Artistic skill exists here to force, so the guarantee lands on construction (building
   // things is the nearest "making something" skill this codebase tracks) instead. Paired with a
@@ -106,6 +128,19 @@ export const TRAITS = [
 
 export function randomTrait(rng) {
   return TRAITS[Math.floor(rng() * TRAITS.length)];
+}
+
+// traitsConflict: bidirectional lookup over the conflictsWith data above -- RimWorld's real
+// DisallowedTraits check is symmetric (Wimp disallows Brawler exactly when Brawler disallows Wimp),
+// so this checks both directions even though every conflictsWith pair above is already listed on
+// both entries, in case a future addition only lists one side. Pure data lookup, no RNG, no
+// mutation, no effect on randomTrait's roll -- not called anywhere yet (no second-trait-slot
+// exists), seeded now for when that lands. idA/idB are TRAITS[].name strings.
+export function traitsConflict(idA, idB) {
+  const a = TRAITS.find((t) => t.name === idA);
+  const b = TRAITS.find((t) => t.name === idB);
+  if (!a || !b) return false;
+  return Boolean(a.conflictsWith?.includes(idB) || b.conflictsWith?.includes(idA));
 }
 
 // ---------------------------------------------------------------- age bands (RimWorld Biotech

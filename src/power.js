@@ -48,10 +48,22 @@ export function isWindSited(s, structures) {
   return true;
 }
 
+// EMP disable (siege.js's AttackerKind.Saboteur/applyEmpStun -- see the doc comment on
+// Structure.empStunTicksRemaining in siege.js for the full mechanic): a generator that's
+// currently EMP-stunned is "offline" in exactly the same binary source/no-source sense wind/solar
+// already use for a bad siting roll (isWindSited/`_openSky` above) -- reusing that existing
+// precedent rather than inventing a third way to say "this generator produces nothing right now".
+// `empStunTicksRemaining` defaults to 0 on every structure (see siege.js's Structure constructor),
+// so this is a no-op check for any generator an EMP pulse never reaches.
+function isEmpActive(s) {
+  return (s.empStunTicksRemaining || 0) > 0;
+}
+
 // Any generator variant counts as a source (plain 'generator', 'generator_nuclear', ...) so new
 // generator types plug into the grid without needing to be listed here -- except wind/solar,
 // which are only sources when their siting condition (above) actually holds.
 function isSource(s, structures) {
+  if (isEmpActive(s)) return false;
   if (s.kind === 'generator_wind') return isWindSited(s, structures);
   if (s.kind === 'generator_solar') return s._openSky !== false; // see world.js's tick(), defaults true until the first room pass
   return s.kind === 'generator' || s.kind.startsWith('generator_');
@@ -140,7 +152,7 @@ export const NUCLEAR_WIRELESS_RADIUS = 3;
 
 function isNearActiveNuclearGenerator(structures, x, y) {
   for (const s of structures) {
-    if (s.kind !== 'generator_nuclear' || s.destroyed || s.underConstruction) continue;
+    if (s.kind !== 'generator_nuclear' || s.destroyed || s.underConstruction || isEmpActive(s)) continue;
     if (Math.hypot(s.x - x, s.y - y) <= NUCLEAR_WIRELESS_RADIUS) return true;
   }
   return false;
@@ -165,11 +177,35 @@ export function setSolarFlareActive(active) {
   _solarFlareActive = !!active;
 }
 
+// Rolling Blackout (real Prison Architect calamity_settings.txt RollingBlackoutLow/Medium/High --
+// see weather.js's tickRollingBlackoutCondition). Exact same module-level mutable-flag shape as
+// _solarFlareActive/setSolarFlareActive just above, for the exact same reason (isPoweredAt is
+// called as (structures, x, y) from siege.js/world.js/vehicles.js with no `world` in scope, so a
+// module-level flag mirrors that pattern rather than threading a new parameter through call sites
+// this task doesn't own) -- kept as its own independent flag rather than reusing
+// _solarFlareActive, since the two conditions have entirely different triggers (one's a pure-luck
+// timer, the other's gated on real grid load) and can be active independently of one another.
+let _rollingBlackoutActive = false;
+
+/** Called once per tick by weather.js's tickRollingBlackoutCondition. While true, isPoweredAt
+ *  reports no power anywhere on the map -- same real "every electrical device offline map-wide"
+ *  effect as a solar flare, just triggered by an overloaded grid instead of bad luck. */
+export function setRollingBlackoutActive(active) {
+  _rollingBlackoutActive = !!active;
+}
+
 // A consumer draws power if it sits on, or orthogonally touches, an energized tile -- so a
 // turret can either hug the generator directly or be fed by a wire run from across the map --
 // or if it's simply within a nuclear generator's wireless radius (no wire needed at all).
+// EMP (siege.js's AttackerKind.Saboteur/applyEmpStun): needs no code of its own here -- an
+// EMP-stunned generator already drops out of both `sources` and `conductors` via isSource's own
+// isEmpActive gate above, and isNearActiveNuclearGenerator's matching gate covers the wireless
+// nuclear-radius bypass this function checks first -- so a stunned generator is correctly
+// "offline" everywhere isPoweredAt (and therefore hasPoweredBonus below) looks, the same way an
+// unsited wind turbine already was before this feature existed.
 export function isPoweredAt(structures, x, y) {
-  if (_solarFlareActive) return false; // grid-wide blackout -- see setSolarFlareActive above
+  if (_solarFlareActive || _rollingBlackoutActive) return false; // grid-wide blackout -- see
+                                                                   // setSolarFlareActive/setRollingBlackoutActive above
   if (isNearActiveNuclearGenerator(structures, x, y)) return true;
   const energized = energizedTiles(structures);
   if (energized.size === 0) return false;
@@ -343,7 +379,7 @@ function computeOverloadState(structures) {
     // a consumer inside the radius draws from the reactor directly, not through the wire graph.
     let nuclearGen = null;
     for (const gen of structures) {
-      if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction) continue;
+      if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction || isEmpActive(gen)) continue;
       if (Math.hypot(gen.x - s.x, gen.y - s.y) <= NUCLEAR_WIRELESS_RADIUS) { nuclearGen = gen; break; }
     }
     if (nuclearGen) {
@@ -395,7 +431,7 @@ export function hasPoweredBonus(structures, x, y) {
 
   let nuclearGen = null;
   for (const gen of structures) {
-    if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction) continue;
+    if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction || isEmpActive(gen)) continue;
     if (Math.hypot(gen.x - x, gen.y - y) <= NUCLEAR_WIRELESS_RADIUS) { nuclearGen = gen; break; }
   }
   if (nuclearGen) {
@@ -420,6 +456,44 @@ export function overloadedSupplyKeys(structures) {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Aggregate grid-load fraction (Prison Architect's own GeneratorLoad -- total demand vs total
+// supply across the WHOLE grid, not per-segment like isSegmentOverloadedAt above). Real PA gates
+// two separate calamities off this single number (calamity_settings.txt): RollingBlackoutLow/
+// Medium/High and FaultyWiringDueToHighLoad -- see weather.js's tickRollingBlackoutCondition/
+// tickFaultyWiring, both of which read this export as their real "total demand vs supply" number
+// rather than duplicating a second load calculation of their own. No aggregate load number
+// existed anywhere in this file before this -- isSegmentOverloadedAt/hasPoweredBonus only ever
+// reasoned per-segment, which is the right granularity for "does THIS turret lose its bonus" but
+// the wrong one for "is the COLONY'S grid, as a whole, under real strain" -- so this sums every
+// segment's own numbers (see below) into one map-wide ratio instead of adding a third, parallel
+// per-segment computation.
+//
+// Deliberately reuses overloadState's battery-inclusive capacity (the exact same numbers
+// hasPoweredBonus/isSegmentOverloadedAt already read), not computeSegmentLoads' raw
+// generator-only numbers tickBatteries/tickPowerExporters use -- a colony that actually built real
+// battery backup should see its own genuine risk reduction reflected here too, not just in the
+// per-segment overload-bonus check. Nuclear's wireless buckets are folded in the same way
+// isSegmentOverloadedAt already folds them, at nuclearCapacity per bucket.
+//
+// Returns 0 (never "high") for a colony with literally no power grid built (totalCapacity === 0)
+// -- there's no load to speak of with nothing plugged in yet, same fail-open shape
+// isPoweredAt's own energized.size===0 check already uses.
+export function gridLoadFraction(structures) {
+  const { segments, nuclearBuckets, nuclearCapacity } = overloadState(structures);
+  let totalCapacity = 0, totalLoad = 0;
+  for (const seg of segments) {
+    totalCapacity += seg.capacity;
+    totalLoad += seg.load;
+  }
+  for (const [, load] of nuclearBuckets) {
+    totalCapacity += nuclearCapacity;
+    totalLoad += load;
+  }
+  if (totalCapacity <= 0) return 0;
+  return totalLoad / totalCapacity;
+}
+
+// ---------------------------------------------------------------------------------------------
 // Battery storage tick (call once per world tick, BEFORE this tick's overload/hasPoweredBonus
 // reads -- see world.js). Deliberately uses RAW generator capacity vs. load here (NOT
 // addBatteryCapacity's battery-inclusive numbers above) to decide how much to charge/discharge --
@@ -436,7 +510,7 @@ export function computeSegmentLoads(structures) {
     // wire-segment's battery here.
     let nearNuclear = false;
     for (const gen of structures) {
-      if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction) continue;
+      if (gen.kind !== 'generator_nuclear' || gen.destroyed || gen.underConstruction || isEmpActive(gen)) continue;
       if (Math.hypot(gen.x - s.x, gen.y - s.y) <= NUCLEAR_WIRELESS_RADIUS) { nearNuclear = true; break; }
     }
     if (nearNuclear) continue;

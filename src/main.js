@@ -2117,6 +2117,17 @@ document.getElementById('insp-buy-vest-btn')?.addEventListener('click', () => {
   else if (result.reason === 'cost') showToast('Not enough scrap');
 });
 
+// Shield purchase (world.js's buyShield / citizens.js's hasShield) -- same one-shot-buy shape as
+// the Vest button right above it, purchasable in addition to a Vest, not instead of it.
+document.getElementById('insp-buy-shield-btn')?.addEventListener('click', () => {
+  const sel = (input.selectedCitizens && input.selectedCitizens.length === 1) ? input.selectedCitizens[0] : input.selectedCitizen;
+  if (sel < 0 || sel >= world.citizens.count) return;
+  const citizenId = world.citizens.id[sel];
+  const result = world.buyShield(citizenId);
+  if (result.ok) { showToast('Shield equipped'); updateInspector(); }
+  else if (result.reason === 'cost') showToast('Not enough scrap');
+});
+
 // Upgraded K9 tier (security.js's upgradeDog/world.upgradeDog) -- only enabled/shown for a
 // K9Handler with a real, not-yet-upgraded dog assigned, see updateInspector's insp-upgrade-dog-btn
 // toggle below.
@@ -2484,6 +2495,7 @@ const FINANCE_CATEGORIES = [
   ['corruptionLoss', '🕵 Corrupt-staff diversion', 'expense'],
   ['ratLoss', '🐀 Rat/vermin theft', 'expense'],
   ['factionLoss', '🤝 Clique demand losses', 'expense'],
+  ['wageCost', '💰 Ranked staff wages', 'expense'],
 ];
 
 /** Rebuild the category rows + redraw the chart. Cheap enough (7 rows, one small canvas) to
@@ -2579,6 +2591,14 @@ function updateInspector() {
     const vested = c.isVestedAt(sel);
     buyVestBtn.classList.toggle('hidden', vested);
     buyVestBtn.textContent = `🛡️ Buy Vest (${buildCost(world, 'vest')} scrap)`;
+  }
+  // Shield purchase button (world.js's buyShield) -- same one-shot-purchase-then-disappears
+  // convention as Buy Vest right above it.
+  const buyShieldBtn = document.getElementById('insp-buy-shield-btn');
+  if (buyShieldBtn) {
+    const shielded = c.isShieldedAt(sel);
+    buyShieldBtn.classList.toggle('hidden', shielded);
+    buyShieldBtn.textContent = `🔷 Buy Shield (${buildCost(world, 'shield')} scrap)`;
   }
   // Upgraded K9 tier -- only meaningful for a K9Handler who actually has a dog assigned (should
   // always be true given security.js's assignDogHandler wires both sides together, but a dog

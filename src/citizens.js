@@ -226,6 +226,64 @@ export const HYGIENE_SICK_THRESHOLD = 0.3; // "poor hygiene" band -- roughly mat
 export const HYGIENE_SICK_CHANCE_MULT = 3; // real, meaningful multiplier on sickness.js's base per-check
                                             // onset chance -- not a token nudge
 
+// ---------------------------------------------------------------- joy (RimWorld's real Joy need)
+// Previously this codebase's "Social" need (SOCIAL_DECAY above, refilled at a Recreation zone) was
+// already standing in for both RimWorld's real Recreation-activity Joy need AND its separate
+// person-to-person Social need at once -- this pass gives Joy its own real, independently-tracked
+// value rather than continuing to fold it into Social. A clean job-target already exists for it
+// (jobs.js's Recreation zone / SeekingRec-Recreating states, the exact "Joy->Recreation if it
+// exists" case this task called for) -- deliberately reuses that existing state pair wholesale
+// (no new JobState added, see jobs.js's Recreating handler) rather than standing up a fully
+// parallel SeekingJoy/Joying pipeline: Social and Joy already share the identical real-world
+// destination (a Recreation zone), so a single visit refills both together, same as how a Dining
+// Room visit already refills only Hunger even though a citizen could in principle socialize there
+// too -- not every need gets its own dedicated trip. Same decay magnitude as SOCIAL_DECAY (they
+// share a target, so there's no reason for one to run out faster than the other), but deliberately
+// NOT given ON_DUTY_SOCIAL_FULFILLMENT's on-duty discount -- working a post is a real substitute
+// for casual conversation (Social's own reasoning), but it isn't recreation, so an on-duty
+// guard/sniper's Joy still drains normally.
+export const JOY_DECAY = 0.0004; // matches SOCIAL_DECAY exactly -- shared target, shared pace
+
+// ---------------------------------------------------------------- comfort & beauty (RimWorld's
+// real Comfort and Beauty needs/stats). Previously both were folded into one blunt, unlabeled
+// room-quality mood nudge (see the old ROOM_MOOD_INFLUENCE raw-additive term this section
+// replaces) rather than being real, separately-tracked needs the way Hunger/Rest/Social/etc. are.
+// Neither has a clean job-target the way Joy does above (there's no "go stand somewhere beautiful"
+// job, and shouldn't be one invented for this) -- both are genuinely AMBIENT: how comfortable/
+// attractive a citizen's CURRENT surroundings happen to be, read passively off whatever room
+// they're already standing in (or not) each tick, never a reason to travel anywhere on their own.
+// Derived from rooms.js's already-computed per-room stats (computeRoomStats, called once per tick
+// by world.js) rather than inventing a second scoring system:
+//   - Comfort <- the average of that room's .cleanliness and .impressiveness (both already 0..1,
+//     no rescale needed) -- "is this space clean and well-appointed", RimWorld's real Comfort stat
+//     being furniture-quality-driven is the closest real analog this codebase's data supports.
+//   - Beauty <- that room's own .beauty stat, which is a raw unbounded per-furniture sum (see
+//     rooms.js's BEAUTY_BY_KIND/BEAUTY_LABELS, roughly -6..+100 across its named tiers), rescaled
+//     onto this need's 0..1 scale by beautyNeedTarget() below.
+// A citizen standing outside any room (or before rooms.js has run at all) eases toward 0.5 -- the
+// same "neutral, not punished" baseline the OLD ROOM_MOOD_INFLUENCE term already used ("0.5 is the
+// neutral 'no room / average room' baseline", see that constant's own doc comment) -- deliberately
+// NOT 0, which would repeat the exact "un-plumbed Hydration pinned at 0 forever, dragging a
+// hands-off colony's mood down permanently" failure mode this file's own HYDRATION_BURST_REFILL
+// doc comment already describes and warns against. Both ease toward their current target at
+// COMFORT_BEAUTY_EASE_RATE per tick (gentle, "slow trend over many ticks" -- same design goal the
+// old ROOM_MOOD_INFLUENCE term itself stated) rather than snapping, so walking through one ugly
+// room for a moment doesn't instantly tank a citizen's Beauty need.
+const COMFORT_BEAUTY_EASE_RATE = 0.01;
+const COMFORT_BEAUTY_NEUTRAL = 0.5; // outdoors / no room / rooms.js hasn't run yet
+// Anchors Beauty's raw rooms.js scale onto this need's 0..1 scale: 0 (rooms.js's own "neutral"
+// label cutoff, see BEAUTY_LABELS) maps to this need's 0.5 neutral point, +/- BEAUTY_NEED_SPAN maps
+// to the 0/1 extremes -- wide enough that a single so-so item doesn't saturate this instantly, but
+// narrow enough that an actually "beautiful"-labeled room (rooms.js's own +5.0 threshold) reads as
+// genuinely close to fully satisfied rather than barely nudged.
+const BEAUTY_NEED_SPAN = 6;
+function beautyNeedTarget(roomBeauty) {
+  return Math.max(0, Math.min(1, COMFORT_BEAUTY_NEUTRAL + roomBeauty / (BEAUTY_NEED_SPAN * 2)));
+}
+function comfortNeedTarget(room) {
+  return (room.cleanliness + room.impressiveness) / 2;
+}
+
 // ---------------------------------------------------------------- hunger spiral (malnutrition)
 // RimWorld's real malnutrition ramps hungerRateFactorOffset 0.5 -> 0.6 across its severity stages
 // (a mild compounding ramp, not a cliff) once a pawn has been starving for a while. Mirrored here
@@ -250,6 +308,11 @@ export const MOOD_EVENT_STACK_LIMITS = {
   // a citizen shouldn't be able to carry more than a couple live "just had a gathering" (or "that
   // gathering was a letdown") thoughts at once.
   communityGathering: 2,
+  // Aurora weather (weather.js's tickAuroraMoodBoost, real RimWorld Aurora thought): capped at 1
+  // -- the event is refreshed on a short interval for as long as Aurora weather holds (see that
+  // function's own comment), so there should only ever be one live copy at a time, not a pile of
+  // near-duplicate refreshes compounding the magnitude.
+  aurora: 1,
 };
 const DEFAULT_MOOD_EVENT_STACK_LIMIT = 3;
 
@@ -278,6 +341,39 @@ export function addMoodEvent(store, i, currentTick, { magnitude, durationTicks, 
 // band did. Mild = short and barely slows the citizen; Extreme = long and roughly halves their
 // work/travel rate. Depth bands are deliberately generous (most breaks that do trigger should
 // land Mild/Moderate) since BREAK_MOOD_THRESHOLD itself already only fires deep in a bad run.
+//
+// Distinct per-tier BEHAVIOR (not just a rate multiplier), added this pass -- see
+// SESSION_HANDOFF.md's "balance regression, part 2" section first, this is directly downstream of
+// its caution: an earlier attempt to keep citizens off OnBreak entirely (an ambient Hygiene floor)
+// was tried and REVERTED because it measurably made survival worse, best-guess reason being that
+// OnBreak citizens sitting relatively idle/slowed are, if anything, an ACCIDENTAL survival
+// mechanic -- they spend less time in exposed harvest/patrol/vehicle zones than a fully healthy
+// colony would. Every behavior below was chosen to preserve or strengthen that accidental safety,
+// never to work against it:
+//   - mild: unchanged from before this pass -- purely the rateMult work/travel penalty below, via
+//     breakRateMultFor. No new behavior, no new exposure change either way.
+//   - moderate: self-isolation (see jobs.js's isModerateBreakAt gate in the Idle branch) -- a
+//     citizen refuses new work orders (Construction/Processing/Hauling/Harvesting/Animal/Cleaning/
+//     Farming/Restaurant) for the tier's bounded duration and instead heads to the nearest Bedroom
+//     zone (this codebase's closest analog to "their own room" -- no per-citizen assigned-room
+//     concept exists to reuse instead) and sits there, reusing the existing SeekingBed/Sleeping
+//     states wholesale rather than inventing new travel/arrival machinery. This is STRICTLY safer
+//     than today's behavior, not just neutral: today a moderate-depth break still lets a citizen
+//     wander into Harvesting/Hauling/Cleaning at a reduced (0.55x) rate; this pass pulls them off
+//     that work entirely and points them at an indoor zone instead. Needs-seeking (Food/Bed/Social/
+//     Exercise/Hygiene/Tend) is deliberately left untouched -- the task asked for refusing WORK,
+//     not refusing self-care, and gating needs too would risk a citizen starving mid-break for no
+//     mechanical benefit.
+//   - severe: reuses factions.js's applyUnmetConsequence 'Wrecking' shape (a single, bounded,
+//     one-time property-damage event -- a fraction of health off ONE random non-defensive
+//     structure) rather than inventing new violence, see the SEVERE_BREAK_DAMAGE_FRACTION doc
+//     comment below for exactly why this is the safe end of that pattern, not the Scrapping
+//     (mood/OnBreak) or Slipping Off (job-abandon) branches. Deliberately involves ZERO citizen
+//     movement -- fires once, instantly, at the exact moment the break triggers, the citizen's own
+//     position/job never changes because of it. This is the one place this pass could have
+//     introduced a new death/exposure vector (SESSION_HANDOFF.md's explicit warning) and
+//     deliberately doesn't: no new travel, no new zone, nothing that puts a citizen anywhere they
+//     wouldn't otherwise already be.
 const BREAK_TIERS = [
   { name: 'mild', minDepth: 0, durationTicks: 250, rateMult: 0.75 },
   { name: 'moderate', minDepth: 0.08, durationTicks: 600, rateMult: 0.55 },
@@ -296,6 +392,36 @@ export function breakRateMultFor(store, i) {
   if (!store.isOnBreakAt(i)) return 1;
   return BREAK_TIERS[store.breakSeverity[i]]?.rateMult ?? BREAK_TIERS[0].rateMult;
 }
+
+// Exported so jobs.js's Idle-branch self-isolation gate can check "is this citizen's CURRENT
+// break the moderate tier" by name rather than hardcoding BREAK_TIERS' array index (1) a second
+// time in a different file -- same "predicate helper, not a raw index" precedent isOnBreakAt/
+// isDraftedAt/isVestedAt already set on CitizenStore itself.
+export function isModerateBreakAt(store, i) {
+  return store.isOnBreakAt(i) && BREAK_TIERS[store.breakSeverity[i]]?.name === 'moderate';
+}
+
+// ---------------------------------------------------------------- severe break: bounded property
+// damage (see BREAK_TIERS' 'severe' doc comment above for why this specific consequence, not a
+// self-isolation/movement change, was chosen). Deliberately a SMALLER fraction than factions.js's
+// own STRUCTURE_DAMAGE_FRACTION (0.25, the Wrecking clique-misbehavior consequence this mirrors):
+// that mechanic is gated behind a whole clique's demand-timer expiring (rare, colony-scoped), while
+// a severe INDIVIDUAL break can in principle trigger independently for many citizens during exactly
+// the kind of colony-wide mood/unrest death-spiral SESSION_HANDOFF.md's balance-regression notes
+// already flag as this project's most fragile scenario -- deliberately erring toward a smaller
+// per-event magnitude rather than assuming the two are equally rare. Turret/wall excluded, same
+// reasoning factions.js's Wrecking branch already gives: the colony's actual defense shouldn't get
+// casually sabotaged by an individual's mental break. Fires ONCE per break-trigger event (i.e. the
+// instant a citizen's mood crosses into severe-tier territory), never repeatedly over the break's
+// 1200-tick duration -- a discrete event, not a per-tick drain, matching the same "one-shot, not a
+// compounding rate" shape as the rats.js STEAL_MIN/MAX lesson this session's handoff already
+// documents (an accidentally-repeating small drain was the actual root cause of the earlier
+// balance regression). NOT implemented as a re-import of factions.js's own applyUnmetConsequence --
+// citizens.js loads before factions.js in build.py's ORDER and factions.js already imports
+// CitizenFlags from citizens.js, so importing back would be circular; this is a self-contained
+// mirror of the same pattern instead, matching this file's existing "keep the two values in sync
+// by hand" precedent for other cross-file constants (see _sickOffset/_epidemicOffset above).
+const SEVERE_BREAK_DAMAGE_FRACTION = 0.08;
 
 // ---------------------------------------------------------------- cross-need work-speed throttle
 // Mirrors RimWorld's real StatPart_Food / StatPart_Rest work-speed factors: urgently hungry x0.9,
@@ -325,13 +451,15 @@ export function needsThrottleMultFor(store, i) {
   return mult;
 }
 
-// Room quality -> mood (rooms.js's computeRoomStats, RimWorld-style beauty/cleanliness/
-// impressiveness -> a 0..1 "quality" score). 0.5 is the neutral "no room / average room"
-// baseline, so this term is signed: a genuinely nice room (quality near 1) gives a steady small
-// positive nudge each tick, a bare/ugly one (quality near 0) gives a steady small negative nudge.
-// Kept deliberately gentle -- this should read as a slow trend over many ticks in a soak test,
-// not something that swamps the existing hunger/rest/social-driven mood swing in one tick.
-const ROOM_MOOD_INFLUENCE = 0.02;
+// Room quality -> mood: PREVIOUSLY a single blunt raw-additive term reading rooms.js's combined
+// .quality score directly (0.5 neutral baseline, signed nudge above/below it). REMOVED this pass
+// and replaced by the real, separately-tracked Comfort and Beauty needs above (COMFORT_BEAUTY_*,
+// comfortNeedTarget/beautyNeedTarget) -- those now fold into avgNeed in tickNeedsAndMood below the
+// same way Hunger/Rest/Social/etc. already do, which supersedes this term entirely rather than
+// stacking a second room-derived mood influence on top of it (double-counting the same
+// cleanliness/impressiveness/beauty data through two different mood pathways would make Comfort/
+// Beauty's real magnitude impossible to reason about in a soak test). This doc comment is kept as
+// a pointer for anyone who remembers the old constant name.
 
 export class CitizenStore {
   constructor(capacity) {
@@ -356,6 +484,13 @@ export class CitizenStore {
     this.hydration = new Float32Array(capacity).fill(1); // PA-style Hydration need, see HYDRATION_DECAY above
     this.exercise = new Float32Array(capacity).fill(1); // PA-style Exercise need, see EXERCISE_DECAY above
     this.hygiene = new Float32Array(capacity).fill(1); // RimWorld QoL-mod-style Hygiene need, see HYGIENE_DECAY above
+    this.joy = new Float32Array(capacity).fill(1); // RimWorld-style Joy need, see JOY_DECAY above -- shares Social's Recreation-zone target
+    // Comfort/Beauty (see COMFORT_BEAUTY_* doc comment above): ambient, room-derived needs, no
+    // decay constant of their own -- they ease toward whatever the citizen's current room reads
+    // as (or COMFORT_BEAUTY_NEUTRAL if outside any room) every tick in tickNeedsAndMood, rather
+    // than draining independently the way every *_DECAY need above does.
+    this.comfort = new Float32Array(capacity).fill(1);
+    this.beauty = new Float32Array(capacity).fill(1);
     this.mood = new Float32Array(capacity).fill(1);
     this.health = new Float32Array(capacity).fill(1);
     // Permanent scars (see SCAR_* doc comment above) -- health's real ceiling, normally 1 for
@@ -372,6 +507,13 @@ export class CitizenStore {
     // read here rather than a Set so it's a plain SoA field like every other per-citizen combat
     // stat in this store (health, skillCombat, ...).
     this.hasVest = new Uint8Array(capacity);
+    // Shield (EnergyShield, siege.js's tickAttackerVsCitizens/tickShieldRecharge): a separate
+    // absorb-before-armor layer purchasable alongside (not instead of) Vest -- hasShield mirrors
+    // hasVest's exact convention, shieldEnergy is the current absorb pool (0..CITIZEN_SHIELD_CAPACITY,
+    // siege.js), shieldBrokenTicks counts down the post-break recharge lockout.
+    this.hasShield = new Uint8Array(capacity);
+    this.shieldEnergy = new Float32Array(capacity);
+    this.shieldBrokenTicks = new Uint16Array(capacity);
     this.flags = new Uint8Array(capacity);
     this.alive = new Uint8Array(capacity);
     // "Just became Downed" edge detector for tickNeedsAndMood's own defensive health floor (see
@@ -436,6 +578,22 @@ export class CitizenStore {
     // augment types this feature defines.
     this.augmentMask = new Uint8Array(capacity);
     this._staffCooldown = new Float32Array(capacity); // used by siege.js tickStaffCombat
+    // Weapon warmup tracking (siege.js's staffStillWarmingUp/tickStaffCombat, GUARD_WARMUP_TICKS/
+    // SNIPER_WARMUP_TICKS): _staffWarmupTarget[i] is which attacker index this citizen is currently
+    // aiming at (-1 = nobody), _staffWarmup[i] is the countdown (in ticks) left before that aim
+    // completes. Pre-existing gap fixed incidentally while verifying this task's own changes --
+    // siege.js already read/wrote BOTH fields (added when the weapon-warmup mechanic landed, whose
+    // own doc comment explicitly flagged "not added here, out of this session's scope") but neither
+    // was ever allocated on CitizenStore, so ANY tick where a Guard/Sniper had a live target in
+    // range crashed tickStaffCombat outright (`Cannot set properties of undefined`) -- not
+    // introduced by this task's own moderate-break/severe-break/Joy/Comfort/Beauty work, but it
+    // blocked soak-testing that work at all (a fresh colony starts with 2 Guards + 2 Snipers
+    // already on duty, see world.js), so fixed here rather than left broken. -1 default on the
+    // target field matches the "-1 = no target/claim" convention tendClaimedBy/orderAttackIndex
+    // above already use; the countdown field's 0 (Int32Array zero-init) default correctly reads as
+    // "not currently warming up" the first time staffStillWarmingUp ever runs for a citizen.
+    this._staffWarmupTarget = new Int32Array(capacity).fill(-1);
+    this._staffWarmup = new Int32Array(capacity);
     // Suppression (this session's ammo/suppression pass, see siege.js's tickSuppression/
     // suppressionAccuracyMult): 0-1, builds while a citizen is actually being hit by attacker fire
     // (siege.js's tickAttackerVsCitizens increments it directly on a landed roll against them) and
@@ -562,11 +720,13 @@ export class CitizenStore {
     this.age[i] = 2000 + rng() * 22000;
     this.hunger[i] = 1; this.rest[i] = 1; this.social[i] = 1; this.hydration[i] = 1; this.exercise[i] = 1;
     this.hygiene[i] = 1;
+    this.joy[i] = 1; this.comfort[i] = 1; this.beauty[i] = 1;
     this.mood[i] = 1; this.health[i] = 1;
     this.maxHealth[i] = 1; // no scars yet -- see SCAR_* doc comment above
     this.woundInfectionSeverity[i] = 0;
     this.flags[i] = CitizenFlags.None;
     this.hasVest[i] = 0;
+    this.hasShield[i] = 0; this.shieldEnergy[i] = 0; this.shieldBrokenTicks[i] = 0;
     this.alive[i] = 1;
     this._wasDownedLastTick[i] = 0;
     this._hungerSpiralTicks[i] = 0;
@@ -628,6 +788,8 @@ export class CitizenStore {
     this.allowedAreaMask[i] = null;
     this.tendClaimedBy[i] = -1;
     this.beingTended[i] = 0;
+    this._staffWarmupTarget[i] = -1;
+    this._staffWarmup[i] = 0;
     return i;
   }
 
@@ -681,6 +843,10 @@ export class CitizenStore {
   // Vest armor (see hasVest field above / siege.js's resolveCitizenArmorRoll).
   isVestedAt(i) {
     return this.hasVest[i] === 1;
+  }
+
+  isShieldedAt(i) {
+    return this.hasShield[i] === 1;
   }
 
   // Force Job pending (forcejob.js) -- true from the moment forceJob() marks a target until
@@ -1005,18 +1171,44 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
     // above): sickness.js's tickSickness reads store.hygiene directly off this same array, so
     // nothing further is needed here beyond keeping the field itself up to date every tick.
 
-    // Hydration/Exercise/Hygiene fold into the SAME eased need-average as hunger/rest/social, not
-    // a separate raw additive nudge -- an earlier version of this added a small unbounded
-    // (hydration-0.5)*weight term directly to mood every tick, same shape as the room-quality term
-    // below, but unlike a room (which simply has no term at all until the citizen stands inside
-    // one) an un-plumbed colony has EVERY citizen's hydration pinned at 0 for the entire early
-    // game, so that raw term permanently dragged mood toward 0 tick after tick with nothing to
-    // counteract it -- caught in that pass's soak test (population collapsed from 24 to 3 by tick
-    // ~9000 on a fresh Calm colony with no pump built yet). Folding it into avgNeed instead means
-    // it only pulls mood toward a lower *target* (proportionally diluted 1-in-6 now that Hygiene
-    // is included, was 1-in-5), which the existing 0.05 easing already keeps gentle -- same bounded
-    // behavior as hunger/rest/social, no separate uncapped accumulation path.
-    const avgNeed = (store.hunger[i] + store.rest[i] + store.social[i] + store.hydration[i] + store.exercise[i] + store.hygiene[i]) / 6;
+    // Joy (see JOY_DECAY doc comment above): pure ambient drain, deliberately no staffFulfillment
+    // discount (unlike Social just above) -- refill is entirely job-driven via jobs.js's existing
+    // SeekingRec/Recreating states, which now refill Joy alongside Social on the same trip.
+    store.joy[i] = Math.max(0, store.joy[i] - JOY_DECAY);
+
+    // Comfort/Beauty (see COMFORT_BEAUTY_* doc comment above): ambient, room-derived, no decay of
+    // their own -- each tick eases toward the current room's derived value (or the neutral
+    // baseline if not currently inside any room / rooms.js hasn't run) rather than draining.
+    // Computed here, BEFORE avgNeed below, so this tick's easing already feeds into this tick's
+    // mood target -- same ordering precedent every other need above already follows.
+    if (world?.rooms && world?.grid) {
+      const room = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+      const comfortTarget = room ? comfortNeedTarget(room) : COMFORT_BEAUTY_NEUTRAL;
+      const beautyTarget = room ? beautyNeedTarget(room.beauty) : COMFORT_BEAUTY_NEUTRAL;
+      store.comfort[i] += (comfortTarget - store.comfort[i]) * COMFORT_BEAUTY_EASE_RATE;
+      store.beauty[i] += (beautyTarget - store.beauty[i]) * COMFORT_BEAUTY_EASE_RATE;
+    } else {
+      store.comfort[i] += (COMFORT_BEAUTY_NEUTRAL - store.comfort[i]) * COMFORT_BEAUTY_EASE_RATE;
+      store.beauty[i] += (COMFORT_BEAUTY_NEUTRAL - store.beauty[i]) * COMFORT_BEAUTY_EASE_RATE;
+    }
+
+    // Hydration/Exercise/Hygiene/Joy/Comfort/Beauty all fold into the SAME eased need-average as
+    // hunger/rest/social, not a separate raw additive nudge -- an earlier version of this added a
+    // small unbounded (hydration-0.5)*weight term directly to mood every tick, same shape as the
+    // OLD room-quality term this section's Comfort/Beauty replaced (see the removed
+    // ROOM_MOOD_INFLUENCE doc comment above CitizenStore), but unlike a room (which simply has no
+    // term at all until the citizen stands inside one) an un-plumbed colony has EVERY citizen's
+    // hydration pinned at 0 for the entire early game, so that raw term permanently dragged mood
+    // toward 0 tick after tick with nothing to counteract it -- caught in that pass's soak test
+    // (population collapsed from 24 to 3 by tick ~9000 on a fresh Calm colony with no pump built
+    // yet). Folding it into avgNeed instead means it only pulls mood toward a lower *target*
+    // (proportionally diluted 1-in-9 now that Joy/Comfort/Beauty are included, was 1-in-6), which
+    // the existing 0.05 easing already keeps gentle -- same bounded behavior as hunger/rest/social,
+    // no separate uncapped accumulation path. Comfort/Beauty specifically ease toward
+    // COMFORT_BEAUTY_NEUTRAL (0.5) rather than 0 when unmet, so a hands-off/no-rooms-built colony
+    // sees these two new terms sit at the same neutral midpoint the old ROOM_MOOD_INFLUENCE term's
+    // own baseline already used -- not a repeat of the hydration-pinned-at-0 failure mode.
+    const avgNeed = (store.hunger[i] + store.rest[i] + store.social[i] + store.hydration[i] + store.exercise[i] + store.hygiene[i] + store.joy[i] + store.comfort[i] + store.beauty[i]) / 9;
 
     // Stacking mood events (RimWorld "Thought" mechanic, see addMoodEvent above): each live
     // event's magnitude decays linearly to zero over its duration. RimWorld recomputes mood fresh
@@ -1045,14 +1237,10 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
     // snapping, so a single bad tick doesn't cause a break.
     store.mood[i] += (avgNeed + eventSum - store.mood[i]) * 0.05;
 
-    // Room quality (see ROOM_MOOD_INFLUENCE doc comment above): one roomContaining lookup per
-    // citizen per tick, same cost/pattern as the ROOM_REFILL_BONUS lookups already done per
-    // citizen per tick in jobs.js's Eating/Sleeping/Recreating states. Pre-existing raw-add
-    // pattern (not part of this pass's mood-event work) -- left as-is.
-    if (world) {
-      const room = roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
-      if (room) store.mood[i] += (room.quality - 0.5) * ROOM_MOOD_INFLUENCE;
-    }
+    // Room quality's mood influence now flows entirely through the Comfort/Beauty terms already
+    // folded into avgNeed above -- see the removed ROOM_MOOD_INFLUENCE doc comment above
+    // CitizenStore for why the old direct raw-add here was removed rather than left stacked on
+    // top of the new needs (double-counting the same rooms.js data through two pathways).
 
     store.mood[i] = Math.min(1, Math.max(0, store.mood[i]));
 
@@ -1079,6 +1267,27 @@ export function tickNeedsAndMood(store, isStaffAt, rng, world) {
       store.breakSeverity[i] = tierIdx;
       store._breakTicksRemaining[i] = BREAK_TIERS[tierIdx].durationTicks;
       world?.onCitizenOnBreak?.();
+
+      // Severe break: one-time, bounded property-damage consequence (see BREAK_TIERS' 'severe'
+      // doc comment and SEVERE_BREAK_DAMAGE_FRACTION's doc comment above for the full reasoning).
+      // Fires exactly once, right here at the moment of the trigger -- no movement, no new
+      // exposure, matching the "existing property-damage consequence pattern, not new violence"
+      // requirement.
+      if (BREAK_TIERS[tierIdx].name === 'severe' && world?.structures) {
+        const candidates = world.structures.filter(s =>
+          !s.destroyed && !s.underConstruction && s.kind !== 'turret' && s.kind !== 'wall');
+        if (candidates.length > 0) {
+          const target = candidates[Math.floor(rng() * candidates.length)];
+          target.health = Math.max(0, target.health - SEVERE_BREAK_DAMAGE_FRACTION);
+          if (target.health <= 0) target.destroyed = true;
+          if (world.milestoneLog) {
+            const text = `${store.name[i]} has a severe mental break and damages the ${target.kind}`;
+            world.milestoneLog.push({ tick: world.currentTick, text });
+            if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+            world.onRandomEvent?.(text);
+          }
+        }
+      }
     }
   }
 }

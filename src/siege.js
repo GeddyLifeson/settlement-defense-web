@@ -19,6 +19,16 @@ export const AttackerKind = Object.freeze({
   Brute: 1,
   Skirmisher: 2,
   Boss: 3,
+  // RimWorld's real EMP mechanic (EMP grenades/shells temporarily disabling turrets and other
+  // mechanical/electrical buildings) had no attacker-side source in this project at all -- every
+  // existing archetype only ever threatens citizens/fences. Saboteur is that source: a fragile
+  // specialist whose real threat is a short-range EMP pulse against turret/generator/mortar
+  // structures (see the empAttack flag below and EMP_ATTACK_RANGE/EMP_STUN_DURATION_TICKS further
+  // down), not raw melee damage. Deliberately its own archetype rather than bolting empAttack onto
+  // an existing one (e.g. Skirmisher) -- the task brief calls for an opt-in THREAT TYPE a wave can
+  // roll, not a passive buff every fast attacker gets, and reusing Skirmisher would make it appear
+  // in every wave rolling that already-soak-tested archetype, silently changing its balance.
+  Saboteur: 4,
 });
 
 // healthMult/speedMult/damageMult multiply the baseline constants further down this file.
@@ -47,11 +57,33 @@ export const AttackerKind = Object.freeze({
 // baseline of the same build almost exactly (21.0k vs 21.0k ticks). Retune only against a fresh
 // A/B soak -- the effective toughness of a Brute is healthMult x its kinetic ARMOR_RATING below,
 // not healthMult alone, so the two tables have to move together.
+// Saboteur (AttackerKind.Saboteur, added alongside DamageType.EMP -- see both of those enums'
+// own doc comments): NOT part of the soak-tested Grunt/Brute/Skirmisher/Boss table above this
+// comment -- deliberately gated far more conservatively than any of those four (see
+// SABOTEUR_MIN_WAVE/SABOTEUR_RATE near BRUTE_RATE/SKIRMISHER_RATE below) precisely because this
+// project has a documented history of archetype-table balance regressions (SESSION_HANDOFF.md)
+// and this entry has NOT been through that same multi-seed soak process. Priced/statted so even a
+// worst-case "it does nothing but stand there" reading of it can't trivialize a wave on its own:
+//   healthMult 0.5 / damageMult 0.5 -- deliberately the softest, weakest-hitting archetype in the
+//     roster (below Skirmisher's 0.45/0.7) -- its entire value proposition is the EMP pulse below,
+//     not brute combat, so a Saboteur that gets focus-fired before reaching a turret contributes
+//     almost nothing to the wave, same "high risk if mishandled" shape as Skirmisher's glass-cannon
+//     speed but for a utility role instead of a DPS one.
+//   speedMult 1.0 -- plain Grunt pace (not Skirmisher-fast): it doesn't need to outrun defenses,
+//     it needs to survive walking up to one, so no speed bonus to compound with the disable utility.
+//   empAttack: true -- the ONLY archetype with this flag (tickAttackers' EMP-attack block below is
+//     gated on it) -- an opt-in flag, not a new stat every future archetype has to define, matching
+//     how contactRange is already optional (nullish-coalesced with ATTACKER_CONTACT_RANGE) elsewhere.
+//   combatPower 55 -- above Skirmisher(45) since disabling a turret for EMP_STUN_DURATION_TICKS is
+//     real value a raid-points budget should pay for, but well below Brute(70)/Boss(150) since that
+//     value is conditional (has to survive the approach, land the roll, EMP_ATTACK_COOLDOWN_TICKS
+//     gates how often it repeats) rather than guaranteed damage output like Brute's tankiness.
 export const ATTACKER_ARCHETYPES = Object.freeze([
   { name: 'Grunt',      healthMult: 1.0,  speedMult: 1.0, damageMult: 1.0, contactRange: 0.5, combatPower: 35 },
   { name: 'Brute',      healthMult: 1.8,  speedMult: 0.5, damageMult: 1.4, contactRange: 0.6, combatPower: 70 },
   { name: 'Skirmisher', healthMult: 0.45, speedMult: 1.9, damageMult: 0.7, contactRange: 0.5, combatPower: 45 },
   { name: 'Boss',       healthMult: 5.0,  speedMult: 0.7, damageMult: 2.2, contactRange: 1.3, combatPower: 150 },
+  { name: 'Saboteur',   healthMult: 0.5,  speedMult: 1.0, damageMult: 0.5, contactRange: 0.5, combatPower: 55, empAttack: true },
 ]);
 
 export function archetypeOf(kind) {
@@ -78,11 +110,22 @@ export function costOf(kind) {
 //   Energy    -- tesla coils, sniper rifles (expensive/slow, but shreds heavy armor)
 // Blunt exists only as the reported outcome-conversion label above; nothing deals it and no
 // archetype has Blunt armor, so it never needs a table lookup of its own.
+// EMP -- real RimWorld anchor: EMP grenades/shells deal ~0 lethal damage to organic pawns but
+// temporarily disable mechanical/electrical things (turrets, doors, mechanoids). This project has
+// no separate "structure health" combat model for turrets to route through resolveArmorRoll (see
+// the doc comment on the SUPPRESSION section further down: "this engine's combat model never lets
+// an attacker directly damage a turret" -- true before this damage type and still true after it),
+// so EMP is deliberately NOT wired through damageAttacker/ARMOR_RATING at all, unlike Kinetic/
+// Explosive/Energy which are all "damage dealt TO an attacker archetype". It exists here purely as
+// the named damage-type label for the Saboteur's structure-targeting attack (see AttackerKind.
+// Saboteur/empAttack and applyEmpStun below) -- a real, honest disable effect (bounded duration,
+// mirrors applyStun's exact shape) rather than a token label nothing ever uses.
 export const DamageType = Object.freeze({
   Kinetic: 0,
   Explosive: 1,
   Energy: 2,
   Blunt: 3,
+  EMP: 4,
 });
 
 // [kind][damageType] -> armor rating, 0-100 (same units as armorPenetration below, so
@@ -101,6 +144,11 @@ export const ARMOR_RATING = Object.freeze([
   /* Brute      */ Object.freeze([70, 5,  20]),
   /* Skirmisher */ Object.freeze([5,  75, 20]),
   /* Boss       */ Object.freeze([55, 35, 0]),
+  // Saboteur: unarmored specialist, identical to Grunt's baseline plate -- explicit here rather
+  // than left to armorRatingOf's own Grunt-fallback so a reader doesn't have to go check that
+  // fallback exists. No rock-paper-scissors matchup of its own; it's meant to die fast to focus
+  // fire if it's caught before landing its EMP pulse, same "glass" framing as its ATTACKER_ARCHETYPES doc comment.
+  /* Saboteur   */ Object.freeze([20, 20, 20]),
 ]);
 
 // [kind][damageType] -> extra multiplier applied ONLY on a full-damage hit that lands with
@@ -156,8 +204,13 @@ function rollArmorMitigation(armor, penetration, rng) {
 // damage; returns { dealt, outcome } where outcome is 'deflect' | 'half' | 'full' (reported as
 // DamageType.Blunt-flavored when 'half', per the comment above). Tallies armorStats as a side
 // effect so soak tests can confirm a real mix of outcomes rather than one branch always firing.
-export function resolveArmorRoll(kind, damageType, amount, penetration, rng = Math.random) {
-  const armor = armorRatingOf(kind, damageType);
+// armorRatingDelta (per-attacker gear roll, see the "per-attacker gear roll" section further down
+// this file -- GEAR_TIER_ADJUST's armorRatingDelta): defaults to 0, so every pre-existing caller
+// (tests, console pokes, and this file's own turret-self-destruct/citizen-armor call sites that
+// don't go through an AttackerStore index) keeps the exact archetype-baseline armor rating.
+// damageAttacker below is the one caller that actually threads a live attacker's rolled delta in.
+export function resolveArmorRoll(kind, damageType, amount, penetration, rng = Math.random, armorRatingDelta = 0) {
+  const armor = Math.max(0, Math.min(100, armorRatingOf(kind, damageType) + armorRatingDelta));
   const { outcome, fracMult } = rollArmorMitigation(armor, penetration, rng);
   const dealt = outcome === 'full' ? amount * vulnerabilityMult(kind, damageType) : amount * fracMult;
   armorStats[outcome]++;
@@ -203,6 +256,166 @@ export function resolveCitizenArmorRoll(armorRating, penetration, amount, rng = 
   return { dealt: amount * fracMult, outcome };
 }
 
+// ---------------------------------------------------------------- citizen shield (EnergyShield)
+// Real RimWorld anchor: Apparel_EnergyShield (the "shield belt") -- a personal energy field that
+// absorbs incoming damage BEFORE armor is ever rolled, blocks completely until its energy pool is
+// exhausted (a "deflect" that's guaranteed rather than a percentage roll like Vest's), then goes
+// fully offline for a real "reset" delay before it can even begin recharging, and finally trickles
+// back up to full over a long stretch of uninterrupted time. This is a NEW equipment layer,
+// parallel to (not replacing) the existing Vest above -- see tickAttackerVsCitizens below for the
+// exact "shield absorbs first, whatever's left over still runs through the normal Vest-armor-roll"
+// ordering, and tickShieldRecharge (bottom of this section) for the once-per-tick recharge pass.
+//
+// citizens.js fields this reads/writes -- NOT added here, this session's siege.js scope doesn't
+// include citizens.js (see this task's own scope note); described so whoever owns citizens.js can
+// add them as one-line additions mirroring the existing hasVest/tendClaimedBy fields exactly:
+//   - `this.hasShield = new Uint8Array(capacity);` in the constructor, right next to
+//     `this.hasVest = new Uint8Array(capacity);` -- purchased flag, identical shape to hasVest.
+//   - `this.shieldEnergy = new Float32Array(capacity);` in the constructor -- currently-available
+//     absorb capacity, in the SAME damage-scale units as citizens.health (0..CITIZEN_SHIELD_CAPACITY,
+//     not a 0-1 fraction), so tickAttackerVsCitizens can subtract straight out of it like a second
+//     health pool.
+//   - `this.shieldBrokenTicks = new Uint16Array(capacity);` in the constructor -- ticks remaining
+//     in the post-break "reset" lockout, see CITIZEN_SHIELD_BROKEN_LOCKOUT_TICKS below.
+//   - In spawn(), next to the existing `this.hasVest[i] = 0;` line: add `this.hasShield[i] = 0;`,
+//     `this.shieldEnergy[i] = 0;`, and `this.shieldBrokenTicks[i] = 0;` -- purely for the same
+//     explicit-defaults readability hasVest's own spawn-reset already follows (Uint8Array/
+//     Float32Array/Uint16Array all zero-init on construction regardless, so this is belt-and-braces
+//     documentation, not load-bearing).
+//   - `isShieldedAt(i) { return this.hasShield[i] === 1; }` method, mirroring isVestedAt exactly,
+//     for main.js's inspector panel to gate its Buy Shield button the same way it already gates
+//     Buy Vest via isVestedAt.
+//
+// Bounded/expensive by design (per the task brief): CITIZEN_SHIELD_CAPACITY is deliberately small
+// in absolute terms -- at ATTACKER_CITIZEN_DAMAGE(0.008) against an unarchetyped Grunt, 0.05 of
+// pool absorbs ~6 contact hits before breaking, fewer against any higher-damageMult archetype
+// (Brute/Boss) -- a real emergency buffer, not a second health bar. The purchase price itself
+// (economy.js's BUILD_COST table, NOT this file's scope) should sit above SPECIALIST_WEAPON_COST
+// (security.js, 60 scrap -- currently the single most expensive per-citizen item in the game) to
+// keep "guaranteed damage negation" priced as the top-tier purchase it is; see the UI-hook note
+// below for exactly where that gets wired in.
+export const CITIZEN_SHIELD_CAPACITY = 0.05;
+// Real EnergyShield "reset" delay (the shield goes fully offline, not just empty, for a beat after
+// breaking) -- kept in the same ~100-tick neighborhood as this file's own SUPPRESSION_DECAY_PER_TICK
+// full-recovery pacing (~100 ticks = ~10s at 10Hz) rather than a fresh arbitrary number, so a
+// broken shield's "you're exposed for a real stretch" reads on the same time-scale this file
+// already established for "a defensive stat recovering from a bad moment."
+export const CITIZEN_SHIELD_BROKEN_LOCKOUT_TICKS = 100;
+// Full recharge from empty (once the lockout above clears) takes 500 ticks (~50s at 10Hz) --
+// deliberately much slower than GUARD_COOLDOWN(4)/SNIPER_COOLDOWN(10), so a citizen who breaks
+// their shield mid-fight is genuinely relying on Vest/health for the rest of that engagement, not
+// casually topping back up between shots. "Slowly", per the task brief, not "eventually".
+export const CITIZEN_SHIELD_RECHARGE_PER_TICK = CITIZEN_SHIELD_CAPACITY / 500;
+
+// Called once per world tick (world.js) -- NOT added here, see this section's header comment for
+// the citizens.js field additions this depends on. Exact call site: alongside the existing
+// `tickSuppression(this.structures, this.attackers, this.citizens);` line in world.js's tick()
+// (siege.js's own tickSuppression doc comment describes that exact call site already), add
+// `tickShieldRecharge(this.citizens);` immediately after it -- same "decay/recharge this tick's
+// defensive stats before combat resolution runs" grouping tickSuppression already establishes,
+// and BEFORE tickAttackerVsCitizens further down that same tick() method so a citizen who's about
+// to take a fresh hit this tick recharges off of last tick's post-hit energy first, not this
+// tick's, mirroring tickSuppression's own documented decay-then-gain ordering.
+export function tickShieldRecharge(citizens) {
+  for (let c = 0; c < citizens.count; c++) {
+    if (!citizens.hasShield?.[c]) continue;
+    // Post-break "reset" lockout (see CITIZEN_SHIELD_BROKEN_LOCKOUT_TICKS above): a freshly-broken
+    // shield doesn't recharge AT ALL until this counts down to 0, real EnergyShield behavior, not
+    // just "recharges from empty like normal".
+    if (citizens.shieldBrokenTicks[c] > 0) { citizens.shieldBrokenTicks[c]--; continue; }
+    if (citizens.shieldEnergy[c] < CITIZEN_SHIELD_CAPACITY) {
+      citizens.shieldEnergy[c] = Math.min(CITIZEN_SHIELD_CAPACITY, citizens.shieldEnergy[c] + CITIZEN_SHIELD_RECHARGE_PER_TICK);
+    }
+  }
+}
+
+// ---------------------------------------------------------------- per-attacker gear roll
+// Real RimWorld anchor (PawnKindDef.weaponMoney/apparelMoney + a weapon-tag whitelist): every
+// individual raider of a given PawnKindDef rolls its OWN gear from a per-kind money range, not a
+// single fixed loadout -- a Scavenger's weaponMoney is 200-300 ([Gun] tag), a Drifter's is 60-200
+// (melee-only), so two Scavengers in the same raid can hit noticeably differently, and a poorer
+// raider can show up under-armed in a way a richer one never does. ATTACKER_ARCHETYPES above only
+// ever decided WHICH archetype spawns -- every Grunt was byte-for-byte identical to every other
+// Grunt. This section is the missing individual-variance layer, applied ON TOP of (not instead of)
+// the existing archetype pick: a per-attacker GearTier roll (see WaveSpawner.spawnOneWave/
+// spawnTunnelWave below, the only two call sites of AttackerStore.spawn) that nudges health/
+// damage/armor-rating within a small BOUNDED band around the archetype's own baseline stats.
+//
+// Deliberately three legible tiers, not a continuous roll -- same "legible over literal"
+// precedent as this file's own DamageType/ArmorRating tables (see the DamageType doc comment far
+// above): a player squinting at the inspector should be able to read "this one's got Good gear"
+// the same way they already read "this one's a Brute", not decode an arbitrary float.
+export const GearTier = Object.freeze({ Poor: 0, Standard: 1, Good: 2 });
+export const GEAR_TIER_NAMES = Object.freeze(['Poor', 'Standard', 'Good']); // indexed by GearTier
+
+// Bounded swing, per the task brief's own "+/-15-25%" instruction -- 18% splits the difference.
+// Symmetric around 1.0 (Poor sits exactly as far below baseline as Good sits above it) so the
+// ONLY thing that can bias the average roll high or low is rollKind's own weighting below, not a
+// lopsided table baked in here.
+const GEAR_STAT_SWING = 0.18; // +/-18% on health and damage
+// Armor rating shares the same 0-100 scale ARMOR_RATING above already uses; +/-6 is deliberately
+// small next to the spread archetypes already carry on that scale (Brute's 70 Kinetic vs
+// Skirmisher's 5) -- a flat, modest nudge, not a second rock-paper-scissors axis of its own.
+const GEAR_ARMOR_RATING_SWING = 6;
+export const GEAR_TIER_ADJUST = Object.freeze({
+  [GearTier.Poor]:     Object.freeze({ healthMult: 1 - GEAR_STAT_SWING, damageMult: 1 - GEAR_STAT_SWING, armorRatingDelta: -GEAR_ARMOR_RATING_SWING }),
+  [GearTier.Standard]: Object.freeze({ healthMult: 1,                  damageMult: 1,                  armorRatingDelta: 0 }),
+  [GearTier.Good]:     Object.freeze({ healthMult: 1 + GEAR_STAT_SWING, damageMult: 1 + GEAR_STAT_SWING, armorRatingDelta: GEAR_ARMOR_RATING_SWING }),
+});
+
+export function gearAdjustFor(gearTier) {
+  return GEAR_TIER_ADJUST[gearTier] || GEAR_TIER_ADJUST[GearTier.Standard];
+}
+
+// Weight-curve inputs are denominated in the SAME points-budget units wavePoints() already uses
+// (Grunt-equivalents * costOf(Grunt)) -- the low/high reference points below reuse waveCount()'s
+// own documented floor("2") and ramp-cap("40", i.e. "2 + 40") terms rather than a second,
+// independently invented pair of numbers, so gear progression rides the exact curve difficulty
+// already does instead of drifting out of step with it as that curve gets retuned later.
+const GEAR_PROGRESS_FLOOR_POINTS = 2 * costOf(AttackerKind.Grunt);   // wavePoints() floor term
+const GEAR_PROGRESS_CEIL_POINTS = 42 * costOf(AttackerKind.Grunt);   // wavePoints() capped ramp (2 + 40)
+
+function gearProgress(wavePointsBudget) {
+  const span = GEAR_PROGRESS_CEIL_POINTS - GEAR_PROGRESS_FLOOR_POINTS;
+  const t = (wavePointsBudget - GEAR_PROGRESS_FLOOR_POINTS) / span;
+  return Math.max(0, Math.min(1, t));
+}
+
+// Poor/Good weights are mirror images of each other across the whole progress range (0.35<->0.15
+// at one end, 0.15<->0.35 at the other) and Standard is held flat at 0.5 throughout -- Standard is
+// always the single most likely roll, at every wave, on top of every archetype. This is what makes
+// the roll genuinely "zero-mean-ish": at progress=0 (cheap/early waves) the weighted-average
+// multiplier is 1 - 0.20*GEAR_STAT_SWING (a little BELOW baseline -- early waves skew a touch
+// easier); at progress=1 (expensive/late waves) it's 1 + 0.20*GEAR_STAT_SWING (a little ABOVE
+// baseline -- late waves skew a touch harder); those two deviations are equal and opposite, so
+// integrated across a full playthrough (wave 1 through the late-game plateau) the NET average
+// multiplier a colony faces over the whole game is 1.0 -- no systematic up- or down-shift of
+// average difficulty, only added per-wave/per-attacker texture. That per-wave average deviation
+// (at most ~0.20*18% = 3.6%) is also far smaller than the +/-18% any individual attacker can
+// personally roll, which is the point: bounded individual variance, not a wave-level difficulty
+// retune smuggled in under a different name.
+const GEAR_POOR_WEIGHT_EARLY = 0.35, GEAR_POOR_WEIGHT_LATE = 0.15;
+const GEAR_GOOD_WEIGHT_EARLY = 0.15, GEAR_GOOD_WEIGHT_LATE = 0.35;
+
+export function gearTierWeights(wavePointsBudget) {
+  const t = gearProgress(wavePointsBudget);
+  const poor = GEAR_POOR_WEIGHT_EARLY + (GEAR_POOR_WEIGHT_LATE - GEAR_POOR_WEIGHT_EARLY) * t;
+  const good = GEAR_GOOD_WEIGHT_EARLY + (GEAR_GOOD_WEIGHT_LATE - GEAR_GOOD_WEIGHT_EARLY) * t;
+  const standard = 1 - poor - good; // always 0.5 by construction -- derived, not duplicated
+  return { poor, standard, good };
+}
+
+// Called once per spawned attacker (WaveSpawner.spawnOneWave/spawnTunnelWave below), NOT once per
+// wave -- every attacker in a wave rolls its own gear independently, same as real RimWorld raiders
+// in the same raid each rolling their own weaponMoney off their PawnKindDef.
+export function rollGearTier(rng, wavePointsBudget) {
+  const { poor, standard } = gearTierWeights(wavePointsBudget);
+  const r = rng();
+  if (r < poor) return GearTier.Poor;
+  if (r < poor + standard) return GearTier.Standard;
+  return GearTier.Good;
+}
+
 export class AttackerStore {
   constructor(capacity) {
     this.capacity = capacity;
@@ -212,23 +425,42 @@ export class AttackerStore {
     this.health = new Float32Array(capacity);
     this.alive = new Uint8Array(capacity);
     this.kind = new Uint8Array(capacity); // AttackerKind enum, same SoA style as the rest
+    // Per-attacker gear roll (see the "per-attacker gear roll" section above) -- GearTier enum,
+    // 0/Poor default on raw allocation, but spawn() below always explicitly sets this on every
+    // path (fresh slot + recycled slot), so no live attacker is ever read before spawn() has set
+    // its real rolled tier.
+    this.gearTier = new Uint8Array(capacity);
     // Non-lethal takedown (security.js's WeaponTier.StunBaton, see applyStun/tickAttackers/
     // tickAttackerVsCitizens below): ticks remaining incapacitated. 0 = not stunned, the default
     // for every existing spawn call site (tests/console pokes) -- byte-for-byte the old
     // behavior for anyone who never gets stunned.
     this.stunTicksRemaining = new Uint16Array(capacity);
+    // Saboteur-only (AttackerKind.Saboteur's empAttack flag, see tickAttackers' EMP-attack block):
+    // per-attacker cooldown on its own EMP pulse, same shape as citizens.js's staff `_staffCooldown`
+    // field -- ticks remaining before it may attempt another disable roll. 0 for every non-Saboteur
+    // spawn (the default for every existing spawn call site), so this is a no-op field for the rest
+    // of the roster, same "byte-for-byte old behavior unless you're the new kind" guarantee
+    // stunTicksRemaining already gives non-stunned attackers.
+    this.empCooldown = new Uint16Array(capacity);
   }
 
   // `health` is the wave-scaled base health; the archetype's own healthMult is applied here so
   // callers (WaveSpawner, tests, console pokes) never have to remember to do it themselves.
-  spawn(x, y, health = 1, kind = AttackerKind.Grunt) {
-    const hp = health * archetypeOf(kind).healthMult;
+  // `gearTier` (GearTier enum, see the "per-attacker gear roll" section above this class):
+  // defaults to GearTier.Standard -- byte-for-byte the old always-baseline-stats behavior for
+  // every pre-existing call site (tests, console pokes) that doesn't pass one. WaveSpawner's own
+  // spawn call sites below always pass a freshly rolled tier.
+  spawn(x, y, health = 1, kind = AttackerKind.Grunt, gearTier = GearTier.Standard) {
+    const gearAdj = gearAdjustFor(gearTier);
+    const hp = health * archetypeOf(kind).healthMult * gearAdj.healthMult;
     if (this.count >= this.capacity) {
       // recycle a dead slot rather than growing, matches the fixed-capacity C# store
       for (let i = 0; i < this.count; i++) {
         if (!this.alive[i]) {
           this.x[i] = x; this.y[i] = y; this.health[i] = hp; this.alive[i] = 1; this.kind[i] = kind;
+          this.gearTier[i] = gearTier;
           this.stunTicksRemaining[i] = 0; // a recycled dead slot must not inherit a stale stun
+          this.empCooldown[i] = 0; // ...or a stale EMP-attack cooldown, same reasoning
           return i;
         }
       }
@@ -236,7 +468,9 @@ export class AttackerStore {
     }
     const i = this.count++;
     this.x[i] = x; this.y[i] = y; this.health[i] = hp; this.alive[i] = 1; this.kind[i] = kind;
+    this.gearTier[i] = gearTier;
     this.stunTicksRemaining[i] = 0;
+    this.empCooldown[i] = 0;
     return i;
   }
 
@@ -251,6 +485,17 @@ export class AttackerStore {
   archetypeAt(i) {
     return archetypeOf(this.kind[i]);
   }
+
+  // Rolled gear adjustment for this attacker (see GEAR_TIER_ADJUST above) -- the per-attacker
+  // counterpart to archetypeAt, read by damageAttacker (armor-rating delta) and by
+  // tickAttackers/tickAttackerVsCitizens (damage-dealt multiplier) below.
+  gearAdjustAt(i) {
+    return gearAdjustFor(this.gearTier[i]);
+  }
+
+  gearTierNameAt(i) {
+    return GEAR_TIER_NAMES[this.gearTier[i]] || GEAR_TIER_NAMES[GearTier.Standard];
+  }
 }
 
 // Single choke point for applying a non-lethal incapacitation (security.js's WeaponTier.StunBaton
@@ -261,6 +506,20 @@ export class AttackerStore {
 export function applyStun(attackers, i, ticks) {
   if (!attackers.isAliveAt(i)) return;
   attackers.stunTicksRemaining[i] = Math.max(attackers.stunTicksRemaining[i], ticks);
+}
+
+// Structure-side mirror of applyStun immediately above -- same shape, deliberately: max() of any
+// existing stun rather than stacking (a second EMP pulse on an already-stunned turret refreshes
+// the duration instead of compounding into a longer-and-longer lockout), ticks counted down
+// elsewhere (tickTurrets below, the one place in this file that already visits every structure
+// once per world tick) rather than a second parallel decrement pass. `s.empStunTicksRemaining`
+// defaults to 0 in the Structure constructor, so this is a no-op field for every structure an EMP
+// attack never touches -- same "byte-for-byte unless you're the new thing" guarantee
+// stunTicksRemaining gives non-stunned attackers. Guarded on `!s.destroyed` -- no point disabling
+// rubble.
+export function applyEmpStun(s, ticks) {
+  if (!s || s.destroyed) return;
+  s.empStunTicksRemaining = Math.max(s.empStunTicksRemaining || 0, ticks);
 }
 
 // Weather-scaled hit roll (RimWorld WeatherDefs/Weathers.xml accuracy modifiers, see weather.js's
@@ -281,10 +540,14 @@ export function rollsHit(rng, accuracyMult = 1) {
 // `rng` defaults to Math.random so every existing call site (tests, console pokes, security.js's
 // dog bites) keeps working without threading a seeded rng through, but real gameplay call sites
 // below pass the world's own seeded `this.rng` for determinism/replay/save-load consistency.
-// Returns true if this hit killed.
+// Threads this specific attacker's rolled gear tier (see AttackerStore.gearAdjustAt / the
+// "per-attacker gear roll" section above) into resolveArmorRoll's armorRatingDelta -- a Poor-geared
+// attacker is a little easier to land a full/half hit on, a Good-geared one a little harder,
+// exactly the same bounded nudge whichever damage source (turret/trap/staff/self-destruct) called
+// in here. Returns true if this hit killed.
 export function damageAttacker(attackers, i, amount, damageType = DamageType.Kinetic, penetration = 0, rng = Math.random) {
   if (!attackers.isAliveAt(i)) return false;
-  const { dealt } = resolveArmorRoll(attackers.kind[i], damageType, amount, penetration, rng);
+  const { dealt } = resolveArmorRoll(attackers.kind[i], damageType, amount, penetration, rng, attackers.gearAdjustAt(i).armorRatingDelta);
   attackers.health[i] -= dealt;
   if (attackers.health[i] <= 0) {
     attackers.alive[i] = 0;
@@ -337,6 +600,16 @@ export class Structure {
     // itself already follows (a reload resumes as if the defender had a clean moment, not mid-burst).
     this.suppression = 0;
     this.outOfAmmo = false;
+    // EMP disable (AttackerKind.Saboteur's empAttack, see applyEmpStun/tickTurrets below): ticks
+    // remaining before this structure can target/fire/act as a power source again. Same shape as
+    // AttackerStore.stunTicksRemaining above -- 0 (the default for every structure ever built,
+    // including saves from before this feature existed via deserialize's Object.assign leaving an
+    // absent field at its class-default) means "not EMP-stunned", byte-for-byte old behavior for
+    // every structure an EMP pulse never reaches. Meaningful only for turret-family/mortar
+    // (tickTurrets, siege.js) and generator-kind structures (isSource, power.js) -- harmless dead
+    // weight on every other kind, same convention `cooldown`/`suppression` already follow. Not
+    // persisted in world.js's serialize() -- transient combat state, same convention as `cooldown`.
+    this.empStunTicksRemaining = 0;
     // 'workshop' staffing (see jobs.js's Processing job, mirrors vehicles.js's Vehicle.driverId):
     // citizen id currently working this station, or null if unstaffed. Unused by other kinds.
     this.workerId = null;
@@ -386,6 +659,18 @@ const SKIRMISHER_RATE = 0.35;
 const BOSS_MIN_WAVE = 8;
 const BOSS_WAVE_GAP = 5;   // minimum waves between two Bosses
 const BOSS_CHANCE = 0.05;  // per-attacker roll, only once the two gates above pass
+
+// Saboteur gate (AttackerKind.Saboteur, see its own doc comment on ATTACKER_ARCHETYPES) --
+// deliberately its OWN, more conservative gate rather than reusing BOSS_MIN_WAVE/BRUTE_RATE's
+// numbers, and NOT soak-tested alongside the table above (see that comment): SABOTEUR_MIN_WAVE(5)
+// sits between Brute's(3) and Boss's(8) unlock waves -- late enough that a colony has had a real
+// chance to build at least one turret/generator worth disabling, early enough that the threat
+// isn't purely end-game. SABOTEUR_RATE(0.12) is deliberately the smallest of the three non-Grunt
+// weights (below Brute's 0.15 and well below Skirmisher's 0.35) -- an opt-in UTILITY threat, not a
+// headcount filler, so it should show up in a wave far less often than the roster's actual damage
+// dealers.
+const SABOTEUR_MIN_WAVE = 5;
+const SABOTEUR_RATE = 0.12;
 
 const TUNNEL_MIN_WAVE = 4;          // no burrowing before the colony has had a chance to build anything
 const TUNNEL_BASE_CHANCE = 0.08;
@@ -449,12 +734,15 @@ export class WaveSpawner {
       return AttackerKind.Boss;
     }
 
-    const candidates = [[AttackerKind.Grunt, 1 - BRUTE_RATE - SKIRMISHER_RATE]];
+    const candidates = [[AttackerKind.Grunt, 1 - BRUTE_RATE - SKIRMISHER_RATE - SABOTEUR_RATE]];
     if (this.waveNumber >= 2 && remainingBudget >= costOf(AttackerKind.Skirmisher)) {
       candidates.push([AttackerKind.Skirmisher, SKIRMISHER_RATE]);
     }
     if (this.waveNumber >= 3 && remainingBudget >= costOf(AttackerKind.Brute)) {
       candidates.push([AttackerKind.Brute, BRUTE_RATE]);
+    }
+    if (this.waveNumber >= SABOTEUR_MIN_WAVE && remainingBudget >= costOf(AttackerKind.Saboteur)) {
+      candidates.push([AttackerKind.Saboteur, SABOTEUR_RATE]);
     }
     const totalWeight = candidates.reduce((sum, [, w]) => sum + w, 0);
     let r = rng() * totalWeight;
@@ -495,7 +783,8 @@ export class WaveSpawner {
   spawnOneWave(currentTick, attackers, rng) {
     this.waveNumber++;
     this.lastArrival = ArrivalMethod.Edge;
-    const kinds = this.fillWaveBudget(rng, this.wavePoints());
+    const points = this.wavePoints();
+    const kinds = this.fillWaveBudget(rng, points);
     const baseHealth = this.waveBaseHealth();
     for (const kind of kinds) {
       const edge = Math.floor(rng() * 4);
@@ -504,7 +793,12 @@ export class WaveSpawner {
       else if (edge === 1) { x = this.grid.width - 1; y = rng() * this.grid.height; }
       else if (edge === 2) { x = rng() * this.grid.width; y = 0; }
       else { x = rng() * this.grid.width; y = this.grid.height - 1; }
-      attackers.spawn(x, y, baseHealth, kind);
+      // Per-attacker gear roll (see the "per-attacker gear roll" section above, and
+      // rollGearTier's own doc comment): scaled to THIS wave's own points budget, not a global
+      // constant -- an early cheap wave rolls gear skewed Poor, a late expensive wave rolls it
+      // skewed Good, one independent roll per attacker.
+      const gearTier = rollGearTier(rng, points);
+      attackers.spawn(x, y, baseHealth, kind, gearTier);
     }
   }
 
@@ -543,7 +837,10 @@ export class WaveSpawner {
       const r = rng() * TUNNEL_CLUSTER_RADIUS;
       const x = Math.max(0, Math.min(this.grid.width - 1, mouth.x + Math.cos(ang) * r));
       const y = Math.max(0, Math.min(this.grid.height - 1, mouth.y + Math.sin(ang) * r));
-      attackers.spawn(x, y, baseHealth, kind);
+      // Per-attacker gear roll, scaled to THIS tunnel wave's own (already-discounted) points
+      // budget -- see spawnOneWave's identical comment above.
+      const gearTier = rollGearTier(rng, points);
+      attackers.spawn(x, y, baseHealth, kind, gearTier);
     }
   }
 
@@ -845,6 +1142,59 @@ function isTurretFamilyKind(kind) {
   return TURRET_TIERS[kind] != null || kind === 'mortar';
 }
 
+// ---------------------------------------------------------------- EMP attack (Saboteur)
+// AttackerKind.Saboteur's empAttack (see ATTACKER_ARCHETYPES' doc comment) -- a genuinely new
+// attacker-vs-structure interaction, distinct from every existing one in this file (fence
+// chipping, trap triggering, contact damage vs citizens, the turret self-destruct explosion
+// above): a live Saboteur that gets within EMP_ATTACK_RANGE of an eligible turret/generator/mortar
+// periodically rolls to disable it via applyEmpStun, on its own per-attacker cooldown
+// (AttackerStore.empCooldown) so one Saboteur standing next to a turret can't keep it perma-
+// stunned by re-rolling every single tick.
+//
+// Target scope is deliberately the task brief's literal list -- turret family (reuses
+// isTurretFamilyKind above: every TURRET_TIERS entry + mortar) and generator-kind structures (the
+// same `kind === 'generator' || kind.startsWith('generator_')` test power.js's own isSource uses,
+// duplicated here rather than imported since power.js doesn't export a standalone kind-predicate
+// for it) -- NOT tesla, matching isTurretFamilyKind's own precedent of excluding it (see the
+// TURRET_SELFDESTRUCT_CHANCE doc comment above: "NOT tesla -- SEA:R's own thing, no real-RimWorld
+// anchor").
+function isEmpTargetKind(kind) {
+  return isTurretFamilyKind(kind) || kind === 'generator' || kind.startsWith('generator_');
+}
+
+function nearestEmpTarget(structures, x, y, range) {
+  let best = null, bestDist = range;
+  for (const s of structures) {
+    if (s.destroyed || s.underConstruction) continue;
+    if (!isEmpTargetKind(s.kind)) continue;
+    const d = Math.hypot(s.x - x, s.y - y);
+    if (d < bestDist) { bestDist = d; best = s; }
+  }
+  return best;
+}
+
+// EMP_ATTACK_RANGE: shorter than every turret tier's own range (TURRET_TIERS' shortest is
+// turret_mini's 5) and GUARD_RANGE(3.5) -- a Saboteur has to walk INTO a defended kill-box to use
+// its pulse, real risk for real utility, not a safe long-range snipe.
+// EMP_ATTACK_COOLDOWN_TICKS: the rate-limiter that keeps one surviving Saboteur from permanently
+// pinning a single turret down -- 60 ticks (6s at 10Hz) between pulse attempts, several times
+// longer than EMP_STUN_DURATION_TICKS below so there's a real window where the turret is back up
+// before the next roll even happens, let alone lands.
+// EMP_STUN_CHANCE: 0.7 -- deliberately higher than StunBaton's 0.4 (security.js) since RimWorld's
+// real EMP grenades are a reliable, not a lucky, counter to mechanical targets (the fictional
+// framing being ported here) -- but still not guaranteed, so a lone Saboteur isn't a free turret
+// kill switch.
+// EMP_STUN_DURATION_TICKS: anchored near (not far past) security.js's StunBaton
+// stunDurationTicks(30) per the task brief -- 35 ticks, i.e. the same "brief incapacitation, not a
+// lockdown" neighborhood, just slightly longer to reflect a turret's targeting computer needing a
+// beat longer to reboot than a stunned person needs to shake off a baton hit. BOUNDED: this is a
+// flat constant, never scales with wave number/strengthFactor/anything else, so it can't creep
+// into an effectively-permanent disable as waves escalate.
+export const EMP_ATTACK_RANGE = 3.2;
+export const EMP_ATTACK_COOLDOWN_TICKS = 60;
+export const EMP_STUN_CHANCE = 0.7;
+export const EMP_STUN_DURATION_TICKS = 35;
+
 // Called once, right when a turret/mortar structure transitions destroyed=false -> true, from
 // every site in this file capable of doing that -- currently only tickNuclearHazard's generic
 // structure-damage loop below (turrets/mortars have no other in-file destruction path today: this
@@ -968,10 +1318,15 @@ export function tickAttackers(attackers, structures, grid, centerX, centerY, cit
     if (attackers.stunTicksRemaining[i] > 0) { attackers.stunTicksRemaining[i]--; continue; }
 
     const arch = attackers.archetypeAt(i);
+    // Per-attacker gear roll (see AttackerStore.gearAdjustAt / the "per-attacker gear roll"
+    // section above) stacks multiplicatively on top of the archetype's own damageMult everywhere
+    // this attacker deals damage -- fence-chipping just below, and contact damage vs citizens in
+    // tickAttackerVsCitizens further down.
+    const gearAdj = attackers.gearAdjustAt(i);
 
     const blocker = findBlockingFence(structures, attackers.x[i], attackers.y[i]);
     if (blocker) {
-      blocker.health -= FENCE_DAMAGE_PER_TICK * arch.damageMult; // a Brute tears through fencing
+      blocker.health -= FENCE_DAMAGE_PER_TICK * arch.damageMult * gearAdj.damageMult; // a Brute tears through fencing
       if (blocker.health <= 0) blocker.destroyed = true;
       continue;
     }
@@ -988,6 +1343,25 @@ export function tickAttackers(attackers, structures, grid, centerX, centerY, cit
       const speed = ATTACKER_SPEED * arch.speedMult * (inFloodlight ? FLOODLIGHT_SLOW_MULT : 1) * weatherSpeedMult;
       attackers.x[i] += (dx / dist) * speed;
       attackers.y[i] += (dy / dist) * speed;
+    }
+
+    // EMP attack (AttackerKind.Saboteur only, see the empAttack doc comment on ATTACKER_ARCHETYPES
+    // and the EMP_ATTACK_*/isEmpTargetKind section above) -- a Saboteur still hunts/damages
+    // citizens like every other archetype (the movement/contact logic above and
+    // tickAttackerVsCitizens below are untouched), this is purely additive: while in range of an
+    // eligible turret/generator/mortar and off its own per-attacker cooldown, it also rolls to
+    // disable that structure. Gated behind `arch.empAttack` so this whole block is a true no-op
+    // for every other archetype -- opt-in per the task brief, not a universal passive effect.
+    if (arch.empAttack) {
+      if (attackers.empCooldown[i] > 0) {
+        attackers.empCooldown[i]--;
+      } else {
+        const target = nearestEmpTarget(structures, attackers.x[i], attackers.y[i], EMP_ATTACK_RANGE);
+        if (target) {
+          attackers.empCooldown[i] = EMP_ATTACK_COOLDOWN_TICKS; // cooldown starts on attempt, hit or miss
+          if (rng() < EMP_STUN_CHANCE) applyEmpStun(target, EMP_STUN_DURATION_TICKS);
+        }
+      }
     }
 
     for (const t of structures) {
@@ -1039,6 +1413,17 @@ function findBlockingFence(structures, x, y) {
 // consume", so every pre-existing call site (tests, console pokes) keeps its exact old behavior.
 export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng = Math.random, accuracyMult = 1, ammo = Infinity, consumeAmmo = null) {
   for (const s of structures) {
+    // EMP disable countdown (AttackerKind.Saboteur's empAttack, see applyEmpStun above): decremented
+    // here, unconditionally, for EVERY structure -- not just the turret/tesla/mortar kinds this
+    // function otherwise cares about -- because this is the one place in siege.js that already
+    // visits every structure exactly once per world tick (called once per tick from world.js), and
+    // an EMP-stunned generator (power.js's isSource, not handled anywhere else in this file) needs
+    // its own countdown to run down somewhere too rather than inventing a second per-tick pass.
+    // Guarded on `!s.destroyed` purely so a destroyed structure's stale counter doesn't keep
+    // ticking forever for no observable reason; harmless either way since nothing reads it once
+    // s.destroyed is true.
+    if (!s.destroyed && s.empStunTicksRemaining > 0) s.empStunTicksRemaining--;
+
     // Turret tiers (TURRET_TIERS, see the doc comment near TURRET_RANGE above) + tesla + mortar
     // all share this one tick function -- 'turret'/'tesla' behave byte-for-byte as they always
     // did (TURRET_TIERS.turret === the old flat constants), turret_mini/turret_auto/turret_sniper
@@ -1048,6 +1433,11 @@ export function tickTurrets(structures, attackers, onScrap, onFire, onKill, rng 
     const isMortar = s.kind === 'mortar';
     if (!tier && !isTesla && !isMortar) continue;
     if (s.destroyed || s.underConstruction) continue;
+    // EMP-stunned (see the countdown above): skip targeting/firing entirely this tick, same
+    // "frozen, no action" shape as tickAttackers' own stunTicksRemaining check for a stunned
+    // attacker. Deliberately BEFORE the cooldown check/decrement below -- a disabled turret's
+    // reload also pauses, it doesn't keep quietly counting down while it can't fire anyway.
+    if (s.empStunTicksRemaining > 0) continue;
     if (s.cooldown > 0) { s.cooldown--; continue; }
 
     if (isMortar) {
@@ -1178,6 +1568,10 @@ export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math
     // Per-archetype reach: a Boss's contactRange is wide enough that it hits every citizen in a
     // small area each tick (this loop damages everyone in range), which is its cleave attack.
     const arch = attackers.archetypeAt(i);
+    // Per-attacker gear roll (see AttackerStore.gearAdjustAt / the "per-attacker gear roll"
+    // section on ATTACKER_ARCHETYPES's own file) -- stacks on top of arch.damageMult below,
+    // same as it already does for this attacker's fence-chipping damage in tickAttackers above.
+    const gearAdj = attackers.gearAdjustAt(i);
     const reach = arch.contactRange ?? ATTACKER_CONTACT_RANGE;
     for (let c = 0; c < citizens.count; c++) {
       if (!citizens.isAliveAt(c)) continue;
@@ -1205,14 +1599,39 @@ export function tickAttackerVsCitizens(attackers, citizens, onDowned, rng = Math
       // absent, same backward-compatible pattern hasVest?.[c] just below already uses.
       const guardToughMult = roster && idOf ? guardRankCombatMult(roster, idOf(c)).healthMult : 1;
       const healthMult = (citizens.trait[c]?.healthMult ?? 1) * ageBandFor(citizens.age[c]).healthMult * rankHealthMultFor(citizens, c) * augmentHealthMultFor(citizens, c) * guardToughMult;
-      const baseDamage = (ATTACKER_CITIZEN_DAMAGE * arch.damageMult) / healthMult;
+      const baseDamage = (ATTACKER_CITIZEN_DAMAGE * arch.damageMult * gearAdj.damageMult) / healthMult;
       // Vest armor (see the "citizen armor (Vest)" section above) -- citizens.hasVest is a plain
       // Uint8Array duck-typed off the passed-in store, same access pattern as citizens.trait just
       // above, so this stays backward compatible with any older/test CitizenStore that predates
       // the field (hasVest undefined -> `?.[c]` reads undefined -> falsy -> armorRating 0, exactly
       // the old always-full-damage behavior).
+      // Shield (see CITIZEN_SHIELD_* doc comment above the Vest section) -- a separate equipment
+      // layer from Vest, checked FIRST: absorbs damage out of its own energy pool before the Vest
+      // armor roll ever runs, same "before armor" ordering as RimWorld's real EnergyShield. Doesn't
+      // replace Vest -- whatever fraction of baseDamage isn't absorbed here (shield too depleted to
+      // cover the whole hit, or no shield equipped at all) still runs through the normal
+      // Vest-armor-roll/health path below exactly as before this feature existed. `?.` duck-typing
+      // matches hasVest's own backward-compatible access pattern just below -- an older/test
+      // CitizenStore that predates this field reads hasShield as undefined -> falsy -> no-op, this
+      // whole block byte-for-byte skipped.
+      let remainingDamage = baseDamage;
+      if (citizens.hasShield?.[c] && citizens.shieldEnergy[c] > 0) {
+        const absorbed = Math.min(remainingDamage, citizens.shieldEnergy[c]);
+        citizens.shieldEnergy[c] -= absorbed;
+        remainingDamage -= absorbed;
+        if (citizens.shieldEnergy[c] <= 0) {
+          citizens.shieldEnergy[c] = 0;
+          // Real EnergyShield "reset" delay -- see tickShieldRecharge's doc comment for why this
+          // isn't just "starts recharging from 0 immediately".
+          citizens.shieldBrokenTicks[c] = CITIZEN_SHIELD_BROKEN_LOCKOUT_TICKS;
+        }
+      }
+      // Fully absorbed -- a guaranteed block, not a percentage roll like Vest's deflect outcome,
+      // so this skips the armor roll entirely rather than rolling it against a 0 amount.
+      if (remainingDamage <= 0) continue;
+
       const armorRating = citizens.hasVest?.[c] ? CITIZEN_VEST_ARMOR_RATING : 0;
-      const { dealt } = resolveCitizenArmorRoll(armorRating, ATTACKER_CONTACT_PENETRATION, baseDamage, rng);
+      const { dealt } = resolveCitizenArmorRoll(armorRating, ATTACKER_CONTACT_PENETRATION, remainingDamage, rng);
       citizens.health[c] -= dealt;
       if (citizens.health[c] <= 0) {
         citizens.health[c] = 0.05;
@@ -1264,6 +1683,40 @@ export function rangeAccuracyMult(distance, maxRange) {
   return ACCURACY_BAND_MULT.long;
 }
 
+// ---------------------------------------------------------------- weapon warmup/aim-time
+// Real RimWorld anchor: every gun Def carries a `warmupTime` (0.3s for a pistol, up to a few
+// seconds for a bolt-action sniper rifle) -- the delay BEFORE the first shot at a freshly
+// (re)acquired target, distinct from this file's existing GUARD_COOLDOWN/SNIPER_COOLDOWN (the
+// delay AFTER firing before the next shot). Previously a Guard/Sniper fired the instant a target
+// entered range with zero aim-up cost at all. Deliberately small fractions of each role's own
+// cooldown, per the task brief's "keep warmup short" instruction, rather than porting RimWorld's
+// real absolute seconds (which would be disproportionate at this file's existing GUARD_COOLDOWN=4/
+// SNIPER_COOLDOWN=10-tick, 10Hz scale) -- both set to exactly half their own cooldown, so Sniper's
+// warmup is still longer in absolute ticks (5 vs 2) purely because SNIPER_COOLDOWN already is,
+// matching "a scope/optic takes longer to settle than a sidearm's point-and-shoot" without a second
+// independent tuning axis to soak-test.
+const GUARD_WARMUP_TICKS = 2;  // 0.2s at 10Hz -- half of GUARD_COOLDOWN(4)
+const SNIPER_WARMUP_TICKS = 5; // 0.5s at 10Hz -- half of SNIPER_COOLDOWN(10)
+
+// NOT re-triggered while still engaging the same target (per the task brief): only a fresh
+// acquisition -- no target last tick, or a different targetI than last tick (target died/left
+// range and a new one was picked, or this is the very first activation ever) -- resets and starts
+// the countdown; a target that's remained the nearest live attacker tick-over-tick just keeps
+// counting down (or, once it hits 0, fires every cooldown as normal) without ever re-paying the
+// warmup cost mid-engagement, mirroring RimWorld's own "aiming" state which only resets on a
+// target change. citizens._staffWarmupTarget[i] doubles as "was this citizen already aiming at
+// anyone" (-1 = no) and "who" -- see this function's own doc comment / the report for this task
+// for the exact citizens.js field this depends on (not added here, out of this session's scope).
+// Returns true if citizen i should NOT fire this tick (still aiming or just started aiming).
+function staffStillWarmingUp(citizens, i, targetI, warmupTicks) {
+  if (citizens._staffWarmupTarget[i] !== targetI) {
+    citizens._staffWarmupTarget[i] = targetI;
+    citizens._staffWarmup[i] = warmupTicks;
+  }
+  if (citizens._staffWarmup[i] > 0) { citizens._staffWarmup[i]--; return true; }
+  return false;
+}
+
 // ---------------------------------------------------------------- burst fire
 // Real RimWorld multi-shot-per-activation mechanic for higher-tier guns (e.g. the real Assault
 // Rifle's burstShotCount: 3) -- a flat 1-shot-per-activation left Rifle/Heavy Armory issuance a
@@ -1307,7 +1760,13 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKi
     const tier = WEAPON_TIERS[weaponKey] || WEAPON_TIERS.Sidearm;
     // Suppression (see tickSuppression's doc comment above) -- read once, applied to whichever
     // branch below actually takes a shot (lethal or non-lethal).
-    const supMult = suppressionAccuracyMult(citizens.suppression[i] || 0);
+    // Specialist guard-rank suppression resistance (security.js GUARD_RANK_DEFS.suppressionBonus,
+    // guardRankCombatMult -- see security.js's own doc comment pointing at this exact line):
+    // multiplicatively shrinks the suppression value fed into suppressionAccuracyMult, so a
+    // Specialist's own incoming suppression bites less before it's converted into an accuracy
+    // penalty. 0 for Base/Officer keeps this byte-for-byte identical to the pre-rank behavior.
+    const effSuppression = (citizens.suppression[i] || 0) * (1 - guardRankCombatMult(roster, idOf(i)).suppressionBonus);
+    const supMult = suppressionAccuracyMult(effSuppression);
 
     // Stun Baton (security.js WeaponTier.StunBaton): a melee tool already -- the ammo mechanic
     // deliberately doesn't touch it (see AMMO_PER_SHOT_GUARD's doc comment), so this branch is
@@ -1316,13 +1775,25 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKi
     if (tier.nonLethal) {
       const range = (kind === 'Sniper' ? SNIPER_RANGE : GUARD_RANGE) * tier.rangeMult;
       const targetI = nearestAliveAttacker(attackers, citizens.x[i], citizens.y[i], range);
-      if (targetI >= 0) {
-        citizens._staffCooldown[i] = Math.round((kind === 'Sniper' ? SNIPER_COOLDOWN : GUARD_COOLDOWN) * tier.cooldownMult);
-        const dist = Math.hypot(attackers.x[targetI] - citizens.x[i], attackers.y[targetI] - citizens.y[i]);
-        const rMult = rangeAccuracyMult(dist, range);
-        if (rollsHit(rng, accuracyMult * supMult * rMult) && attackers.isAliveAt(targetI) && rng() < tier.stunChance) {
-          applyStun(attackers, targetI, tier.stunDurationTicks);
-        }
+      // No target at all -- forget any in-progress aim so a target reacquired later (even the same
+      // one, after losing/regaining line of range) pays the warmup fresh, same as RimWorld resetting
+      // aim on a broken engagement.
+      if (targetI < 0) { citizens._staffWarmupTarget[i] = -1; continue; }
+      // Weapon warmup (see GUARD_WARMUP_TICKS/SNIPER_WARMUP_TICKS doc comment above): deliberately
+      // NOT scaled by tier.cooldownMult here, unlike the lethal branch below -- this branch only
+      // ever runs for WeaponTier.StunBaton (the sole nonLethal tier), whose cooldownMult(25) is a
+      // unit-conversion hack ("GUARD_COOLDOWN(4) * 25 = 100 ticks = 1 in-game hour", see
+      // WEAPON_TIERS.StunBaton's own doc comment in security.js), not a real "this weapon is slower
+      // to use" multiplier. Applying that same 25x to warmup would turn a 0.2s ready-stance into a
+      // 5-second one, badly violating the task brief's "keep warmup short" instruction for the one
+      // weapon tier that actually reaches this branch.
+      const warmupTicks = kind === 'Sniper' ? SNIPER_WARMUP_TICKS : GUARD_WARMUP_TICKS;
+      if (staffStillWarmingUp(citizens, i, targetI, warmupTicks)) continue;
+      citizens._staffCooldown[i] = Math.round((kind === 'Sniper' ? SNIPER_COOLDOWN : GUARD_COOLDOWN) * tier.cooldownMult);
+      const dist = Math.hypot(attackers.x[targetI] - citizens.x[i], attackers.y[targetI] - citizens.y[i]);
+      const rMult = rangeAccuracyMult(dist, range);
+      if (rollsHit(rng, accuracyMult * supMult * rMult) && attackers.isAliveAt(targetI) && rng() < tier.stunChance) {
+        applyStun(attackers, targetI, tier.stunDurationTicks);
       }
       continue;
     }
@@ -1353,31 +1824,37 @@ export function tickStaffCombat(citizens, roster, idOf, attackers, onScrap, onKi
     const penetration = hasAmmo ? (kind === 'Sniper' ? SNIPER_PENETRATION : GUARD_PENETRATION) + (tier.penetrationBonus || 0) : GUARD_FALLBACK_PENETRATION;
 
     const targetI = nearestAliveAttacker(attackers, citizens.x[i], citizens.y[i], range);
-    if (targetI >= 0) {
-      citizens._staffCooldown[i] = cooldown;
-      // Range-based accuracy falloff (see ACCURACY_BAND_MULT's doc comment above) -- distance is
-      // measured once per activation, not re-measured per burst shot below (the target isn't
-      // moving mid-tick).
-      const dist = Math.hypot(attackers.x[targetI] - citizens.x[i], attackers.y[targetI] - citizens.y[i]);
-      const rMult = rangeAccuracyMult(dist, range);
-      // Burst fire (BURST_SHOTS_BY_WEAPON above): a dry fallback melee swing never bursts (no
-      // ammo left to spend on extra shots, and it's fists/a knife, not a gun) -- Sidearm and any
-      // future tier not listed there also default to the old single-shot behavior.
-      const burstShots = hasAmmo ? (BURST_SHOTS_BY_WEAPON[weaponKey] || 1) : 1;
-      let target = targetI;
-      for (let shot = 0; shot < burstShots; shot++) {
-        if (!attackers.isAliveAt(target)) break; // target's already down -- nothing left for the rest of this burst to hit
-        const landed = rollsHit(rng, accuracyMult * supMult * rMult);
-        // Ammo is spent on pulling the trigger (a real shot was taken), not just on a confirmed
-        // hit -- same "a shot was fired" framing tickTurrets already uses for its own cooldown,
-        // now applied per burst shot. A dry fallback melee swing costs nothing (burstShots is 1).
-        if (hasAmmo) consumeAmmo?.(ammoPerShot);
-        if (landed && damageAttacker(attackers, target, damage, dtype, penetration, rng)) {
-          citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]] * ageBandFor(citizens.age[i]).skillGainMult;
-          onScrap?.(SCRAP_PER_KILL);
-          onKill?.();
-          break; // target's dead -- rest of the burst has nothing left to hit
-        }
+    // No target at all -- forget any in-progress aim, same reasoning as the nonLethal branch above.
+    if (targetI < 0) { citizens._staffWarmupTarget[i] = -1; continue; }
+    // Weapon warmup (see GUARD_WARMUP_TICKS/SNIPER_WARMUP_TICKS doc comment above): scaled by
+    // hasAmmo the same way `cooldown` just above already is -- a dry fallback melee scuffle is a
+    // reflexive close-quarters swing, not a weapon being aimed, so it keeps the un-scaled baseline
+    // warmup rather than a tier multiplier that only means something with a real gun in hand.
+    const warmupTicks = Math.round((kind === 'Sniper' ? SNIPER_WARMUP_TICKS : GUARD_WARMUP_TICKS) * (hasAmmo ? tier.cooldownMult : 1));
+    if (staffStillWarmingUp(citizens, i, targetI, warmupTicks)) continue;
+    citizens._staffCooldown[i] = cooldown;
+    // Range-based accuracy falloff (see ACCURACY_BAND_MULT's doc comment above) -- distance is
+    // measured once per activation, not re-measured per burst shot below (the target isn't
+    // moving mid-tick).
+    const dist = Math.hypot(attackers.x[targetI] - citizens.x[i], attackers.y[targetI] - citizens.y[i]);
+    const rMult = rangeAccuracyMult(dist, range);
+    // Burst fire (BURST_SHOTS_BY_WEAPON above): a dry fallback melee swing never bursts (no
+    // ammo left to spend on extra shots, and it's fists/a knife, not a gun) -- Sidearm and any
+    // future tier not listed there also default to the old single-shot behavior.
+    const burstShots = hasAmmo ? (BURST_SHOTS_BY_WEAPON[weaponKey] || 1) : 1;
+    let target = targetI;
+    for (let shot = 0; shot < burstShots; shot++) {
+      if (!attackers.isAliveAt(target)) break; // target's already down -- nothing left for the rest of this burst to hit
+      const landed = rollsHit(rng, accuracyMult * supMult * rMult);
+      // Ammo is spent on pulling the trigger (a real shot was taken), not just on a confirmed
+      // hit -- same "a shot was fired" framing tickTurrets already uses for its own cooldown,
+      // now applied per burst shot. A dry fallback melee swing costs nothing (burstShots is 1).
+      if (hasAmmo) consumeAmmo?.(ammoPerShot);
+      if (landed && damageAttacker(attackers, target, damage, dtype, penetration, rng)) {
+        citizens.skillCombat[i] += 0.05 * PASSION_GAIN_MULT[citizens.passionCombat[i]] * ageBandFor(citizens.age[i]).skillGainMult;
+        onScrap?.(SCRAP_PER_KILL);
+        onKill?.();
+        break; // target's dead -- rest of the burst has nothing left to hit
       }
     }
   }

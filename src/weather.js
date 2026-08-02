@@ -8,10 +8,10 @@
 // optional-callback pattern as onBuildComplete/onWaveIncoming) so main.js can also surface them
 // as a toast.
 import { roomContaining } from './rooms.js';
-import { HUNGER_DECAY, REST_DECAY, CitizenFlags } from './citizens.js';
+import { HUNGER_DECAY, REST_DECAY, CitizenFlags, addMoodEvent } from './citizens.js';
 import { isFlammable, igniteStructure } from './fire.js';
 import { TRADER_DISCOUNT_PCT, TRADER_VOUCHER_USES, TRADER_WINDOW_TICKS } from './economy.js';
-import { setSolarFlareActive } from './power.js';
+import { setSolarFlareActive, gridLoadFraction, setRollingBlackoutActive } from './power.js';
 import { FREEZE_TIER_TICKS } from './water.js';
 
 // Fog/Snow (real accuracy/move-speed modifiers) and Thunderstorm (Dry/Rainy split) added per
@@ -21,6 +21,12 @@ export const WeatherKind = Object.freeze({
   Clear: 'Clear', Rain: 'Rain', Cold: 'Cold', Heatwave: 'Heatwave',
   Fog: 'Fog', Snow: 'Snow',
   ThunderstormDry: 'ThunderstormDry', ThunderstormRainy: 'ThunderstormRainy',
+  // FoggyRain/Eclipse/Aurora: three more real RimWorld WeatherDefs/GameConditionDefs, same
+  // "port the mechanism, not the flavor" framing as everything else in this header. VolcanicWinter
+  // (also real RimWorld data) is deliberately NOT a WeatherKind entry -- it's a sustained map-wide
+  // CONDITION like ToxicFallout/SolarFlare further down this file, not a short weighted-roll state,
+  // so it lives in that section instead with its own init/tick/isActive triplet.
+  FoggyRain: 'FoggyRain', Eclipse: 'Eclipse', Aurora: 'Aurora',
 });
 
 // Weighted so Clear is the common case -- weather is flavor + a modest modifier, not a constant
@@ -36,6 +42,14 @@ const WEATHER_WEIGHTS = [
   [WeatherKind.Snow, 1],
   [WeatherKind.ThunderstormDry, 0.4],
   [WeatherKind.ThunderstormRainy, 0.5],
+  // FoggyRain: a genuine compound state (real RimWorld def combining Fog+Rain's own conditions),
+  // weighted below plain Fog(1) since it needs both a damp AND a fog-forming stretch at once.
+  [WeatherKind.FoggyRain, 0.6],
+  // Eclipse/Aurora: both real, rare RimWorld sky conditions with no everyday-weather commonality --
+  // weighted well below even ThunderstormDry(0.4), the previous rarest entry, matching the task
+  // brief's "rare, short" (Eclipse) and "rare" (Aurora) framing.
+  [WeatherKind.Eclipse, 0.15],
+  [WeatherKind.Aurora, 0.15],
 ];
 
 // ---------------------------------------------------------------- combat accuracy / move speed
@@ -44,11 +58,22 @@ const WEATHER_WEIGHTS = [
 // (Hard) 0.8, RainyThunderstorm inherits Rain's 0.8/0.8 pair. DryThunderstorm carries no accuracy
 // or move penalty of its own in the real game -- its danger is purely the unquenched lightning
 // fires (see tickThunderstorm below), not a combat debuff.
+// FoggyRain: real RimWorld combined-weather def, accuracy 0.5 (per the task brief -- reads as
+// Fog's own 0.5 dominating the pair, same as RainyThunderstorm below inheriting Rain's number
+// rather than the two penalties multiplying together). Eclipse: reuses this exact same
+// table-driven mechanism Fog's own reduced-visibility entry already uses (per the task brief's
+// "reuse Fog's reduced-visibility effect if reachable"), but at a deliberately MODEST value --
+// 0.7, between Rain(0.8) and Fog(0.5) -- since an eclipse dims the map without the full
+// zero-visibility haze Fog's own 0.5 represents; this specific number has no directly-cited real
+// figure in the task brief and is an inferred, conservative estimate (flagged here the same way
+// DEEP_FREEZE_WALK_SPEED_MULT's own doc comment flags its inferred number above).
 const WEATHER_ACCURACY = Object.freeze({
   [WeatherKind.Rain]: 0.8,
   [WeatherKind.Fog]: 0.5,
   [WeatherKind.Snow]: 0.8,
   [WeatherKind.ThunderstormRainy]: 0.8,
+  [WeatherKind.FoggyRain]: 0.5,
+  [WeatherKind.Eclipse]: 0.7,
 });
 
 /** Map-wide combat-accuracy multiplier for the current weather -- applied symmetrically to
@@ -60,10 +85,16 @@ export function weatherAccuracyMult(weather) {
 
 // Real RimWorld move-speed modifiers for the same weather states (Rain 0.9, Snow(Hard) 0.8,
 // RainyThunderstorm 0.8 same as Rain+Snow stacked-equivalent per the task brief).
+// FoggyRain: move-speed 0.9 per the task brief (matches plain Rain's own 0.9 -- the fog half of
+// the pair doesn't carry an additional move penalty in the real data, same "one dominant number,
+// not multiplied penalties" reading as its accuracy entry above). Eclipse deliberately has NO
+// entry here -- it's a lighting/vision effect only (see WEATHER_ACCURACY above), not a footing
+// hazard, so it falls through to this function's own `?? 1` default same as Clear/Cold/Heatwave.
 const WEATHER_MOVE_SPEED = Object.freeze({
   [WeatherKind.Rain]: 0.9,
   [WeatherKind.Snow]: 0.8,
   [WeatherKind.ThunderstormRainy]: 0.8,
+  [WeatherKind.FoggyRain]: 0.9,
 });
 
 /** Map-wide movement-speed multiplier for the current weather -- used for both citizen wander
@@ -76,12 +107,176 @@ export function weatherMoveSpeedMult(weather) {
 const MIN_WEATHER_TICKS = 600;  // ~1 min at 10Hz
 const MAX_WEATHER_TICKS = 1800; // ~3 min at 10Hz
 
-function rollDuration(rng) {
-  return MIN_WEATHER_TICKS + Math.floor(rng() * (MAX_WEATHER_TICKS - MIN_WEATHER_TICKS));
+// Per-kind duration multiplier, table-driven same shape as WEATHER_ACCURACY/WEATHER_MOVE_SPEED
+// above -- defaults to 1 (the plain MIN/MAX_WEATHER_TICKS range) for every kind not listed. Only
+// Eclipse gets an entry: the task brief calls it out as "short" specifically (real eclipses are a
+// brief event, not a lingering weather stretch the way Fog/Rain/Cold are), so its rolled duration
+// is compressed to well under a third of the normal range rather than sharing it.
+const WEATHER_DURATION_MULT = Object.freeze({
+  [WeatherKind.Eclipse]: 0.3,
+});
+
+function rollDuration(rng, kind) {
+  const mult = WEATHER_DURATION_MULT[kind] ?? 1;
+  const base = MIN_WEATHER_TICKS + Math.floor(rng() * (MAX_WEATHER_TICKS - MIN_WEATHER_TICKS));
+  return Math.max(200, Math.round(base * mult)); // floored so even a short Eclipse still reads as a real interval, not a flicker
 }
 
-function pickWeather(rng, exclude) {
-  const pool = WEATHER_WEIGHTS.filter(([k]) => k !== exclude);
+// ---------------------------------------------------------------- seasons
+// This project previously had NO season/temperature concept at all -- pickWeather was flat
+// weighted-random with no notion of time-of-year. Added here as a real cycle over
+// world.currentTick, same "derive from the tick counter, no new per-tick bookkeeping" shape as
+// schedule.js's DAY_NIGHT_CYCLE_TICKS (a plain modulo, no stored/advanced state of its own).
+//
+// YEAR LENGTH REASONING: SESSION_HANDOFF.md repeatedly anchors a healthy, hands-off game at
+// ~22-36k ticks (its own established regression baseline, re-confirmed across many soak tests
+// throughout that doc). A season system sized to that baseline needs to satisfy two competing
+// pulls: (1) each individual season has to be long enough to host a real number of independent
+// weather rolls -- MIN/MAX_WEATHER_TICKS above average out to ~1200 ticks per weather state, so a
+// season shorter than that would mostly show at most one weather roll before the season itself
+// changes, defeating the point of seasonal *variety* of weather; (2) the FULL year has to be
+// short enough relative to 22-36k that a typical game actually sees every season, ideally more
+// than once, rather than spending its whole lifetime stuck in Spring.
+//
+// SEASON_LENGTH_TICKS=3000 (~5 min real time at 10Hz) comfortably clears pull (1): ~2.5 average
+// weather rolls per season, up to 5 at the shortest MIN_WEATHER_TICKS duration -- a season reads
+// as "a stretch with its own weather character", not a single-roll coin flip. YEAR_LENGTH_TICKS
+// (4 seasons * 3000 = 12000, ~20 min real time) clears pull (2): a 22k-tick game completes ~1.8
+// years (every season at least once, most twice), a 36k-tick game completes ~3 years -- so both
+// ends of the established healthy-game range see real seasonal repetition (Winter isn't a
+// once-per-game novelty), without any single season dominating a whole playthrough the way a
+// literal RimWorld year (60 real days) ported as one game-length year would.
+export const Season = Object.freeze({
+  Spring: 'Spring', Summer: 'Summer', Autumn: 'Autumn', Winter: 'Winter',
+});
+
+export const SEASON_LENGTH_TICKS = 3000;               // ~5 min at 10Hz -- see reasoning above
+export const YEAR_LENGTH_TICKS = SEASON_LENGTH_TICKS * 4; // 12000 ticks, ~20 min at 10Hz
+
+const SEASON_ORDER = [Season.Spring, Season.Summer, Season.Autumn, Season.Winter];
+
+/** The current Season, derived purely from world.currentTick (no stored state, same "just do the
+ *  modulo" shape as schedule.js's day/night cycle) -- games start in Spring at tick 0. */
+export function currentSeason(world) {
+  const t = ((world.currentTick % YEAR_LENGTH_TICKS) + YEAR_LENGTH_TICKS) % YEAR_LENGTH_TICKS;
+  return SEASON_ORDER[Math.floor(t / SEASON_LENGTH_TICKS)];
+}
+
+// Rough numeric temperature proxy only -- per the task brief this doesn't need elaborate
+// modeling (no real thermodynamics anywhere else in this codebase to hook into), just a stepped
+// per-season value on a plain -1 (coldest) to 1 (hottest) scale, for any future UI/system that
+// wants a single number rather than a Season string to key off of. NOT read by any existing
+// weather-triggered system in this file (Cold/Heatwave/Deep Freeze all key off world.weather
+// directly, unchanged) -- this is a new, additive export only.
+const SEASON_TEMPERATURE = Object.freeze({
+  [Season.Spring]: 0.1,
+  [Season.Summer]: 0.9,
+  [Season.Autumn]: -0.1,
+  [Season.Winter]: -0.9,
+});
+
+/** Rough -1..1 numeric temperature proxy for the current season. See SEASON_TEMPERATURE comment
+ *  above -- not an elaborate model, just a per-season constant. */
+export function seasonalTemperature(world) {
+  return SEASON_TEMPERATURE[currentSeason(world)];
+}
+
+// Per-season multiplier applied to WEATHER_WEIGHTS' base weights before a roll (see pickWeather
+// below) -- structural gating (some entries multiplied to exactly 0 and excluded from the pool
+// entirely, not just made rare) for the kinds that shouldn't be able to roll AT ALL in a given
+// season, real weight adjustments for everything else. Every season keeps at least 6 of the 8
+// WeatherKinds eligible (only Snow and one of Cold/Heatwave are ever hard-zeroed in any single
+// season) specifically so pickWeather's existing same-as-last-time `exclude` filter can never run
+// the pool dry -- see that function's own comment.
+//
+// Per-kind reasoning:
+//  - Snow: real snow only in Winter. Zero everywhere else -- this is the one gate the task brief
+//    calls out explicitly as the "Snow only in Winter" structural example.
+//  - Heatwave: zeroed in Winter (a heatwave in winter isn't weather, it'd be a plot hole), sharply
+//    UP in Summer (2.5x -- the season's signature hazard), a rare "unseasonable warm snap" in
+//    Spring/Autumn (0.2x) rather than impossible, since real shoulder-season warm spells do happen.
+//  - Cold: zeroed in Summer (mirrors Heatwave's Winter zero), sharply UP in Winter (2.5x -- Deep
+//    Freeze's whole staged system is meant to actually matter there), a real-but-secondary presence
+//    in Autumn (1x, cooling toward Winter) and a reduced "late cold snap" in Spring (0.5x, warming
+//    out of Winter).
+//  - Rain: up in Spring/Autumn (the wet shoulder seasons, 1.5x each), reduced in Summer (0.7x,
+//    partly displaced by Heatwave/Thunderstorm) and cut hard in Winter (0.3x, partly displaced by
+//    Snow -- winter precipitation should mostly read as snow, not rain).
+//  - Fog: peaks in Autumn (1.6x, real "autumn mist" is the classic case) and stays elevated in
+//    Spring (1.3x, morning mist), reduced in Summer (0.3x, fog needs cool damp air) and moderate in
+//    Winter (0.8x, still real but not the season's signature).
+//  - Thunderstorms (both variants): peak in Summer (real convective storms need summer heat --
+//    1.5x Dry / 1.3x Rainy), present but reduced in Spring/Autumn (the real shoulder-season range),
+//    and cut to a bare-minimum-but-nonzero trickle in Winter (0.1x each -- real winter thunder
+//    happens, it's just rare, so this stays a hard "rare" rather than the "impossible" treatment
+//    Heatwave/Snow's off-seasons get).
+//  - Clear: never zeroed, kept close to its base weight in every season (0.1x range) so it stays
+//    the common baseline case year-round exactly as WEATHER_WEIGHTS' own header comment intends.
+const SEASON_WEATHER_MULT = Object.freeze({
+  [Season.Spring]: Object.freeze({
+    [WeatherKind.Clear]: 1, [WeatherKind.Rain]: 1.5, [WeatherKind.Cold]: 0.5, [WeatherKind.Heatwave]: 0.2,
+    [WeatherKind.Fog]: 1.3, [WeatherKind.Snow]: 0,
+    [WeatherKind.ThunderstormDry]: 0.5, [WeatherKind.ThunderstormRainy]: 1,
+    // FoggyRain tracks its two parent conditions (Fog 1.3x, Rain 1.5x above) -- damp shoulder
+    // season, elevated same as both. Eclipse: flat 1 in every season (see its own note under
+    // Summer below -- a real astronomical event, not a seasonal one). Aurora: modest in Spring,
+    // real aurora visibility rises as nights lengthen toward Winter.
+    [WeatherKind.FoggyRain]: 1.3, [WeatherKind.Eclipse]: 1, [WeatherKind.Aurora]: 0.6,
+  }),
+  [Season.Summer]: Object.freeze({
+    [WeatherKind.Clear]: 1.1, [WeatherKind.Rain]: 0.7, [WeatherKind.Cold]: 0, [WeatherKind.Heatwave]: 2.5,
+    [WeatherKind.Fog]: 0.3, [WeatherKind.Snow]: 0,
+    [WeatherKind.ThunderstormDry]: 1.5, [WeatherKind.ThunderstormRainy]: 1.3,
+    // FoggyRain needs cool damp air same as plain Fog -- cut hard in Summer heat (0.2x, mirrors
+    // Fog's own 0.3x). Eclipse: flat 1 -- a real solar/lunar eclipse's timing is orbital
+    // mechanics, not a function of season, so it deliberately does NOT get the structural
+    // per-season gating every other entry in this table has (this project has no orbital model to
+    // key off of, so "no seasonal bias at all" is the honest equivalent). Aurora: near-silent in
+    // Summer -- real auroras wash out against short, bright summer nights.
+    [WeatherKind.FoggyRain]: 0.2, [WeatherKind.Eclipse]: 1, [WeatherKind.Aurora]: 0.15,
+  }),
+  [Season.Autumn]: Object.freeze({
+    [WeatherKind.Clear]: 1, [WeatherKind.Rain]: 1.5, [WeatherKind.Cold]: 1, [WeatherKind.Heatwave]: 0.2,
+    [WeatherKind.Fog]: 1.6, [WeatherKind.Snow]: 0,
+    [WeatherKind.ThunderstormDry]: 0.4, [WeatherKind.ThunderstormRainy]: 0.8,
+    // FoggyRain peaks here (1.4x) -- Autumn is both Fog's(1.6x) and Rain's(1.5x) own peak season,
+    // so their compound reads as the year's likeliest window for it too. Eclipse: flat 1 (see
+    // Summer note). Aurora: same as Spring, rising toward Winter's own peak below.
+    [WeatherKind.FoggyRain]: 1.4, [WeatherKind.Eclipse]: 1, [WeatherKind.Aurora]: 0.6,
+  }),
+  [Season.Winter]: Object.freeze({
+    [WeatherKind.Clear]: 1, [WeatherKind.Rain]: 0.3, [WeatherKind.Cold]: 2.5, [WeatherKind.Heatwave]: 0,
+    [WeatherKind.Fog]: 0.8, [WeatherKind.Snow]: 3,
+    [WeatherKind.ThunderstormDry]: 0.1, [WeatherKind.ThunderstormRainy]: 0.1,
+    // FoggyRain: reduced same as plain Rain (0.5x, winter precipitation reads mostly as Snow, see
+    // Snow's own header note). Eclipse: flat 1 (see Summer note). Aurora peaks here (1.4x) --
+    // real aurora visibility is genuinely a long-dark-night phenomenon, so Winter is its one true
+    // seasonal driver even though the underlying cause (solar activity) isn't seasonal at all.
+    [WeatherKind.FoggyRain]: 0.5, [WeatherKind.Eclipse]: 1, [WeatherKind.Aurora]: 1.4,
+  }),
+});
+
+/** Applies a season's multiplier table to the base WEATHER_WEIGHTS, dropping any entry the
+ *  season zeroes out entirely (structural gating, not just "very rare") before the exclude
+ *  filter runs. Falls back to the unmodified base weight for any season not found in the table
+ *  (defensive only -- SEASON_WEATHER_MULT above covers all four Season values). */
+function seasonalWeatherPool(season) {
+  const mult = SEASON_WEATHER_MULT[season];
+  return WEATHER_WEIGHTS
+    .map(([k, w]) => [k, mult ? w * (mult[k] ?? 1) : w])
+    .filter(([, w]) => w > 0);
+}
+
+// excludeHeatwave: true while VolcanicWinter (see that hazard's section far below) is active --
+// the task brief calls VolcanicWinter "mutually exclusive with Heatwave" (real RimWorld: a
+// severe-cold map condition and a heat-wave weather state can't sensibly coexist), so it's
+// structurally zeroed out of the pool for the duration, the exact same "filter it out before the
+// roll" shape the `exclude` (no-repeat) and season-gating (SEASON_WEATHER_MULT) filters already
+// use just above -- not a bespoke branch inside the roll loop itself.
+function pickWeather(rng, exclude, season, excludeHeatwave) {
+  const pool = seasonalWeatherPool(season)
+    .filter(([k]) => k !== exclude)
+    .filter(([k]) => !(excludeHeatwave && k === WeatherKind.Heatwave));
   const total = pool.reduce((sum, [, w]) => sum + w, 0);
   let roll = rng() * total;
   for (const [k, w] of pool) {
@@ -250,6 +445,43 @@ export function tickWeatherCitizenEffects(world) {
       const extra = REST_DECAY * (indoors ? HEAT_REST_EXTRA_INDOOR : outdoorFrac);
       store.rest[i] = Math.max(0, store.rest[i] - extra);
     }
+  }
+}
+
+// ---------------------------------------------------------------- Aurora mood boost
+// Real RimWorld: Aurora is the one POSITIVE weather-like entry in the source data (real "Saw
+// beautiful aurora" Thought, +3 mood) -- a genuine counterpart to this file's otherwise
+// almost-entirely-negative roster (Rain/Cold/Heatwave/Fog/Snow/Thunderstorms all debuff
+// something; only the unrelated one-off resourcegift/trader events were previously positive).
+// Ported via citizens.js's own existing addMoodEvent stacking-Thought mechanic (see that file's
+// "RimWorld Thought mechanic, condensed" header) rather than a bespoke mood field write --
+// exactly the same reuse shape tryResourceGiftEvent above already used for Blight's inverse.
+// AURORA_MOOD_MAGNITUDE=0.03 is the real RimWorld number (+3 out of 100), matching this codebase's
+// own established "real points / 100" convention (see programs.js's own room-quality mood table
+// for the same convention already in use). Refreshed every AURORA_MOOD_CHECK_INTERVAL ticks for
+// as long as Aurora weather holds (own 1-deep stack cap in citizens.js's MOOD_EVENT_STACK_LIMITS,
+// see that entry's own comment) so the boost reads as one continuous, bounded ambient effect for
+// the sky's whole duration rather than compounding or lapsing between checks -- addMoodEvent's
+// own linear decay (see citizens.js) then eases it back out naturally once Aurora ends and the
+// refresh stops.
+const AURORA_MOOD_CHECK_INTERVAL = 100; // same ~10s cadence as this file's other periodic checks
+const AURORA_MOOD_MAGNITUDE = 0.03;      // real RimWorld Aurora Thought: +3/100
+const AURORA_MOOD_DURATION_TICKS = 250;  // comfortably outlasts the refresh interval above so the
+                                          // event never fully decays to 0 between refreshes
+
+/** Refreshes a small, bounded, positive mood event on every living citizen for as long as Aurora
+ *  weather is active -- the positive counterpart to Cold/Heatwave's extra need-decay in
+ *  tickWeatherCitizenEffects just above. Call once per tick from tickWeather below. */
+export function tickAuroraMoodBoost(world) {
+  if (world.weather !== WeatherKind.Aurora) return;
+  if (world.currentTick % AURORA_MOOD_CHECK_INTERVAL !== 0) return;
+
+  const store = world.citizens;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i) || store.isDownedAt(i)) continue;
+    addMoodEvent(store, i, world.currentTick, {
+      magnitude: AURORA_MOOD_MAGNITUDE, durationTicks: AURORA_MOOD_DURATION_TICKS, stackKey: 'aurora',
+    });
   }
 }
 
@@ -476,17 +708,19 @@ export function fluRiskMultiplier(world) {
   return 1 + FLU_RISK_TIER_BONUS[coldSeverityTier(world)];
 }
 
-/** Advances the weather timer and, on expiry, rolls a new (different) weather state; then
- *  applies the current weather's per-tick citizen effect (every tick, not just on change --
- *  Cold/Heatwave's extra decay is a continuous effect for as long as that state holds). Call
- *  once per tick from SimWorld.tick(), same pattern as the other periodic systems there. */
+/** Advances the weather timer and, on expiry, rolls a new (different) weather state -- gated by
+ *  the current Season (see currentSeason/SEASON_WEATHER_MULT above, e.g. Snow can only come up
+ *  in Winter, Heatwave is far more likely in Summer) -- then applies the current weather's
+ *  per-tick citizen effect (every tick, not just on change -- Cold/Heatwave's extra decay is a
+ *  continuous effect for as long as that state holds). Call once per tick from SimWorld.tick(),
+ *  same pattern as the other periodic systems there. */
 export function tickWeather(world) {
   if (world._weatherTimer == null) initWeather(world);
   world._weatherTimer--;
   if (world._weatherTimer <= 0) {
-    const next = pickWeather(world.rng, world.weather);
+    const next = pickWeather(world.rng, world.weather, currentSeason(world), isVolcanicWinterActive(world));
     world.weather = next;
-    world._weatherTimer = rollDuration(world.rng);
+    world._weatherTimer = rollDuration(world.rng, next);
     // How long the CURRENT weather state has held -- read by water.js's pipe-freeze tiers and
     // isHeatwaveSlowdownActive above, both of which escalate the longer their trigger weather
     // persists uninterrupted. Reset to 0 right as the state actually changes.
@@ -499,6 +733,9 @@ export function tickWeather(world) {
   world._weatherStreakTicks = (world._weatherStreakTicks || 0) + 1;
 
   tickWeatherCitizenEffects(world);
+  // Aurora mood boost (see that function's header comment) -- own internal weather===Aurora
+  // early-return, cheap to call unconditionally every tick like every other tick* function here.
+  tickAuroraMoodBoost(world);
   // Deep Freeze per-citizen frostbite/death exposure (see that function's header comment) --
   // deliberately NOT gated on `weather === Cold` here, unlike tickWeatherCitizenEffects just
   // above: a sheltered citizen still needs to recover even once Cold weather has since rolled
@@ -958,6 +1195,22 @@ export function tickHazardCondition(world) {
   // unconditionally, before any of the toxic-fallout early-returns below, so it still runs on
   // every tick regardless of that hazard's own active/inactive state.
   tickSolarFlareCondition(world);
+  // Rolling Blackout + Faulty Wiring (real PA calamity_settings.txt, both real-GeneratorLoad-gated
+  // -- see their own header comments below) -- piggybacked here for the exact same reason
+  // SolarFlare is: world.js's tick() already calls tickHazardCondition every tick, and this task's
+  // scope doesn't include adding a new call site there. Both own independent internal gating (an
+  // inactive/below-threshold grid is a cheap no-op) so calling them unconditionally here, before
+  // any of the toxic-fallout branches below, is safe and matches every other tick* function in
+  // this file.
+  tickRollingBlackoutCondition(world);
+  tickFaultyWiring(world);
+  // VolcanicWinter (real RimWorld anchor, see that section's own header comment far below) --
+  // piggybacked here for the exact same reason SolarFlare/RollingBlackout/FaultyWiring already
+  // are: world.js's tick() already calls tickHazardCondition every tick, and this task's scope
+  // doesn't include adding a new call site there. Owns its own internal earliest-tick/refire
+  // gating, so calling it unconditionally is cheap and safe, matching every other tick* function
+  // in this file.
+  tickVolcanicWinterCondition(world);
 
   if (world._hazardActive) {
     world._hazardTicksRemaining--;
@@ -984,6 +1237,118 @@ export function tickHazardCondition(world) {
   world.milestoneLog.push({ tick: world.currentTick, text });
   if (world.milestoneLog.length > 20) world.milestoneLog.shift();
   world.onRandomEvent?.(text);
+}
+
+// ---------------------------------------------------------------- volcanic winter (severe-cold condition)
+// Real RimWorld anchor: VolcanicWinter -- name-checked in the toxic-fallout header comment above
+// as ToxicFallout's own real sibling condition, and ported the exact same way: a sustained,
+// MAP-WIDE condition (own duration range, own long refire gap, own late-game-only grace),
+// structurally identical to tickHazardCondition/tickSolarFlareCondition/
+// tickRollingBlackoutCondition just above and below it (own private fields, own init/isActive/
+// tick triplet, same milestoneLog-push-and-trim + onRandomEvent announcement shape). Two real
+// VolcanicWinter traits distinguish it from those siblings and from the file's own regular
+// WeatherKind roster:
+//  1. Real VolcanicWinter is explicitly a LONGER, RARER condition than ToxicFallout in the source
+//     data (RimWorld's own volcanic winter runs most of a full in-game year), so its timing
+//     constants below are deliberately calibrated as the harsher/longer end of this file's
+//     existing hazard-tuning range rather than reusing HAZARD_* wholesale.
+//  2. Real VolcanicWinter is a severe-COLD condition, and real RimWorld explicitly cannot roll a
+//     Heatwave incident while one is active (a heat wave during a volcanic winter isn't a
+//     plausible roll) -- ported above via pickWeather's own excludeHeatwave parameter (see that
+//     function's comment) rather than a bespoke check duplicated here, and its own severe-cold
+//     effect below is table-driven off the SAME COLD_HUNGER_EXTRA_OUTDOOR/INDOOR constants
+//     tickWeatherCitizenEffects already uses (just scaled up by VOLCANIC_WINTER_COLD_SEVERITY_MULT
+//     below), not a parallel hunger-decay system of its own.
+export const VOLCANIC_WINTER_EARLIEST_TICK = HAZARD_EARLIEST_TICK; // same late-game grace as toxic fallout
+export const VOLCANIC_WINTER_MIN_REFIRE_TICKS = HAZARD_MIN_REFIRE_TICKS * 2; // rarer than toxic
+                                                                               // fallout -- real
+                                                                               // VolcanicWinter is
+                                                                               // rarer even by that
+                                                                               // hazard's own standard
+const VOLCANIC_WINTER_CHECK_INTERVAL = HAZARD_CHECK_INTERVAL; // same roll cadence as toxic fallout
+const VOLCANIC_WINTER_CHANCE = HAZARD_CHANCE * 0.5; // half as likely per check, on top of the
+                                                      // doubled refire gap above -- genuinely rarer
+                                                      // on both axes, not just a longer cooldown
+const VOLCANIC_WINTER_DURATION_MIN = HAZARD_DURATION_MAX;      // 3000 -- starts where toxic
+                                                                 // fallout's own max duration ends
+const VOLCANIC_WINTER_DURATION_MAX = HAZARD_DURATION_MAX * 2;  // 6000 -- the single longest
+                                                                 // condition in this file, matching
+                                                                 // "long-duration" in the task brief
+// Doubles COLD_HUNGER_EXTRA_OUTDOOR/INDOOR's fraction while active (see tickWeatherCitizenEffects
+// above) -- applied by a small standalone effects pass below, unconditionally (independent of
+// whatever world.weather actually rolled that tick), since real VolcanicWinter's severe cold is a
+// map-wide temperature drop that doesn't wait for a separate "Cold" weather roll to also be
+// active. If Cold weather DOES happen to be rolled at the same time, the two stack (tickWeather-
+// CitizenEffects' own Cold branch plus this pass), which is the honest "even worse when it lines
+// up with an actual cold snap" reading, not a bug to guard against.
+export const VOLCANIC_WINTER_COLD_SEVERITY_MULT = 2;
+
+/** Call once from SimWorld's constructor (or lazily from tickVolcanicWinterCondition on first
+ *  tick), same pattern as initHazard/initSolarFlare above. */
+export function initVolcanicWinter(world) {
+  world._volcanicWinterActive = false;
+  world._volcanicWinterTicksRemaining = 0;
+  world._volcanicWinterLastEndTick = -Infinity;
+  world.volcanicWinterActive = false;
+}
+
+/** True while the volcanic-winter severe-cold condition is active. */
+export function isVolcanicWinterActive(world) {
+  return !!world._volcanicWinterActive;
+}
+
+/** Per-citizen extra hunger-decay pass for VolcanicWinter's severe cold -- a thin, doubled
+ *  reprise of tickWeatherCitizenEffects' own Cold branch (same sheltered/outdoor split via
+ *  roomContaining), fired unconditionally while active rather than gated on world.weather===Cold.
+ *  Called from tickVolcanicWinterCondition below. */
+function tickVolcanicWinterColdEffects(world) {
+  const store = world.citizens;
+  for (let i = 0; i < store.count; i++) {
+    if (!store.isAliveAt(i) || store.isDownedAt(i)) continue;
+    const indoors = !!roomContaining(world.rooms, world.grid, store.x[i], store.y[i]);
+    const frac = (indoors ? COLD_HUNGER_EXTRA_INDOOR : COLD_HUNGER_EXTRA_OUTDOOR) * VOLCANIC_WINTER_COLD_SEVERITY_MULT;
+    store.hunger[i] = Math.max(0, store.hunger[i] - HUNGER_DECAY * frac);
+  }
+}
+
+/** Advances an active volcanic winter's duration and ends it once expired (recording the end tick
+ *  for the next refire-gap check), or -- while inactive -- rolls a new one once the earliest-tick
+ *  grace and the (doubled) refire cooldown have elapsed. Exact same shape as
+ *  tickSolarFlareCondition/tickRollingBlackoutCondition above. Called from tickHazardCondition
+ *  above, alongside those two -- see that call site's own comment for why (world.js's tick()
+ *  already calls tickHazardCondition every tick, and this task's scope doesn't add a new call
+ *  site there). */
+export function tickVolcanicWinterCondition(world) {
+  if (world._volcanicWinterActive == null) initVolcanicWinter(world);
+
+  if (world._volcanicWinterActive) {
+    world._volcanicWinterTicksRemaining--;
+    if (world._volcanicWinterTicksRemaining <= 0) {
+      world._volcanicWinterActive = false;
+      world._volcanicWinterLastEndTick = world.currentTick;
+      const text = 'The volcanic winter finally breaks -- the deep cold lifts';
+      world.milestoneLog.push({ tick: world.currentTick, text });
+      if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+      world.onRandomEvent?.(text);
+    } else {
+      tickVolcanicWinterColdEffects(world);
+    }
+  } else if (
+    world.currentTick >= VOLCANIC_WINTER_EARLIEST_TICK
+    && world.currentTick - world._volcanicWinterLastEndTick >= VOLCANIC_WINTER_MIN_REFIRE_TICKS
+    && world.currentTick % VOLCANIC_WINTER_CHECK_INTERVAL === 0
+    && world.rng() < VOLCANIC_WINTER_CHANCE
+  ) {
+    world._volcanicWinterActive = true;
+    world._volcanicWinterTicksRemaining = VOLCANIC_WINTER_DURATION_MIN
+      + Math.floor(world.rng() * (VOLCANIC_WINTER_DURATION_MAX - VOLCANIC_WINTER_DURATION_MIN));
+    const text = 'A volcanic winter settles over the settlement -- a long, severe cold, and no heatwave will break it';
+    world.milestoneLog.push({ tick: world.currentTick, text });
+    if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    world.onRandomEvent?.(text);
+  }
+
+  world.volcanicWinterActive = !!world._volcanicWinterActive;
 }
 
 // ---------------------------------------------------------------- solar flare (grid blackout)
@@ -1074,4 +1439,175 @@ export function tickSolarFlareCondition(world) {
 
   world.solarFlareActive = !!world._solarFlareActive;
   setSolarFlareActive(world._solarFlareActive);
+}
+
+// ---------------------------------------------------------------- rolling blackout (grid-overload calamity)
+// Real Prison Architect calamity_settings.txt: RollingBlackoutLow/Medium/High -- gated (per the
+// real data) on BOTH LightningStorm severity AND a real GeneratorLoad threshold, causing 60-360s
+// outages. This port keeps the real GeneratorLoad half of that gate (power.js's new
+// gridLoadFraction -- see that function's own comment for exactly how "total demand vs supply" is
+// computed) and deliberately drops the LightningStorm-severity half: this hazard reads as a
+// standalone, player-caused consequence of overbuilding a power-hungry grid on too little
+// generation, not a second effect bolted onto the unrelated ThunderstormDry/Rainy weather states
+// tickLightningStorm above already owns. ANDing two independent real triggers together would make
+// an already rare, already punishing mechanic even rarer and muddier to read as "why did this
+// happen" -- the opposite of the task brief's "keep this hazard real but bounded, and make it
+// visible" instruction, and the same kind of invisible-compounding shape SESSION_HANDOFF.md's own
+// balance-regression history warns against (see that file's "balance regression" sections) --
+// picking ONE clear, legible cause (grid load) for ONE clear, legible consequence is the safer
+// call here.
+//
+// Structurally this is exactly tickSolarFlareCondition's close cousin, per this task's brief: own
+// timer fields (_rollingBlackout*), its own earliest-tick grace, its own min-refire cooldown, its
+// own duration range, and the exact same milestone-announcement call shape (world.milestoneLog
+// push + 20-entry trim + world.onRandomEvent?.()). The one real structural difference from
+// SolarFlare is the extra ANDed precondition below (grid load must actually be high) --
+// SolarFlare has no equivalent precondition, it's pure bad luck on a timer; this one additionally
+// requires the player to have actually built (and overloaded) a real grid.
+//
+// GRID_LOAD_HIGH_THRESHOLD=0.75 is FaultyWiringDueToHighLoad's own real "75%+ grid load" number
+// (see task brief and tickFaultyWiring below) -- shared here rather than inventing a second "what
+// counts as high load" definition, since both calamities are real PA siblings gated on the exact
+// same GeneratorLoad concept in the same source file.
+export const GRID_LOAD_HIGH_THRESHOLD = 0.75; // real PA FaultyWiringDueToHighLoad threshold, shared by both hazards below
+
+const ROLLING_BLACKOUT_EARLIEST_TICK = SOLAR_FLARE_EARLIEST_TICK; // same modest "let the player
+                                                                    // get a real grid up first"
+                                                                    // grace as SolarFlare
+const ROLLING_BLACKOUT_MIN_REFIRE_TICKS = SOLAR_FLARE_MIN_REFIRE_TICKS; // same cadence as
+                                                                          // SolarFlare -- unlike
+                                                                          // SolarFlare though, this
+                                                                          // one is fully avoidable
+                                                                          // (stop overloading the
+                                                                          // grid), so a short
+                                                                          // cooldown is the correct
+                                                                          // incentive to fix the
+                                                                          // load problem, not
+                                                                          // something to soften
+                                                                          // further
+const ROLLING_BLACKOUT_CHECK_INTERVAL = SOLAR_FLARE_CHECK_INTERVAL; // same roll cadence as SolarFlare
+const ROLLING_BLACKOUT_CHANCE = 0.08; // per check, once BOTH the grace/cooldown AND the real
+                                       // grid-load gate are satisfied -- higher than SolarFlare's
+                                       // 0.02 since the precondition itself (sustained 75%+ load)
+                                       // is already the rare, player-caused part; once it's true
+                                       // the consequence should read as a real near-term risk, not
+                                       // a coin flip that can sit unresolved for thousands of ticks
+                                       // while the player ignores an overloaded grid
+// Real PA duration is given directly in seconds (60-360s), not minutes -- no ambiguous
+// minutes-to-ticks conversion needed here (contrast Deep Freeze's own header comment above on why
+// that conversion is dangerous when the source data isn't already tick/second-denominated). At
+// this project's established 10Hz: 60s*10=600, 360s*10=3600.
+const ROLLING_BLACKOUT_DURATION_MIN = 600;  // 60s at 10Hz -- real PA min outage
+const ROLLING_BLACKOUT_DURATION_MAX = 3600; // 360s at 10Hz -- real PA max outage
+
+/** Call once from SimWorld's constructor (or lazily from tickRollingBlackoutCondition on first
+ *  tick), same pattern as initSolarFlare above. world.rollingBlackoutActive mirrors
+ *  world.solarFlareActive's public-flag shape, for any future UI banner. */
+export function initRollingBlackout(world) {
+  world._rollingBlackoutActive = false;
+  world._rollingBlackoutTicksRemaining = 0;
+  world._rollingBlackoutLastEndTick = -Infinity;
+  world.rollingBlackoutActive = false;
+}
+
+/** True while the rolling-blackout grid outage is active. */
+export function isRollingBlackoutActive(world) {
+  return !!world._rollingBlackoutActive;
+}
+
+/** Advances an active blackout's duration and ends it once expired (recording the end tick for
+ *  the next refire-gap check), or -- while inactive -- rolls a new one once the earliest-tick
+ *  grace, the refire cooldown, AND the real grid-load threshold are all satisfied. Exact same
+ *  shape as tickSolarFlareCondition above with one extra ANDed precondition (the gridLoadFraction
+ *  check). Mirrors this tick's result onto world.rollingBlackoutActive and power.js's
+ *  module-level flag (setRollingBlackoutActive) every call, regardless of which branch ran, same
+ *  reasoning as SolarFlare's own mirror step. Called from tickHazardCondition above, alongside
+ *  tickSolarFlareCondition -- see that call site's own comment for why. */
+export function tickRollingBlackoutCondition(world) {
+  if (world._rollingBlackoutActive == null) initRollingBlackout(world);
+
+  if (world._rollingBlackoutActive) {
+    world._rollingBlackoutTicksRemaining--;
+    if (world._rollingBlackoutTicksRemaining <= 0) {
+      world._rollingBlackoutActive = false;
+      world._rollingBlackoutLastEndTick = world.currentTick;
+      const text = 'The rolling blackout ends -- power returns to the grid';
+      world.milestoneLog.push({ tick: world.currentTick, text });
+      if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+      world.onRandomEvent?.(text);
+    }
+  } else if (
+    world.currentTick >= ROLLING_BLACKOUT_EARLIEST_TICK
+    && world.currentTick - world._rollingBlackoutLastEndTick >= ROLLING_BLACKOUT_MIN_REFIRE_TICKS
+    && world.currentTick % ROLLING_BLACKOUT_CHECK_INTERVAL === 0
+    && gridLoadFraction(world.structures) >= GRID_LOAD_HIGH_THRESHOLD
+    && world.rng() < ROLLING_BLACKOUT_CHANCE
+  ) {
+    world._rollingBlackoutActive = true;
+    world._rollingBlackoutTicksRemaining = ROLLING_BLACKOUT_DURATION_MIN
+      + Math.floor(world.rng() * (ROLLING_BLACKOUT_DURATION_MAX - ROLLING_BLACKOUT_DURATION_MIN));
+    const text = 'The overloaded grid trips a rolling blackout -- no electrical device will draw power until it clears';
+    world.milestoneLog.push({ tick: world.currentTick, text });
+    if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+    world.onRandomEvent?.(text);
+  }
+
+  world.rollingBlackoutActive = !!world._rollingBlackoutActive;
+  setRollingBlackoutActive(world._rollingBlackoutActive);
+}
+
+// ---------------------------------------------------------------- faulty wiring (grid-overload fire)
+// Real Prison Architect calamity_settings.txt FaultyWiringDueToHighLoad -- a real chance of an
+// electrical fire while grid load is sustained at GRID_LOAD_HIGH_THRESHOLD(0.75)+ (the same real
+// threshold Rolling Blackout above gates on -- see that constant's own comment). Structurally this
+// is tickHeatwaveElectricalFire's own close cousin (see that function's header comment further up
+// this file), not SolarFlare's timer shape: same target set via isPowerStructureKind, same
+// igniteStructure/fire.js reuse ("fire.js's own already-running tickFire picks up the ongoing
+// per-tick burn-down automatically", exactly as that comment already explains), same concurrent-
+// fire cap, same check-interval-instead-of-literal-every-tick calibration -- an ongoing per-tick
+// RISK while a condition holds, not a sustained on/off state of its own.
+//
+// CALIBRATION NOTE: the real PA number (~3% per-tick chance) is PA's own tick rate, not this
+// project's established 10Hz -- applying it to every single 10Hz tick literally would mean a
+// colony sitting at 75%+ load has roughly a 1-(0.97)^10 =~ 26% chance of an electrical fire in the
+// very first second it crosses the threshold, and a near-certainty within a few seconds. That's
+// the same category of mistake the Deep Freeze header comment above warns about (a literal
+// conversion producing a wildly-too-punishing result at this codebase's own tick rate) -- so, like
+// tickHeatwaveElectricalFire's own ELECTRICAL_FIRE_CHECK_INTERVAL(100)/ELECTRICAL_FIRE_CHANCE(0.05)
+// calibration right above it in this same file, the real 3% figure is applied per-CHECK (every 100
+// ticks, ~10s, this file's own already-established cadence for this exact category of mechanic)
+// rather than per raw tick -- the literal real number, just read against a check interval that has
+// an actual equivalent meaning at this simulation rate.
+const FAULTY_WIRING_CHECK_INTERVAL = ELECTRICAL_FIRE_CHECK_INTERVAL; // same 100-tick (~10s) cadence
+                                                                       // as Heatwave's own electrical fire
+const FAULTY_WIRING_CHANCE = 0.03; // real PA ~3% figure, applied per check -- see calibration note above
+
+/** Rolls a real per-check chance of igniting one electrical structure while grid load is
+ *  sustained at GRID_LOAD_HIGH_THRESHOLD+ (power.js's gridLoadFraction), capped at
+ *  ELECTRICAL_FIRE_MAX_CONCURRENT simultaneous power-structure fires from ANY source -- shares
+ *  that exact cap (and target pool) with tickHeatwaveElectricalFire above rather than a separate
+ *  FaultyWiring-only ceiling, so the two real, independent PA calamities that both ignite the same
+ *  isPowerStructureKind pool can't stack past one sane total ceiling between them (a rare,
+ *  contained threat, not a cascade -- same reasoning as that constant's own doc comment). Call
+ *  once per tick from tickHazardCondition above, alongside tickRollingBlackoutCondition -- see
+ *  that call site's own comment for why. */
+export function tickFaultyWiring(world) {
+  if (world.currentTick % FAULTY_WIRING_CHECK_INTERVAL !== 0) return;
+  if (gridLoadFraction(world.structures) < GRID_LOAD_HIGH_THRESHOLD) return;
+
+  const burning = world.structures.filter(s => isPowerStructureKind(s.kind) && s.onFire && !s.destroyed);
+  if (burning.length >= ELECTRICAL_FIRE_MAX_CONCURRENT) return;
+  if (world.rng() >= FAULTY_WIRING_CHANCE) return;
+
+  const candidates = world.structures.filter(s =>
+    isPowerStructureKind(s.kind) && !s.destroyed && !s.underConstruction && !s.onFire);
+  if (candidates.length === 0) return;
+
+  const target = candidates[Math.floor(world.rng() * candidates.length)];
+  igniteStructure(target);
+  const label = target.kind.replace(/_/g, ' ');
+  const text = `Faulty wiring from the overloaded grid sparks a fire in a ${label}`;
+  world.milestoneLog.push({ tick: world.currentTick, text });
+  if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+  world.onRandomEvent?.(text);
 }

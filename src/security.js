@@ -7,9 +7,19 @@
 import { StaffRoleKind, rngInt } from './core.js';
 // Damage-type plumbing lives in siege.js; K9 bites are Kinetic like a guard sidearm, so dogs are
 // good at running down Skirmishers and poor at chewing through a Brute's plate.
-import { damageAttacker, DamageType } from './siege.js';
+// rollsHit/resolveCitizenArmorRoll/CITIZEN_VEST_ARMOR_RATING (added for tickWildAnimalAggression's
+// manhunter event, see that function's header comment): siege.js precedes security.js in
+// build.py's ORDER for citizens.js but security.js actually comes BEFORE siege.js -- same already-
+// proven-safe "function-body-only usage of a later-ordered module" pattern this file's tickDogs
+// already relies on for damageAttacker/DamageType right below (both are only ever called from
+// inside a function body at real tick-time, long after the whole bundle has finished loading).
+import { damageAttacker, DamageType, rollsHit, resolveCitizenArmorRoll, CITIZEN_VEST_ARMOR_RATING } from './siege.js';
 import { JobState } from './jobs.js';
 import { ZoneKind } from './zones.js';
+// CitizenFlags (tickWildAnimalAggression's Downed/Dead bookkeeping, mirroring siege.js's own
+// tickAttackerVsCitizens inline logic): citizens.js precedes security.js in build.py's ORDER, so
+// this is a plain safe forward import, not the later-ordered pattern noted above.
+import { CitizenFlags } from './citizens.js';
 // Staff Vetting research node (research.js) -- lowers the crooked-staff ratio, see the
 // corruption section near the bottom of this file. research.js precedes security.js in
 // build.py's ORDER, so this named import is safe in the flat-concatenated bundle too.
@@ -20,6 +30,7 @@ import { isNodeUnlocked, payPerUseCost, contrabandScreeningDiversionMult } from 
 // FROM security.js already -- TAME_CHANCE_PER_TICK etc -- so this is the exact same already-
 // proven-safe circular-import pattern, not a new risk).
 import { PROGRAM_DEFS, isSiteStaffed, roomPostFor } from './programs.js';
+import { wageDiscountMultFor } from './coverageplans.js';
 
 export const AlertLevel = Object.freeze({
   Calm: 0,
@@ -544,7 +555,11 @@ export function upgradeDog(world, dog) {
 export function tickDogs(dogs, citizens, roster, attackers, onScrap, rng = Math.random) {
   for (const dog of dogs) {
     const ownerIdx = findCitizenIndexById(citizens, dog.ownerId);
-    if (ownerIdx < 0 || !citizens.isAliveAt(ownerIdx)) continue;
+    const hasOwner = ownerIdx >= 0 && citizens.isAliveAt(ownerIdx);
+    // Advanced-trained dogs (real RimWorld "Release" behavior -- see AnimalTrainingTier below)
+    // keep fighting from wherever they are even with no live handler; every other tier still
+    // needs one, byte-for-byte the old behavior for any dog that hasn't reached Advanced.
+    if (!hasOwner && trainingTierOf(dog) < AnimalTrainingTier.Advanced) continue;
 
     // Upgraded K9 stats (see K9_UPGRADE_* above) -- unupgraded dogs get exactly the old constants
     // unchanged, byte-for-byte, so this is backward compatible with every existing save/dog.
@@ -552,13 +567,17 @@ export function tickDogs(dogs, citizens, roster, attackers, onScrap, rng = Math.
     const speed = dog.upgraded ? DOG_SPEED * K9_UPGRADE_SPEED_MULT : DOG_SPEED;
     const cooldownMax = dog.upgraded ? Math.max(1, Math.round(DOG_COOLDOWN / K9_UPGRADE_ENDURANCE_MULT)) : DOG_COOLDOWN;
 
-    const dx = citizens.x[ownerIdx] - dog.x;
-    const dy = citizens.y[ownerIdx] - dog.y;
-    const dist = Math.hypot(dx, dy);
-    if (dist > 1.2) {
-      dog.x += (dx / dist) * speed;
-      dog.y += (dy / dist) * speed;
+    if (hasOwner) {
+      const dx = citizens.x[ownerIdx] - dog.x;
+      const dy = citizens.y[ownerIdx] - dog.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 1.2) {
+        dog.x += (dx / dist) * speed;
+        dog.y += (dy / dist) * speed;
+      }
     }
+    // A Released dog (Advanced tier, no live owner) holds its current position and fights from
+    // there instead -- it has no handler left to path toward.
 
     if (dog.cooldown > 0) { dog.cooldown--; continue; }
     let bestI = -1, bestDist = range;
@@ -583,9 +602,18 @@ function findCitizenIndexById(citizens, id) {
 // wired in world.js's constructor -- both the roster assignment (so tickStaffDuty/UI treat them
 // as K9Handler and walk them to a post) and the dog's own ownerId (so tickDogs above knows who
 // to follow) are needed; the roster system itself needs no changes to support a second dog.
+// Gated on Obedience training (see AnimalTrainingTier below) -- real RimWorld chain, Obedience is
+// the prerequisite for a trained animal to hold a Guard-equivalent post at all. Currently has zero
+// call sites anywhere in this codebase (grepped before adding this gate), so this can't regress
+// any existing save/behavior -- world.js's own starting dog is wired directly (roster.assign +
+// dogs.push), not through this function, and is unaffected either way. Returns { ok, reason } (a
+// small, backward-compatible addition to what was previously a void function) so a future caller
+// can surface "needs Obedience training first" instead of silently no-op'ing.
 export function assignDogHandler(roster, dog, citizenId, post) {
+  if (trainingTierOf(dog) < AnimalTrainingTier.Obedience) return { ok: false, reason: 'untrained' };
   roster.assign(citizenId, StaffRoleKind.K9Handler, post);
   dog.ownerId = citizenId;
+  return { ok: true };
 }
 
 // --- RimWorld-style taming/breeding (see FEATURE_RESEARCH.md's Animals section) ---
@@ -617,7 +645,10 @@ export function maybeSpawnWildAnimal(wildAnimals, grid, rng, currentTick, avoidX
 // get a stable "arrived" check, since the target would keep drifting mid-approach.
 export function tickWildAnimals(wildAnimals, grid, rng, speed = WILD_ANIMAL_SPEED) {
   for (const animal of wildAnimals) {
-    if (animal.claimedBy != null) continue;
+    // Hostile (see tickWildAnimalAggression's manhunter event below) also skips this passive
+    // wander -- it gets its own directed chase-the-nearest-citizen movement instead, same
+    // "one movement authority per state" split claimedBy already established just below.
+    if (animal.claimedBy != null || animal.hostile) continue;
     const dx = animal.targetX - animal.x;
     const dy = animal.targetY - animal.y;
     const dist = Math.hypot(dx, dy);
@@ -663,6 +694,193 @@ export function tickDogBreeding(dogs, rng, currentTick) {
   while (bIdx === aIdx && tries < 5) { bIdx = rngInt(rng, 0, dogs.length); tries++; }
   const a = dogs[aIdx], b = dogs[bIdx];
   dogs.push({ ownerId: null, x: (a.x + b.x) / 2, y: (a.y + b.y) / 2, cooldown: 0 });
+}
+
+// --- Animal trainability tiers (real RimWorld chain: Tameness -> Obedience/Guard (Intermediate)
+// -> Release/Attack or Haul (Advanced, min body size 0.40)) ---
+// This project's dogs/K9s are otherwise pre-tamed with no acquisition arc worth gating further --
+// world.js's starting dog is wired directly via roster.assign()+dogs.push(), no taming job
+// involved at all, and even a freshly tamed/bred dog (this file's own tickDogBreeding above,
+// jobs.js's Taming job) becomes a fully combat-capable, postable K9 the instant it exists, with no
+// further step in between. Rather than build a whole new training-facility/skill system, this
+// reuses the SAME tamed-animal entities (world.dogs, whatever their origin) and layers a
+// lightweight tier flag on top -- exactly the "reusing existing wild-animal entities" scope the
+// task calls for, not a new acquisition arc from scratch.
+export const AnimalTrainingTier = Object.freeze({ Tameness: 0, Obedience: 1, Advanced: 2 });
+
+// Real RimWorld anchor: an average dog-sized trainable animal's body size (Labrador-class, ~0.65).
+// This project has no per-breed body-size variance system for dogs -- every K9 uses the same
+// generic template (assets.js) regardless of origin -- so every dog reads this same constant
+// rather than an individually-rolled value; a future breed-variance pass would set dog.bodySize
+// per-dog and this would become just the fallback default (see bodySizeOf below). Stored as a
+// real per-dog field rather than inlined so ADVANCED_MIN_BODY_SIZE's check is a genuine
+// comparison, not a hardcoded always-true.
+export const DOG_BODY_SIZE = 0.65;
+export const ADVANCED_MIN_BODY_SIZE = 0.40; // real RimWorld anchor -- Release/Attack/Haul trainable gate
+
+// Absence-means-default accessors, same convention as roster.guardRankOf/weaponOf elsewhere in
+// this file -- every dog created before this feature existed (the starter dog, any already-tamed
+// or already-bred dog) reads as untrained Tameness at the default body size with zero migration.
+export function trainingTierOf(dog) { return dog?.trainingTier ?? AnimalTrainingTier.Tameness; }
+export function bodySizeOf(dog) { return dog?.bodySize ?? DOG_BODY_SIZE; }
+
+// Scrap cost to advance one dog exactly one tier -- priced below K9_UPGRADE_SCRAP_COST(25, a
+// repeatable combat-stat purchase) since this is a one-time behavioral unlock, not an ongoing
+// power spike; Advanced costs more than Obedience, same "later rung costs more" shape
+// WEAPON_TIER_ORDER already uses.
+export const TRAIN_OBEDIENCE_SCRAP_COST = 10;
+export const TRAIN_ADVANCED_SCRAP_COST = 20;
+
+// Advances `dog` exactly one tier (Tameness -> Obedience -> Advanced, no rung-skipping, same
+// sequential-ladder shape as the GuardRank promotion track below). Returns { ok: true } or
+// { ok: false, reason }. Mirrors upgradeDog's per-unit-purchase shape (validate, spend scrap,
+// mutate the dog in place) rather than a new subsystem.
+export function trainDog(world, dog) {
+  if (!dog) return { ok: false, reason: 'invalid' };
+  const tier = trainingTierOf(dog);
+  if (tier === AnimalTrainingTier.Tameness) {
+    if (world.scrap < TRAIN_OBEDIENCE_SCRAP_COST) return { ok: false, reason: 'cost' };
+    world.scrap -= TRAIN_OBEDIENCE_SCRAP_COST;
+    if (world.finance) world.finance.buildSpend += TRAIN_OBEDIENCE_SCRAP_COST;
+    dog.trainingTier = AnimalTrainingTier.Obedience;
+    return { ok: true };
+  }
+  if (tier === AnimalTrainingTier.Obedience) {
+    // Real "min body size 0.40" gate (see DOG_BODY_SIZE's doc comment for why this always
+    // currently passes) -- kept as a genuine check rather than skipped, so a future breed-variance
+    // pass (or a save-loaded dog with a real per-breed bodySize under 0.40) is honored immediately
+    // with zero further changes needed here.
+    if (bodySizeOf(dog) < ADVANCED_MIN_BODY_SIZE) return { ok: false, reason: 'bodySize' };
+    if (world.scrap < TRAIN_ADVANCED_SCRAP_COST) return { ok: false, reason: 'cost' };
+    world.scrap -= TRAIN_ADVANCED_SCRAP_COST;
+    if (world.finance) world.finance.buildSpend += TRAIN_ADVANCED_SCRAP_COST;
+    dog.trainingTier = AnimalTrainingTier.Advanced;
+    return { ok: true };
+  }
+  return { ok: false, reason: 'already' };
+}
+
+// --- Wild animal aggression / manhunter event (RimWorld's real "manhunter" mechanic, reskinned:
+// a spooked wild animal attacks the nearest citizen instead of fleeing) ---
+// Deliberately reuses the existing wildAnimals array (see maybeSpawnWildAnimal above) rather than
+// a new attacker-adjacent entity type -- a rare, small, self-resolving event layered on the SAME
+// entities tickWildAnimals already wanders, not a parallel combat-AI system. Citizen-damage math
+// reuses siege.js's real per-hit primitives (rollsHit/resolveCitizenArmorRoll/
+// CITIZEN_VEST_ARMOR_RATING) rather than inventing a parallel roll -- the identical hit-chance/
+// armor math a raider's own contact attack uses (see siege.js's tickAttackerVsCitizens, which this
+// mirrors closely). "Put down" is handled by any Advanced-trained dog (see AnimalTrainingTier
+// above -- real "Release/Attack" trained behavior) within biting range, using a flat health pool
+// rather than siege.js's armor-rating/penetration system, since a wild animal isn't part of the
+// attackers SoA store those functions are built around -- the simpler self-contained fallback the
+// task allows for. This ties the two features together: only a dog trained past Obedience will
+// break off and independently hunt down a hostile animal; an untrained/Obedience-only dog just
+// keeps doing what it already does (bite whatever's in `attackers` range near its owner).
+const MANHUNTER_CHECK_INTERVAL = 500;  // cadence mirrors maybeSpawnWildAnimal's own spawn-roll interval
+const MANHUNTER_CHANCE = 0.03;         // rare -- well below BREED_CHANCE(0.12), a bad-luck event, not routine
+const MANHUNTER_SPEED = WILD_ANIMAL_SPEED * 2.5; // real urgency vs. the passive wander above
+const MANHUNTER_CONTACT_RANGE = 0.6;   // in siege.js's ATTACKER_CONTACT_RANGE(0.5) neighborhood -- a real bite range, not a ranged attack
+const MANHUNTER_ACCURACY = 0.6;        // modest -- an animal isn't a marksman, but isn't easily dodged either
+const MANHUNTER_DAMAGE = 0.01;         // modest -- in siege.js's real ATTACKER_CITIZEN_DAMAGE(0.008) neighborhood
+const MANHUNTER_PENETRATION = 5;       // low -- below even DOG_PENETRATION(10); a panicked animal bite, not a trained K9 strike
+const MANHUNTER_DURATION_TICKS = 250;  // gives up and wanders off if it hasn't been put down by then
+const MANHUNTER_HEALTH = 1;            // flat health pool a nearby Advanced dog whittles down to put it down
+const MANHUNTER_SUPPRESSION_GAIN = 0.15; // smaller than siege.js's own SUPPRESSION_GAIN_PER_HIT(0.32) -- an animal is scary, not a firefight
+
+/** Rare hostile-flip + hostile-animal tick. Call once per world tick (world.js), alongside
+ *  tickWildAnimals/tickDogBreeding above -- see this file's session report for the exact call-site
+ *  addition needed. */
+export function tickWildAnimalAggression(world) {
+  const wildAnimals = world.wildAnimals, citizens = world.citizens, dogs = world.dogs || [];
+  const currentTick = world.currentTick, rng = world.rng || Math.random;
+  if (!wildAnimals || wildAnimals.length === 0) return;
+
+  // Rare hostile-flip roll -- only ever considers an animal that's neither claimed (mid-taming)
+  // nor already hostile, same "don't double-state" bar tickWildAnimals' own claimedBy check uses.
+  if (currentTick % MANHUNTER_CHECK_INTERVAL === 0) {
+    for (const animal of wildAnimals) {
+      if (animal.claimedBy != null || animal.hostile) continue;
+      if (rng() >= MANHUNTER_CHANCE) continue;
+      animal.hostile = true;
+      animal.hostileTicks = 0;
+      animal.health = MANHUNTER_HEALTH;
+      if (world.milestoneLog) {
+        const text = 'A wild animal has turned hostile!';
+        world.milestoneLog.push({ tick: currentTick, text });
+        if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+        world.onRandomEvent?.(text);
+      }
+    }
+  }
+
+  for (const animal of wildAnimals) {
+    if (!animal.hostile) continue;
+    animal.hostileTicks = (animal.hostileTicks || 0) + 1;
+
+    // Put down by a nearby Advanced-trained dog (see this section's header comment) -- checked
+    // before the give-up timer so an actively-fighting dog isn't racing a clock unfairly.
+    let bitten = false;
+    for (const dog of dogs) {
+      if (trainingTierOf(dog) < AnimalTrainingTier.Advanced) continue;
+      if (Math.hypot(dog.x - animal.x, dog.y - animal.y) > DOG_RANGE) continue;
+      animal.health -= DOG_DAMAGE;
+      bitten = true;
+      if (animal.health <= 0) break;
+    }
+    if (bitten && animal.health <= 0) {
+      const idx = wildAnimals.indexOf(animal);
+      if (idx >= 0) wildAnimals.splice(idx, 1);
+      if (world.milestoneLog) {
+        const text = 'The hostile animal was put down';
+        world.milestoneLog.push({ tick: currentTick, text });
+        if (world.milestoneLog.length > 20) world.milestoneLog.shift();
+      }
+      continue;
+    }
+
+    // Wanders off (gives up) once MANHUNTER_DURATION_TICKS have passed without being put down --
+    // matches the task's "until put down/wanders off" resolution pair even with zero Advanced
+    // dogs on the roster (self-resolving, never permanently stuck hostile).
+    if (animal.hostileTicks >= MANHUNTER_DURATION_TICKS) {
+      const idx = wildAnimals.indexOf(animal);
+      if (idx >= 0) wildAnimals.splice(idx, 1);
+      continue;
+    }
+
+    // Chase the nearest living citizen -- real "manhunter" behavior, distinct from
+    // tickWildAnimals' passive random wander.
+    let bestI = -1, bestDist = Infinity;
+    for (let i = 0; i < citizens.count; i++) {
+      if (!citizens.isAliveAt(i)) continue;
+      const d = Math.hypot(citizens.x[i] - animal.x, citizens.y[i] - animal.y);
+      if (d < bestDist) { bestDist = d; bestI = i; }
+    }
+    if (bestI < 0) continue; // nobody left to chase
+
+    if (bestDist > MANHUNTER_CONTACT_RANGE) {
+      const dx = citizens.x[bestI] - animal.x, dy = citizens.y[bestI] - animal.y;
+      animal.x += (dx / bestDist) * MANHUNTER_SPEED;
+      animal.y += (dy / bestDist) * MANHUNTER_SPEED;
+      continue;
+    }
+
+    // In contact range -- same rollsHit/resolveCitizenArmorRoll/CITIZEN_VEST_ARMOR_RATING/Downed-
+    // Dead bookkeeping siege.js's own tickAttackerVsCitizens uses for a raider's contact attack,
+    // reused wholesale rather than a parallel roll (see this section's header comment).
+    if (!rollsHit(rng, MANHUNTER_ACCURACY)) continue;
+    citizens.suppression[bestI] = Math.min(1, (citizens.suppression[bestI] || 0) + MANHUNTER_SUPPRESSION_GAIN);
+    if (citizens.isDownedAt(bestI)) {
+      citizens.flags[bestI] |= CitizenFlags.Dead;
+      citizens.alive[bestI] = 0;
+      continue;
+    }
+    const armorRating = citizens.hasVest?.[bestI] ? CITIZEN_VEST_ARMOR_RATING : 0;
+    const { dealt } = resolveCitizenArmorRoll(armorRating, MANHUNTER_PENETRATION, MANHUNTER_DAMAGE, rng);
+    citizens.health[bestI] -= dealt;
+    if (citizens.health[bestI] <= 0) {
+      citizens.health[bestI] = 0.05;
+      citizens.flags[bestI] |= CitizenFlags.Downed;
+    }
+  }
 }
 
 // --- Corrupt/bribable staff (Prison Architect's "Crooked Guards" -- crookedguards_settings.txt,
@@ -942,12 +1160,10 @@ export function forceActivateCorruption(world, citizenId) {
 //    Specialist, dropping the 1st ("Senior") value as the informal/unimplemented tier the 2-tier
 //    scope already excludes -- a judgment call flagged here for a reviewer with the original data
 //    file on hand to double check.
-//  - Wage: Officer +$25/day, Specialist +$50/day -- stored below as real data (wagePerDay) for a
-//    future wage system to consume, but NOT wired into any periodic scrap deduction: this codebase
-//    has no ongoing staff-upkeep cost anywhere (checked economy.js's BUILD_COST -- one-time
-//    construction spend only -- and world.js's finance object -- buildSpend/corruptionLoss/
-//    ratLoss, no periodic wage/upkeep bucket at all). Per the task brief's own instruction, this
-//    does NOT invent a whole new wage-drain system from scratch to hang these numbers on.
+//  - Wage: Officer +$25/day, Specialist +$50/day -- stored below as real data (wagePerDay).
+//    UPDATE (later pass, same session): now consumed by tickStaffWages near the bottom of this
+//    file, a minimal bounded once-per-in-game-day upkeep drain (see that function's own doc
+//    comment for the full regression-history-aware reasoning and scale check against real income).
 //  - Specialist-tier guns cost $600 -- see WeaponTier.Specialist/WEAPON_TIERS above (extends the
 //    existing armory weapon-tier pattern) and SPECIALIST_WEAPON_COST/purchaseSpecialistWeapon below.
 //  - Specialist suppression bonus: +15% -- stored below (suppressionBonus) as real data but likewise
@@ -1072,6 +1288,76 @@ export function tickGuardRankPromotion(world) {
       officerOrAboveFilled++;
     }
   }
+}
+
+// --- Ranked-staff wage upkeep ---
+//
+// This session already carries two real, hard-learned balance regressions, both the SAME failure
+// shape: a passive, automatic, per-tick drain compounding invisibly across many roster entries at
+// once (see SESSION_HANDOFF.md's "balance regression" sections -- the ammo/scrap-collapse
+// investigation and the rats.js STEAL_MIN/MAX-vs-RAT_MAX_CONCURRENT compounding root cause).
+// Deliberately built to NOT share that shape:
+//  - Not per-tick: rolls once every GAME_DAY_TICKS (2400), same "once per in-game day" cadence as
+//    this file's own OFFICER_MIN_HIRE_DAYS/SPECIALIST_MIN_HIRE_DAYS -> *_TICKS conversion above,
+//    not a per-tick accrual that has to be divided down to avoid overshooting.
+//  - Bounded by roster composition, not by entity count independently multiplying up: the total
+//    charged is the sum of GUARD_RANK_DEFS[rank].wagePerDay across only the CURRENTLY Officer/
+//    Specialist-ranked Guards/Snipers -- GuardRank.Base wagePerDay is 0 (see GUARD_RANK_DEFS
+//    above), so a colony that hasn't promoted anyone yet (the whole first OFFICER_MIN_HIRE_DAYS=10
+//    days, minimum) pays nothing, and tickGuardRankPromotion's own OFFICER_RATIO(0.40)/
+//    SPECIALIST_RATIO(0.333) caps keep the ranked headcount a small, slow-growing fraction of the
+//    roster even at endgame roster sizes -- there's no unbounded-population-of-small-drains shape
+//    here the way rats.js's per-rat steal roll had.
+//  - Scale-checked against real income, not just asserted small: jobs.js's HARVEST_RATE (3 scrap/
+//    tick, PER HARVESTING CITIZEN) alone dwarfs this. A representative mid-size roster (10 ranked-
+//    eligible Guards/Snipers -> 3 Specialist + 1 Officer at the promotion ratios) costs 3*50 + 1*25
+//    = 175 scrap per FULL in-game day (2400 ticks), i.e. ~0.07 scrap/tick averaged out -- a single
+//    harvesting citizen alone outearns this many times over. Even a large endgame roster (30
+//    ranked-eligible -> 10 Specialist + 2 Officer) is only 550/day (~0.23 scrap/tick averaged),
+//    still a small fraction of typical multi-citizen income. Scales with the player's own choice to
+//    staff and promote a large security roster, not with anything that grows on its own.
+//
+// Tracking: deducts through world.addScrap(-total, 'other') -- the same "negative addScrap call,
+// no dedicated finance bucket" idiom jobs.js/drones.js already use for WORKSHOP_RAW_PER_UNIT's
+// processing-input cost, so this isn't a new pattern. IMPORTANT caveat found while building this:
+// world.js's addScrap only buckets into world.finance's per-category totals when `amount > 0` (see
+// its `if (amount > 0 && this.finance)` guard) -- a negative call still correctly applies to
+// world.scrap but is otherwise invisible in finance.otherScrap/totalExpense, exactly the "silent"
+// failure shape the regression history above warns about. To avoid landing another invisible drain,
+// this ALSO writes straight to a new world.finance.wageCost accumulator (mirrors tickStaffCorruption
+// writing directly to world.finance.corruptionLoss above, and rats.js's ratLoss, rather than relying
+// on addScrap's bucketing) so the drain is inspectable via world.finance.wageCost even before any
+// world.js change lands. This file does NOT own world.js, so world.finance.wageCost is created here
+// as a plain dynamic property rather than pre-declared -- see this function's exported report for
+// the exact one-line world.js constructor/rollup additions a reviewer should make to give it full
+// budget-report-UI parity with corruptionLoss/ratLoss/factionLoss.
+//
+// Called once per world tick (world.js, alongside tickStaffCorruption(this)/
+// tickGuardRankPromotion(this) -- see this file's report for the exact call-site addition needed).
+// Cheap: no-ops immediately on every tick that isn't a GAME_DAY_TICKS boundary, and even on a
+// boundary tick only walks the (small) roster, same cost class as tickGuardRankPromotion right
+// above it.
+export function tickStaffWages(world) {
+  if (world.currentTick % GAME_DAY_TICKS !== 0) return;
+  const roster = world.roster;
+  const store = world.citizens;
+
+  let total = 0;
+  for (const [id, kind] of roster._roleById.entries()) {
+    if (!GUARD_RANK_ELIGIBLE_ROLES.has(kind)) continue; // Guard/Sniper only, same set tickGuardRankPromotion uses
+    const rank = roster.guardRankOf(id);
+    if (rank === GuardRank.Base) continue; // base-rank guards cost nothing -- wagePerDay is 0 anyway, but skip the lookup
+    const idx = findCitizenIndexById(store, id);
+    if (idx < 0 || !store.isAliveAt(idx)) continue; // dead/departed staff draw no wage
+    // Coverage Plans' WageModifier discount (coverageplans.js): applied per-citizen off their
+    // real role, same "1 = no discount" pure-lookup contract every other discount hook here uses.
+    total += (GUARD_RANK_DEFS[rank]?.wagePerDay ?? 0) * wageDiscountMultFor(world, kind);
+  }
+  if (total <= 0) return;
+
+  world.addScrap(-total, 'other');
+  if (world.scrap < 0) world.scrap = 0; // floored at 0, per this task's spec -- addScrap itself doesn't clamp
+  if (world.finance) world.finance.wageCost = (world.finance.wageCost || 0) + total;
 }
 
 // Player-facing purchase (mirrors upgradeDog's exact shape above: validate, spend scrap, flip a

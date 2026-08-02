@@ -11,7 +11,7 @@ import { Passion, PASSION_GAIN_MULT } from './backstories.js';
 import { isWateredAt } from './water.js';
 import { TAME_CHANCE_PER_TICK, TAME_MAX_TICKS, DOG_POPULATION_CAP } from './security.js';
 import { checkTameAchievement } from './metaprogress.js';
-import { breakRateMultFor, needsThrottleMultFor, addMoodEvent } from './citizens.js';
+import { breakRateMultFor, needsThrottleMultFor, addMoodEvent, isModerateBreakAt } from './citizens.js';
 import { ageBandFor } from './traits.js';
 import { rankWorkSpeedMultFor } from './ranks.js';
 import { augmentWorkSpeedMultFor, augmentSocialGainMultFor } from './augments.js';
@@ -179,6 +179,10 @@ const SEEK_EXERCISE_THRESHOLD = 0.4;
 // codebase's existing "similar magnitude, similar threshold" precedent rather than inventing a
 // distinct number for a need that decays at the same rate.
 const SEEK_HYGIENE_THRESHOLD = 0.4;
+// Joy (see citizens.js's JOY_DECAY): same threshold family as SEEK_SOCIAL_THRESHOLD -- Joy shares
+// Social's exact Recreation-zone target (see JOY_DECAY's own doc comment), so it gets the schedule
+// bias treatment below alongside socialThreshold rather than a fully independent bias of its own.
+const SEEK_JOY_THRESHOLD = 0.35;
 const SATISFIED_THRESHOLD = 0.85;
 
 // Duty Roster scheduling (see schedule.js) biases which need-thresholds apply this tick --
@@ -276,6 +280,57 @@ export const WORKSHOP_PROCESS_TICKS = 20;      // ticks to finish one unit once 
 export const FARM_CYCLE_TICKS = 60;      // ticks of active tending to complete one growth cycle
 export const FARM_YIELD_PER_CYCLE = 6;   // food/scrap-equivalent resource paid out per completed cycle
 const FARM_SKILL_GAIN = 0.008;           // construction-skill trickle while tending, same family as HARVEST_SKILL_GAIN
+
+// Crop-type variance (real RimWorld ThingDef numbers, RimWorld's own real day-count/yield/
+// fertilitySensitivity anchors -- see CROP_DEFS below): the Farm Plot above was one undifferentiated
+// crop with no player choice. Real RimWorld numbers used: Rice growDays=3/yield=6,
+// Potato growDays=5.8/yield=11/fertilitySensitivity=0.4. Those raw day-counts don't map onto this
+// project's own tick-based FARM_CYCLE_TICKS/FARM_YIELD_PER_CYCLE baseline directly (60 ticks isn't
+// "60 days" at this project's 10Hz tick rate, it's an abstracted work-cycle length) -- so rather
+// than importing RimWorld's raw numbers verbatim (the FARM_CYCLE_TICKS' own doc comment already
+// explains why this project's cycle length was picked relative to HARVEST_RATE/
+// WORKSHOP_PROCESS_TICKS, not against a real-world day count), each crop is scaled proportionally
+// off the REAL RATIO between crops, anchored on the existing baseline. Rice's real yield (6) is
+// already identical to this project's own FARM_YIELD_PER_CYCLE baseline (6) -- not a coincidence
+// worth discarding -- so Rice is kept as that exact baseline (cycleTicks/yieldPerCycle byte-for-byte
+// unchanged, ratio 1.0 in both dimensions) and every other crop is derived off Rice's real
+// growDays(3)/yield(6) ratio: Potato's cycleTicks = FARM_CYCLE_TICKS * (5.8/3) = 116 (a real ~93%
+// longer cycle), yieldPerCycle = FARM_YIELD_PER_CYCLE * (11/6) = 11 (a real ~83% bigger payout) --
+// slower but more rewarding, a genuine tradeoff rather than a strict upgrade. Only 2 of the
+// task's allowed "2-3 crop options" are implemented: a 3rd (e.g. Corn) was deliberately left out
+// rather than fabricate a growDays/yield/fertilitySensitivity triple this pass can't verify as a
+// real RimWorld number the way Rice/Potato's were explicitly given -- CROP_DEFS is structured so
+// adding one later is a single new entry, no other code here needs to change.
+export const CropKind = Object.freeze({ Rice: 'rice', Potato: 'potato' });
+
+// fertilitySensitivity (real RimWorld per-crop stat, 0-1): how much a crop's grow rate suffers
+// under adverse growing conditions, vs. a hardy crop that shrugs them off. This project has no
+// soil-fertility system to hook it into directly, but it DOES already have a real adverse-growing-
+// condition multiplier in the exact same "Gardening work rate" family -- weather.js's
+// coldGardeningWorkRateMult (Deep Freeze). tickFarming below blends that multiplier by each crop's
+// fertilitySensitivity (0 = fully immune, 1 = full penalty, same as the old undifferentiated Farm
+// Plot) rather than adding a second, unrelated penalty system. Potato's 0.4 is the exact real
+// number the task gave; Rice's 0.7 is not separately specified by the task but is the well-attested
+// real RimWorld relationship between the two (rice needs good conditions, potato is the hardy
+// fallback crop) -- called out here as the one recalled-rather-than-given number in this table.
+export const CROP_DEFS = Object.freeze({
+  [CropKind.Rice]: Object.freeze({
+    label: 'Rice', cycleTicks: FARM_CYCLE_TICKS, yieldPerCycle: FARM_YIELD_PER_CYCLE, fertilitySensitivity: 0.7,
+  }),
+  [CropKind.Potato]: Object.freeze({
+    label: 'Potato', cycleTicks: 116, yieldPerCycle: 11, fertilitySensitivity: 0.4,
+  }),
+});
+
+// A Farm Plot with no cropKind (every plot built before this feature existed, or any plot a
+// future build-time picker never touches) defaults to Rice -- byte-for-byte the old undifferentiated
+// behavior, since Rice's def is exactly the pre-existing FARM_CYCLE_TICKS/FARM_YIELD_PER_CYCLE
+// baseline. Exported so render.js (progress-bar fraction) and any future build-time crop picker
+// (main.js/input.js) can read the same table instead of re-deriving it -- see this session's
+// handoff notes for the exact wiring still needed in those files.
+export function farmCropDefFor(plot) {
+  return CROP_DEFS[plot?.cropKind] || CROP_DEFS[CropKind.Rice];
+}
 
 // Restaurant (siege.js Structure kind 'restaurant'): same single-worker staffed-cycle shape as
 // Farm Plot immediately above (reuses Structure's generic `_workTimer` field), tuned to a shorter
@@ -737,14 +792,20 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       let restThreshold = SEEK_REST_THRESHOLD;
       let hungerThreshold = SEEK_HUNGER_THRESHOLD;
       let socialThreshold = SEEK_SOCIAL_THRESHOLD;
+      // Joy (see SEEK_JOY_THRESHOLD above): biased in lockstep with socialThreshold below, since
+      // both target the identical Recreation zone -- there's no reason for the schedule system to
+      // pull a citizen toward Recreation for Social but not for Joy, or vice versa.
+      let joyThreshold = SEEK_JOY_THRESHOLD;
       if (scheduleBlock === ScheduleBlock.Sleep) {
         restThreshold = SCHEDULE_SLEEP_REST_SEEK;
       } else if (scheduleBlock === ScheduleBlock.Recreation) {
         socialThreshold = SCHEDULE_RECREATION_SOCIAL_SEEK;
+        joyThreshold = SCHEDULE_RECREATION_SOCIAL_SEEK;
       } else if (scheduleBlock === ScheduleBlock.Work) {
         restThreshold = Math.max(CRITICAL_REST_OVERRIDE, SEEK_REST_THRESHOLD * SCHEDULE_WORK_THRESHOLD_MULT);
         hungerThreshold = Math.max(CRITICAL_HUNGER_OVERRIDE, SEEK_HUNGER_THRESHOLD * SCHEDULE_WORK_THRESHOLD_MULT);
         socialThreshold = SEEK_SOCIAL_THRESHOLD * SCHEDULE_WORK_THRESHOLD_MULT;
+        joyThreshold = SEEK_JOY_THRESHOLD * SCHEDULE_WORK_THRESHOLD_MULT;
       }
 
       // Starvation always wins the tie against a Sleep-block bed trip, regardless of check
@@ -805,7 +866,11 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
         }
       }
 
-      if (store.social[i] < socialThreshold) {
+      // Joy (see citizens.js's JOY_DECAY doc comment): shares Social's exact Recreation-zone
+      // target, so a citizen seeks Recreation if EITHER need is low rather than needing a fully
+      // separate SeekingJoy/Joying job pair -- see the Recreating handler below for where both
+      // needs actually get refilled together on the same trip.
+      if (store.social[i] < socialThreshold || store.joy[i] < joyThreshold) {
         const rec = zones.nearestOfKind(ZoneKind.Recreation, store.x[i], store.y[i], allowedCheck);
         if (rec) { store.jobState[i] = JobState.SeekingRec; store.targetX[i] = rec.x; store.targetY[i] = rec.y; continue; }
       }
@@ -841,6 +906,28 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
           store._jobRef[i] = shower;
           continue;
         }
+      }
+
+      // Moderate mental break: self-isolation (see citizens.js's BREAK_TIERS 'moderate' doc
+      // comment for the full risk-vs-safety reasoning -- this is deliberately placed AFTER every
+      // needs-seeking check above, so a moderate-break citizen still eats/sleeps/socializes/
+      // exercises/bathes/gets tended completely normally, and BEFORE the Work Priorities/legacy-
+      // ladder work-seeking cascade below, so they never reach Construction/Processing/Hauling/
+      // Harvesting/Animal/Cleaning/Farming/Restaurant while this tier is active. Reuses the
+      // existing SeekingBed/Sleeping states wholesale (no new JobState, no new travel/arrival
+      // wiring) -- Bedroom is this codebase's closest analog to "their own room" (no per-citizen
+      // assigned-room concept exists). If no Bedroom zone exists at all, this just falls straight
+      // through to `continue` below with jobState left at Idle -- the citizen stands exactly where
+      // they are, refusing work with zero movement, rather than falling back to the work ladder.
+      // Either way, this citizen never reaches a single tryClaim* work call below while moderate-
+      // break is active.
+      if (isModerateBreakAt(store, i)) {
+        const bedroom = zones.nearestOfKind(ZoneKind.Bedroom, store.x[i], store.y[i], allowedCheck);
+        if (bedroom) {
+          store.jobState[i] = JobState.SeekingBed;
+          store.targetX[i] = bedroom.x; store.targetY[i] = bedroom.y;
+        }
+        continue;
       }
 
       // Work Priorities override (RimWorld Work-tab-style, see citizens.js's hasWorkPriorities/
@@ -1094,7 +1181,12 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       const roomBonus = (recRoom && recRoom.role === RoomRole.RecreationRoom && recRoom.roleValid) ? ROOM_REFILL_BONUS : 1;
       const waterBonus = isWateredAt(structures, store.x[i], store.y[i]) ? WATER_REFILL_BONUS : 1;
       store.social[i] = Math.min(1, store.social[i] + REFILL_RATE * roomBonus * waterBonus * (store.trait[i]?.socialGainMult ?? 1) * augmentSocialGainMultFor(store, i) * hazardRefillMult(world));
-      if (store.social[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
+      // Joy (see citizens.js's JOY_DECAY doc comment): refilled on the SAME Recreation-zone trip
+      // as Social, at the plain base rate (no socialGainMult/augment trait multiplier -- those are
+      // specifically about how well a citizen socializes with others, not a general recreation
+      // multiplier, so they stay scoped to Social only).
+      store.joy[i] = Math.min(1, store.joy[i] + REFILL_RATE * roomBonus * waterBonus * hazardRefillMult(world));
+      if (store.social[i] >= SATISFIED_THRESHOLD && store.joy[i] >= SATISFIED_THRESHOLD) store.jobState[i] = JobState.Idle;
       continue;
     }
 
@@ -1279,20 +1371,26 @@ export function tickJobs(store, zones, staffOnDuty, structures, resourceNodes, i
       // No raw-input gate here, deliberately (see tryClaimFarming's doc comment) -- tending just
       // accrues real time toward the next cycle, using Structure's generic `_workTimer` field the
       // same way 'workshop' does for its own work-in-progress countdown.
+      const cropDef = farmCropDefFor(plot);
+      // Deep Freeze Gardening work-rate reduction (weather.js, real PA deepfreezesystem.txt -- this
+      // project's Farm Plot tending is the real Gardening work type's closest equivalent), scaled by
+      // this crop's real fertilitySensitivity (see CROP_DEFS' doc comment) -- a hardy crop like
+      // Potato shrugs off most of the penalty, a sensitive one like Rice takes close to the full hit.
+      // sensitivity 1 reproduces coldGardeningWorkRateMult(world) exactly (Rice's old, only, behavior).
+      const coldMult = coldGardeningWorkRateMult(world);
+      const cropColdMult = 1 - cropDef.fertilitySensitivity * (1 - coldMult);
       const farmRateMult = breakRateMultFor(store, i) * unrestRateMultFor(world) * arrivalMishapRateMultFor(world)
         * (store.trait[i]?.workSpeedMult ?? 1) * ageBandFor(store.age[i]).workSpeedMult * rankWorkSpeedMultFor(store, i) * augmentWorkSpeedMultFor(store, i) * needsThrottleMultFor(store, i) * sickRateMultFor(store, i) * dependencyRateMultFor(store, i) * inspirationWorkSpeedMultFor(store, i, world?.currentTick ?? 0)
-        // Deep Freeze Gardening work-rate reduction (weather.js, real PA deepfreezesystem.txt --
-        // this project's Farm Plot tending is the real Gardening work type's closest equivalent).
-        * coldGardeningWorkRateMult(world);
+        * cropColdMult;
       plot._workTimer = (plot._workTimer || 0) + farmRateMult;
-      if (plot._workTimer >= FARM_CYCLE_TICKS) {
+      if (plot._workTimer >= cropDef.cycleTicks) {
         plot._workTimer = 0;
         // Paid out as scrap (see FARM_YIELD_PER_CYCLE's doc comment -- no separate Food-stockpile
         // resource exists in this codebase, same "integrate with the economy that actually exists"
         // choice the Processing job already made for its own Components output). The worker stays
         // assigned into the next cycle rather than being released -- a Farm Plot is a standing job,
         // not a one-shot claim like a blueprint or a single workshop unit.
-        world.addScrap(FARM_YIELD_PER_CYCLE, 'farm');
+        world.addScrap(cropDef.yieldPerCycle, 'farm');
         store.skillConstruction[i] += FARM_SKILL_GAIN * (PASSION_GAIN_MULT[store.passionConstruction[i]] ?? 1) * ageBandFor(store.age[i]).skillGainMult;
       }
       continue;

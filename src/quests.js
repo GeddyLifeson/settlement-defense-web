@@ -10,14 +10,18 @@
 // scoped as the non-failing "milestone" half of RimWorld/Prison-Architect's quest-shaped systems).
 //
 // Design notes:
-//  - Two completion-condition KINDS, both deliberately reusable/generic rather than bespoke
+//  - Four completion-condition KINDS, all deliberately reusable/generic rather than bespoke
 //    one-off quest scripts (RimWorld's own QuestScriptDefs are far more varied, but this project's
 //    "keep it simple and checkable purely from world state you already have" scope explicitly
-//    rules that out): SurviveNoLosses ("go N ticks without a net citizen loss") and BankScrap
-//    ("have at least X scrap on hand by tick Y"). Both read only fields other systems already
-//    maintain -- world.citizens (count/isAliveAt, same accessor tickResearch() in research.js and
-//    aliveCitizenCount() in grants.js already use), world.scrap, world.currentTick -- no new
-//    trackable resource is invented anywhere in this file.
+//    rules that out): SurviveNoLosses ("go N ticks without a net citizen loss"), BankScrap ("have
+//    at least X scrap on hand by tick Y"), TradeRequest ("an outside buyer wants a randomized,
+//    scrap-on-hand-independent amount by tick Y" -- BankScrap-shaped to check but a distinct offer
+//    feel, see QuestKind.TradeRequest's own comment), and BranchingContract (two SurviveNoLosses-
+//    or BankScrap-shaped stages chained so stage 2 is only revealed/started once stage 1 succeeds,
+//    see QuestKind.BranchingContract's own comment). All four read only fields other systems
+//    already maintain -- world.citizens (count/isAliveAt, same accessor tickResearch() in
+//    research.js and aliveCitizenCount() in grants.js already use), world.scrap, world.currentTick
+//    -- no new trackable resource is invented anywhere in this file.
 //  - Reward scales to a real risk/reward tradeoff, in the direction that fits each kind's own risk
 //    axis (RimWorld's own quest reward scaling is exactly this shape -- tighter timers and higher
 //    stakes pay more):
@@ -46,8 +50,23 @@
 //    tick, no world.js constructor changes required.
 
 export const QuestKind = Object.freeze({
-  SurviveNoLosses: 'survive_no_losses', // "go `durationTicks` ticks without a net citizen loss"
-  BankScrap: 'bank_scrap',              // "have `targetScrap` scrap on hand by `deadlineTick`"
+  SurviveNoLosses: 'survive_no_losses',     // "go `durationTicks` ticks without a net citizen loss"
+  BankScrap: 'bank_scrap',                  // "have `targetScrap` scrap on hand by `deadlineTick`"
+  // "an outside buyer wants `requestedAmount` scrap on hand by `deadlineTick`" -- looks like
+  // BankScrap mechanically (both just check world.scrap >= a target by a deadline) but is deliberately
+  // NOT the same offer shape: BankScrap's target is always "current scrap + a fixed delta" (so it's
+  // always exactly delta away from trivial/impossible at offer time), where TradeRequest's target is
+  // an externally-randomized absolute ask picked independently of what the colony currently holds --
+  // rewardForTrade() below scales purely off requestedAmount, never off how far away that is from
+  // world.scrap right now. Mirrors RimWorld's caravan/trade-request quests ("a buyer wants X of good
+  // Y") rather than BankScrap's own "grow your stockpile by this much" framing.
+  TradeRequest: 'trade_request',
+  // Two-stage branching contract: stage 1 (its own condition+deadline, drawn from the SAME
+  // survive/bank vocabulary the other kinds already use) must complete before stage 2 is even
+  // revealed/started; only finishing BOTH stages pays the (larger-than-sum) combinedReward, and
+  // failing stage 1 fails the whole contract immediately with nothing paid at all -- see the
+  // BRANCH_* tables and activateBranchStage()/tickQuests() below for the mechanics.
+  BranchingContract: 'branching_contract',
 });
 
 export const QuestStatus = Object.freeze({
@@ -93,6 +112,40 @@ const BANK_TIERS = [
   { key: 'relaxed', label: 'Open Order', deadlineTicks: 1400, delta: 160, rewardMult: 1.0625, minTechLevel: 2 },
 ];
 
+// ---- TradeRequest tiers ---------------------------------------------------------------------
+// minAmount/maxAmount = range the externally-requested amount is randomly drawn from at offer
+// time (NOT relative to world.scrap -- see QuestKind.TradeRequest's own comment above). rewardMult
+// applied to the drawn requestedAmount, same "tighter deadline pays more per unit demanded" shape
+// as BANK_TIERS (1.35x for the fast Small Order down to ~1.05x for the slow Bulk Order).
+const TRADE_TIERS = [
+  { key: 'small_order', label: 'Trade Request: Small Order', deadlineTicks: 400, minAmount: 40, maxAmount: 90, rewardMult: 1.35 },
+  { key: 'standard_order', label: 'Trade Request: Standard Order', deadlineTicks: 700, minAmount: 90, maxAmount: 160, rewardMult: 1.2 },
+  { key: 'bulk_order', label: 'Trade Request: Bulk Order', deadlineTicks: 1200, minAmount: 160, maxAmount: 260, rewardMult: 1.05, minTechLevel: 2 },
+];
+
+// ---- BranchingContract stage pools -----------------------------------------------------------
+// Each stage is drawn from ONE of these two small pools -- deliberately the exact same two
+// completion-condition shapes SurviveNoLosses/BankScrap already use (survive N ticks / bank a
+// delta above current scrap by a deadline), per the task's own "vocabulary stays simple, only the
+// branching STRUCTURE is new" scoping. baseReward numbers here are intentionally smaller than
+// SURVIVE_TIERS/BANK_TIERS' own -- these are half of a two-stage contract, not a whole quest.
+const BRANCH_SURVIVE_STAGES = [
+  { durationTicks: 150, baseReward: 30 },
+  { durationTicks: 300, baseReward: 65 },
+];
+const BRANCH_BANK_STAGES = [
+  { deadlineTicks: 200, delta: 35, rewardMult: 1.4 },
+  { deadlineTicks: 400, delta: 65, rewardMult: 1.25 },
+];
+// Combined payout = (stage1.reward + stage2.reward) * this multiplier -- strictly MORE than the
+// sum of the two stages' own reward figures, so "only completing both pays a larger combined
+// reward" (per the task) is literally true, not just a bigger number because two things happened.
+// This is also exactly what makes failing stage 1 costly in opportunity-terms (never in a punitive
+// take-scrap-away sense, per the header comment's reward-only philosophy) -- the player forfeits
+// this bonus on top of both stage rewards, the same "lose the opportunity, nothing more" shape
+// every other kind in this file already uses.
+const BRANCH_COMBINED_BONUS_MULT = 1.3;
+
 // Named _questsAliveCitizenCount (not the shorter aliveCitizenCount) because grants.js already
 // declares a top-level function of that exact name -- build.py flattens every src/*.js file into
 // one global classic-script scope with no module isolation, so two same-named top-level functions
@@ -118,6 +171,59 @@ function rewardForSurvive(tier, aliveNow) {
 
 function rewardForBank(tier) {
   return Math.round(tier.delta * tier.rewardMult);
+}
+
+// Reward for a TradeRequest tier -- scales off the drawn requestedAmount itself, deliberately NOT
+// off world.scrap at offer/accept/completion time (see QuestKind.TradeRequest's comment). A colony
+// that already happens to be sitting on enough scrap still gets the full reward for fulfilling the
+// request -- it's an external ask being met, not a stockpile-growth milestone.
+function rewardForTrade(tier, requestedAmount) {
+  return Math.round(requestedAmount * tier.rewardMult);
+}
+
+// Picks one random stage (survive- or bank-shaped) for a BranchingContract, at the reward-relevant
+// moment ONLY for the survive case (population exposure is read `aliveNow`, same as
+// rewardForSurvive() above expects). The bank case's actual scrap target is intentionally NOT
+// computed here -- see activateBranchStage() below -- because a bank-shaped stage's target has to
+// be relative to world.scrap at the tick the stage actually STARTS (offer time for stage 1, but
+// stage-1-completion time for stage 2, which can be many ticks later), not at offer time for both.
+function pickBranchStage(rng, aliveNow) {
+  if (rng() < 0.5) {
+    const tier = BRANCH_SURVIVE_STAGES[Math.floor(rng() * BRANCH_SURVIVE_STAGES.length)];
+    return {
+      type: 'survive',
+      durationTicks: tier.durationTicks,
+      reward: rewardForSurvive(tier, aliveNow),
+      desc: `survive ${tier.durationTicks} ticks without losing a citizen`,
+    };
+  }
+  const tier = BRANCH_BANK_STAGES[Math.floor(rng() * BRANCH_BANK_STAGES.length)];
+  return {
+    type: 'bank',
+    deadlineTicks: tier.deadlineTicks,
+    delta: tier.delta,
+    reward: Math.round(tier.delta * tier.rewardMult),
+    desc: `bank ${tier.delta} more scrap than you have when this stage starts, within ${tier.deadlineTicks} ticks`,
+  };
+}
+
+/** Starts (or restarts, for stage 2) the clock on whichever stage of a BranchingContract quest is
+ *  now current -- called once at accept time (stage 1) and again the instant stage 1 succeeds
+ *  (stage 2). Writes the SAME generic fields SurviveNoLosses/BankScrap already use on an active
+ *  quest (deadlineTick, lastAliveCount, targetScrap) so tickQuests()'s per-stage check below can
+ *  reuse that exact logic shape rather than inventing branch-only field names. */
+function activateBranchStage(world, q, stageNum) {
+  const spec = stageNum === 1 ? q.stage1 : q.stage2;
+  q.stage = stageNum;
+  if (spec.type === 'survive') {
+    q.deadlineTick = world.currentTick + spec.durationTicks;
+    q.lastAliveCount = _questsAliveCitizenCount(world);
+    delete q.targetScrap;
+  } else {
+    q.deadlineTick = world.currentTick + spec.deadlineTicks;
+    q.targetScrap = Math.round(world.scrap) + spec.delta;
+    delete q.lastAliveCount;
+  }
 }
 
 // Best-effort colony tech-level read, entirely optional -- world.research is research.js's state
@@ -175,34 +281,66 @@ function ensureQuestState(world) {
  *
  *  Returns the offer object on success ({ id, kind, tierKey, label, desc, reward, ...params,
  *  offeredAtTick, offerExpiresAtTick, status: 'offered' }), or null if no offer was made. */
+// All four kinds are offered with equal odds. Kept as a flat array (rather than nested
+// probability logic) so adding/removing a kind later is a one-line change here, nothing else.
+const OFFERABLE_KINDS = [QuestKind.SurviveNoLosses, QuestKind.BankScrap, QuestKind.TradeRequest, QuestKind.BranchingContract];
+
 export function offerQuest(world, rng = Math.random) {
   const state = ensureQuestState(world);
   if (state.offers.length >= MAX_PENDING_OFFERS) return null;
 
   const techLevel = currentTechLevel(world);
-  const kind = rng() < 0.5 ? QuestKind.SurviveNoLosses : QuestKind.BankScrap;
-  const pool = (kind === QuestKind.SurviveNoLosses ? SURVIVE_TIERS : BANK_TIERS)
-    .filter(t => !t.minTechLevel || techLevel >= t.minTechLevel);
-  const tier = pool[Math.floor(rng() * pool.length)];
+  const kind = OFFERABLE_KINDS[Math.floor(rng() * OFFERABLE_KINDS.length)];
 
-  const offer = { id: state.nextId++, kind, tierKey: tier.key, status: QuestStatus.Offered,
+  const offer = { id: state.nextId++, kind, status: QuestStatus.Offered,
     offeredAtTick: world.currentTick, offerExpiresAtTick: world.currentTick + OFFER_EXPIRY_TICKS };
 
   if (kind === QuestKind.SurviveNoLosses) {
+    const pool = SURVIVE_TIERS.filter(t => !t.minTechLevel || techLevel >= t.minTechLevel);
+    const tier = pool[Math.floor(rng() * pool.length)];
     const aliveNow = _questsAliveCitizenCount(world);
+    offer.tierKey = tier.key;
     offer.label = tier.label;
     offer.durationTicks = tier.durationTicks;
     offer.reward = rewardForSurvive(tier, aliveNow);
     offer.desc = `Keep every citizen alive for ${tier.durationTicks} ticks. Any citizen lost `
       + `fails the contract immediately -- reward is forfeit, nothing else is taken.`;
-  } else {
+  } else if (kind === QuestKind.BankScrap) {
+    const pool = BANK_TIERS.filter(t => !t.minTechLevel || techLevel >= t.minTechLevel);
+    const tier = pool[Math.floor(rng() * pool.length)];
     const target = Math.round(world.scrap) + tier.delta;
+    offer.tierKey = tier.key;
     offer.label = tier.label;
     offer.deadlineTicks = tier.deadlineTicks;
     offer.targetScrap = target;
     offer.reward = rewardForBank(tier);
     offer.desc = `Bank ${target} scrap on hand (+${tier.delta} from now) within ${tier.deadlineTicks} `
       + `ticks. Miss the deadline and the contract just lapses -- no penalty beyond losing the reward.`;
+  } else if (kind === QuestKind.TradeRequest) {
+    const pool = TRADE_TIERS.filter(t => !t.minTechLevel || techLevel >= t.minTechLevel);
+    const tier = pool[Math.floor(rng() * pool.length)];
+    const requestedAmount = Math.round(tier.minAmount + rng() * (tier.maxAmount - tier.minAmount));
+    offer.tierKey = tier.key;
+    offer.label = tier.label;
+    offer.deadlineTicks = tier.deadlineTicks;
+    offer.requestedAmount = requestedAmount;
+    offer.reward = rewardForTrade(tier, requestedAmount);
+    offer.desc = `An outside buyer wants ${requestedAmount} scrap on hand within ${tier.deadlineTicks} `
+      + `ticks, whatever you're currently sitting on. Miss the deadline and the request just lapses `
+      + `-- no penalty beyond losing the reward.`;
+  } else { // BranchingContract
+    const aliveNow = _questsAliveCitizenCount(world);
+    const stage1 = pickBranchStage(rng, aliveNow);
+    const stage2 = pickBranchStage(rng, aliveNow);
+    const combinedReward = Math.round((stage1.reward + stage2.reward) * BRANCH_COMBINED_BONUS_MULT);
+    offer.tierKey = 'two_stage';
+    offer.label = 'Two-Stage Contract';
+    offer.stage1 = stage1;
+    offer.stage2 = stage2;
+    offer.reward = combinedReward;
+    offer.desc = `Stage 1: ${stage1.desc}. Complete it to reveal Stage 2: ${stage2.desc}. Only `
+      + `completing BOTH stages pays the full ${combinedReward} scrap -- failing stage 1 fails the `
+      + `whole contract immediately, before stage 2 is even offered, and nothing is paid.`;
   }
 
   state.offers.push(offer);
@@ -225,7 +363,9 @@ export function acceptQuest(world, offerId) {
   if (offer.kind === QuestKind.SurviveNoLosses) {
     offer.deadlineTick = world.currentTick + offer.durationTicks;
     offer.lastAliveCount = _questsAliveCitizenCount(world); // watermark tickQuests() compares against each tick
-  } else {
+  } else if (offer.kind === QuestKind.BranchingContract) {
+    activateBranchStage(world, offer, 1); // starts stage 1's own sub-deadline from THIS tick; stage 2 isn't touched until stage 1 succeeds
+  } else { // BankScrap, TradeRequest -- both are a flat "hit a scrap target by a deadline" check
     offer.deadlineTick = world.currentTick + offer.deadlineTicks;
   }
   state.active.push(offer);
@@ -291,8 +431,11 @@ export function tickQuests(world) {
         if (typeof world.addScrap === 'function') world.addScrap(q.reward, 'quest');
         logQuest(world, `Contract fulfilled: ${q.label} (+${q.reward} scrap)`);
       }
-    } else { // BankScrap
-      if (world.scrap >= q.targetScrap) {
+    } else if (q.kind === QuestKind.BankScrap || q.kind === QuestKind.TradeRequest) {
+      // Both check the exact same shape (world.scrap >= a target by q.deadlineTick) -- only how
+      // the target was chosen at offer time differs (see QuestKind.TradeRequest's comment).
+      const target = q.kind === QuestKind.BankScrap ? q.targetScrap : q.requestedAmount;
+      if (world.scrap >= target) {
         q.status = QuestStatus.Succeeded;
         state.active.splice(i, 1);
         state.history.push(q);
@@ -304,12 +447,51 @@ export function tickQuests(world) {
         state.active.splice(i, 1);
         state.history.push(q);
         if (state.history.length > 30) state.history.shift();
-        logQuest(world, `Contract failed: ${q.label} (deadline passed, ${Math.max(0, Math.round(q.targetScrap - world.scrap))} scrap short)`);
+        logQuest(world, `Contract failed: ${q.label} (deadline passed, ${Math.max(0, Math.round(target - world.scrap))} scrap short)`);
+      }
+    } else { // BranchingContract -- check whichever stage (1 or 2) is currently active
+      const spec = q.stage === 1 ? q.stage1 : q.stage2;
+      let stageSucceeded = false, stageFailed = false;
+
+      if (spec.type === 'survive') {
+        const aliveNow = _questsAliveCitizenCount(world);
+        if (aliveNow < q.lastAliveCount) stageFailed = true;
+        else {
+          q.lastAliveCount = aliveNow;
+          if (world.currentTick >= q.deadlineTick) stageSucceeded = true;
+        }
+      } else { // bank
+        if (world.scrap >= q.targetScrap) stageSucceeded = true;
+        else if (world.currentTick >= q.deadlineTick) stageFailed = true;
+      }
+
+      if (stageFailed) {
+        q.status = QuestStatus.Failed;
+        state.active.splice(i, 1);
+        state.history.push(q);
+        if (state.history.length > 30) state.history.shift();
+        logQuest(world, `Contract failed: ${q.label} (stage ${q.stage} of 2 not met -- nothing paid)`);
+      } else if (stageSucceeded && q.stage === 1) {
+        activateBranchStage(world, q, 2); // reveals + starts stage 2's own sub-deadline right now; quest stays Active
+        logQuest(world, `Contract stage 1/2 complete: ${q.label} -- stage 2 revealed (${q.stage2.desc})`);
+      } else if (stageSucceeded) { // stage 2 succeeded -- both stages done, pay the combined reward
+        q.status = QuestStatus.Succeeded;
+        state.active.splice(i, 1);
+        state.history.push(q);
+        if (state.history.length > 30) state.history.shift();
+        if (typeof world.addScrap === 'function') world.addScrap(q.reward, 'quest');
+        logQuest(world, `Contract fulfilled: ${q.label} (both stages complete, +${q.reward} scrap)`);
       }
     }
   }
 }
 
+// Both functions below are already kind-agnostic: they shallow-copy whatever fields happen to be
+// on each quest/offer object, so TradeRequest's requestedAmount and BranchingContract's
+// stage/stage1/stage2/deadlineTick/lastAliveCount/targetScrap all round-trip through save/load with
+// no changes needed here -- same reasoning MAX_PENDING_OFFERS/MAX_ACTIVE_QUESTS above needed no
+// changes either, since both caps count offers/active quests generically across every kind, never
+// per-kind.
 export function serializeQuests(state) {
   return {
     nextId: state.nextId,

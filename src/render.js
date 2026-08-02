@@ -1080,11 +1080,10 @@ export class Renderer {
       ctx.beginPath(); ctx.arc(sx, sy, size * 0.09, 0, Math.PI * 2); ctx.fill();
       return;
     }
-    if (s.kind === 'trap' || s.kind === 'trap_spike' || s.kind === 'trap_explosive') {
-      // trap_spike/trap_explosive (siege.js's TRAP_KINDS, real PA trap variety) reuse the
-      // original single trap's sprite/color -- distinct per-kind art is a reasonable future
-      // follow-up, but rendering as the wrong structure entirely (the generic turret fallback
-      // below) would actively mislead the player, so this is the priority fix.
+    if (s.kind === 'trap') {
+      // trap_spike/trap_explosive (siege.js's TRAP_KINDS, real PA trap variety) now have their
+      // own distinct art further below (spike/blade motif and hazard-canister motif respectively)
+      // -- this branch is the plain trap's original spring-jaw sprite only.
       const drew = drawSprite(ctx, 'trap',
         { FILL: 'rgba(140,20,20,0.55)', FILL_HI: 'rgba(190,40,30,0.55)', TEETH: 'rgba(230,200,180,0.7)', OUTLINE },
         sx, sy, size * 0.75);
@@ -2082,6 +2081,206 @@ export class Renderer {
       }
       ctx.strokeRect(0, -size * 0.05, barLen, size * 0.1);
       ctx.restore();
+      return;
+    }
+    if (s.kind === 'turret_mini') {
+      // Cheap/short-range tier (siege.js's TURRET_TIERS.turret_mini: half the plain turret's
+      // range, weakest damage, always-affordable early pick). Reuses the 'turret' SVG silhouette
+      // (same round-housing-plus-barrel read as its kind, so it's still legible as "a turret" at
+      // a glance) but scaled down and recolored duller/less-saturated than the base turret's
+      // slate -- a visibly smaller, cheaper-looking unit, same two-tier drawSprite+fallback
+      // pattern as plain turret above.
+      const base = '#6b7178'; // duller, more desaturated than turretBase's '#7e8894'
+      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : base;
+      const barrel = '#3a3a3a';
+      const drew = drawSprite(ctx, 'turret',
+        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade(base, 0.25), BARREL: s.destroyed ? fill : barrel, OUTLINE },
+        sx, sy, size * 0.68);
+      if (!drew) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(sx - size * 0.34, sy - size * 0.34, size * 0.68, size * 0.68);
+        ctx.strokeRect(sx - size * 0.34, sy - size * 0.34, size * 0.68, size * 0.68);
+        if (!s.destroyed) {
+          ctx.fillStyle = barrel;
+          ctx.fillRect(sx - size * 0.05, sy - size * 0.4, size * 0.1, size * 0.26);
+        }
+      }
+      return;
+    }
+    if (s.kind === 'turret_auto') {
+      // Mid-tier autocannon (siege.js's TURRET_TIERS.turret_auto: longer range + harder-hitting
+      // than plain turret, but a real minRange dead zone -- can't hit close targets). Reuses the
+      // plain turret's silhouette as the base draw (still reads as "a turret") but at full size
+      // plus two side ammo-drum blocks bolted on, so it silhouettes visibly bulkier/more
+      // mechanical than the plain turret and taller/premium-looking sniper. Mid-tier industrial
+      // olive-gray, distinct from mini's dull gray and sniper's cool premium blue below.
+      const base = '#7a8266';
+      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : base;
+      const barrel = '#2b2b2b';
+      const drew = drawSprite(ctx, 'turret',
+        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade(base, 0.3), BARREL: s.destroyed ? fill : barrel, OUTLINE },
+        sx, sy, size);
+      if (!drew) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+        ctx.strokeRect(sx - size / 2, sy - size / 2, size, size);
+        if (!s.destroyed) {
+          ctx.fillStyle = barrel;
+          ctx.fillRect(sx - size * 0.08, sy - size * 0.6, size * 0.16, size * 0.4);
+        }
+      }
+      if (!s.destroyed) {
+        // Bolted-on ammo-drum blocks -- the "bulkier/more mechanical" tell, absent from every
+        // other turret tier.
+        ctx.fillStyle = shade(fill, -0.18);
+        ctx.fillRect(sx - size * 0.58, sy - size * 0.14, size * 0.18, size * 0.3);
+        ctx.fillRect(sx + size * 0.4, sy - size * 0.14, size * 0.18, size * 0.3);
+        ctx.strokeRect(sx - size * 0.58, sy - size * 0.14, size * 0.18, size * 0.3);
+        ctx.strokeRect(sx + size * 0.4, sy - size * 0.14, size * 0.18, size * 0.3);
+      }
+      return;
+    }
+    if (s.kind === 'turret_sniper') {
+      // Premium precision tier (siege.js's TURRET_TIERS.turret_sniper: longest range, heaviest
+      // single hit, slowest cooldown -- costliest ammo per shot too, see AMMO_PER_SHOT_TURRET_
+      // SNIPER). Reuses the plain turret housing but caps it with an extra long, thin barrel
+      // primitive drawn on top (the template's own stub barrel is too short/thick to read as
+      // "sniper"), plus a premium cool-blue-steel palette with a gold muzzle band -- the one
+      // turret tier that visibly reads as "expensive" at a glance.
+      const base = '#3f4f68';
+      const fill = s.destroyed ? 'rgba(60,60,60,0.6)' : base;
+      const barrel = '#1c2430';
+      const drew = drawSprite(ctx, 'turret',
+        { FILL: fill, FILL_HI: s.destroyed ? 'rgba(80,80,80,0.6)' : shade(base, 0.32), BARREL: s.destroyed ? fill : barrel, OUTLINE },
+        sx, sy, size * 0.9);
+      if (!drew) {
+        ctx.fillStyle = fill;
+        ctx.fillRect(sx - size * 0.45, sy - size * 0.45, size * 0.9, size * 0.9);
+        ctx.strokeRect(sx - size * 0.45, sy - size * 0.45, size * 0.9, size * 0.9);
+      }
+      if (!s.destroyed) {
+        // Long thin barrel, extending well past the housing -- the silhouette tell that reads
+        // "precision rifle" instead of the stubby autocannon nub every other tier uses.
+        ctx.fillStyle = barrel;
+        ctx.fillRect(sx - size * 0.045, sy - size * 0.82, size * 0.09, size * 0.62);
+        ctx.strokeRect(sx - size * 0.045, sy - size * 0.82, size * 0.09, size * 0.62);
+        ctx.fillStyle = '#cbb87e'; // gold muzzle band -- the premium accent
+        ctx.fillRect(sx - size * 0.06, sy - size * 0.84, size * 0.12, size * 0.08);
+      }
+      return;
+    }
+    if (s.kind === 'mortar') {
+      // Indirect-fire tube (siege.js's tickTurrets mortar branch: bypasses line of sight, genuinely
+      // inaccurate, most expensive ammo in the game -- AMMO_PER_SHOT_MORTAR). Deliberately NOT a
+      // turret-style dome-plus-barrel: a squat angled base plate with a wide tube pointed skyward,
+      // so it silhouettes as "lobs shells over walls" rather than "aims directly at a target" even
+      // before it fires. No SVG template exists for this silhouette, so (matching the "cheap, no
+      // new asset needed" precedent already used by checkpoint/workshop/farm_plot above) it's a
+      // plain Canvas primitive with no drawSprite tier.
+      const plate = s.destroyed ? 'rgba(70,66,58,0.5)' : '#5a5448';
+      const tube = s.destroyed ? 'rgba(70,66,58,0.5)' : '#3c3a34';
+      // Base plate -- wide and flat, planted on the ground, distinct from every turret's round housing.
+      ctx.fillStyle = plate;
+      ctx.beginPath();
+      ctx.ellipse(sx, sy + size * 0.28, size * 0.44, size * 0.16, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      if (!s.destroyed) {
+        ctx.fillStyle = shade(plate, 0.22);
+        ctx.beginPath();
+        ctx.ellipse(sx - size * 0.14, sy + size * 0.22, size * 0.16, size * 0.06, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      // Tube, angled sharply upward off the plate -- the core "mortar, not turret" silhouette tell.
+      ctx.save();
+      ctx.translate(sx + size * 0.02, sy + size * 0.2);
+      ctx.rotate(-1.05);
+      ctx.fillStyle = tube;
+      ctx.fillRect(-size * 0.11, -size * 0.78, size * 0.22, size * 0.78);
+      ctx.strokeRect(-size * 0.11, -size * 0.78, size * 0.22, size * 0.78);
+      if (!s.destroyed) {
+        ctx.fillStyle = shade(tube, 0.28);
+        ctx.fillRect(-size * 0.11, -size * 0.78, size * 0.07, size * 0.78); // upper-left highlight strip
+      }
+      // Muzzle ring at the open end.
+      ctx.fillStyle = s.destroyed ? tube : '#242220';
+      ctx.beginPath(); ctx.ellipse(0, -size * 0.78, size * 0.13, size * 0.05, 0, 0, Math.PI * 2); ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+      return;
+    }
+    if (s.kind === 'trap_spike') {
+      // Cheap melee deadfall (siege.js's TRAP_PROFILES.trap_spike: DamageType.Blunt, no blast
+      // radius -- a purely single-target melee hazard). Deliberately NOT the plain trap's round
+      // jaw-and-teeth silhouette: a low plate bristling with a few plain steel spikes reads as
+      // "cheap melee hazard" distinctly from the red spring-jaw motif, and stays small/plain to
+      // match its bargain-bin price. No SVG template for this silhouette, plain Canvas primitive
+      // (same "no new asset needed" precedent as mortar above).
+      const plate = s.destroyed ? 'rgba(70,66,60,0.4)' : '#5c564a';
+      const spike = s.destroyed ? 'rgba(90,88,84,0.4)' : '#b8b4a8';
+      ctx.fillStyle = plate;
+      ctx.beginPath();
+      ctx.ellipse(sx, sy + size * 0.1, size * 0.34, size * 0.14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      if (!s.destroyed) {
+        ctx.fillStyle = spike;
+        ctx.strokeStyle = OUTLINE;
+        ctx.lineWidth = Math.max(1, size * 0.03);
+        for (const dx of [-0.2, 0, 0.2]) {
+          ctx.beginPath();
+          ctx.moveTo(sx + dx * size - size * 0.06, sy + size * 0.14);
+          ctx.lineTo(sx + dx * size, sy - size * 0.36);
+          ctx.lineTo(sx + dx * size + size * 0.06, sy + size * 0.14);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+        }
+      }
+      return;
+    }
+    if (s.kind === 'trap_explosive') {
+      // Costlier blast trap (siege.js's TRAP_PROFILES.trap_explosive: DamageType.Explosive,
+      // radius > 0 -- hits every attacker in range, not just the one that triggers it). Reads as
+      // "volatile/dangerous" rather than the plain trap's bite motif: a squat canister with a
+      // charge light, wrapped in the same black/hazard-yellow diagonal stripe language checkpoint's
+      // boom-bar already uses for "caution" -- so the danger cue is consistent across the game, not
+      // a one-off. No SVG template for this silhouette, plain Canvas primitive (same precedent as
+      // mortar/trap_spike above).
+      const canister = s.destroyed ? 'rgba(90,70,40,0.4)' : '#8a6a20';
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, size * 0.3, size * 0.24, 0, 0, Math.PI * 2);
+      ctx.closePath();
+      ctx.clip();
+      ctx.fillStyle = canister;
+      ctx.fillRect(sx - size * 0.4, sy - size * 0.4, size * 0.8, size * 0.8);
+      if (!s.destroyed) {
+        // Hazard stripes clipped to the canister's own silhouette -- same "warning stripe" language
+        // as checkpoint's boom bar, at full saturation as the deliberate hazard-color exception.
+        const stripeW = size * 0.13;
+        for (let sxOff = -size * 0.5, idx = 0; sxOff < size * 0.5; sxOff += stripeW, idx++) {
+          ctx.fillStyle = idx % 2 === 0 ? '#e6c02a' : '#2b2620';
+          ctx.save();
+          ctx.translate(sx, sy);
+          ctx.rotate(0.5);
+          ctx.fillRect(sxOff, -size * 0.6, stripeW, size * 1.2);
+          ctx.restore();
+        }
+      }
+      ctx.restore();
+      ctx.strokeStyle = OUTLINE;
+      ctx.lineWidth = Math.max(1, size * 0.05);
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, size * 0.3, size * 0.24, 0, 0, Math.PI * 2);
+      ctx.stroke();
+      if (!s.destroyed) {
+        // Pulsing charge light -- the "armed and volatile" tell, same pulse language as
+        // workshop's work-light/tesla's arc.
+        const pulse = 0.5 + 0.5 * Math.sin(Date.now() / 150);
+        ctx.fillStyle = `rgba(255,60,40,${0.6 + 0.4 * pulse})`;
+        ctx.beginPath(); ctx.arc(sx, sy - size * 0.02, size * 0.07, 0, Math.PI * 2); ctx.fill();
+      }
       return;
     }
     // turret (default)

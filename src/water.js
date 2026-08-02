@@ -19,7 +19,10 @@ function water_isSource(s) {
 }
 
 function water_isConductor(s) {
-  return (s.kind === 'pipe' || water_isSource(s)) && !s.destroyed && !s.underConstruction && !s.frozen;
+  // 'valve' (real Prison Architect water-network connector) joins 'pipe' and the pump source as a
+  // live conductor tile -- same flood-fill participation, just its own freeze-chance table (see
+  // VALVE_FREEZE_CHANCE below).
+  return (s.kind === 'pipe' || s.kind === 'valve' || water_isSource(s)) && !s.destroyed && !s.underConstruction && !s.frozen;
 }
 
 // Cheap order-sensitive hash of every live conductor's tile+kind, so the O(n) rebuild only runs
@@ -130,16 +133,22 @@ function freezeTierChance(coldStreakTicks) {
 // Valve/pump freeze split (real Prison Architect pipefreezingsystem.txt-adjacent data, see task
 // brief): valves freeze much more readily than plain pipe (0.35/0.65/0.90 vs pipe's 0.07/0.17/0.30
 // above) and pumps freeze ONLY at the top Cold-duration tier, at a flat 0.50 -- distinct shapes,
-// not just scaled-up pipe numbers. This project has no 'valve' structure kind (grep confirms only
-// 'pipe' and 'pump' exist as water-network buildables -- see input.js's tool list/BUILD_COST), so
-// only the pump half of this split is actually wireable; the valve chance table is intentionally
-// NOT added since there's no structure kind for it to key off (would be dead code with nothing to
-// ever match it). If a Valve buildable is added later, this is the spot to add a
-// VALVE_FREEZE_CHANCE = [0.35, 0.65, 0.90] table and a matching kind check below.
+// not just scaled-up pipe numbers. 'valve' is a real structure kind now (economy.js's BUILD_COST,
+// input.js's toolbar) -- cheap water-network connector, joins the flood-fill exactly like pipe
+// (see water_isConductor above) but rolls against this table instead of pipe's FREEZE_TIER_CHANCE.
+export const VALVE_FREEZE_CHANCE = [0.35, 0.65, 0.90]; // real PA numbers, escalating with Cold duration, same tier breakpoints as FREEZE_TIER_TICKS
 const PUMP_FREEZE_CHANCE_L3 = 0.50; // real PA number -- pumps never freeze at tier 1/2, only tier 3
 
 function pumpFreezeChance(coldStreakTicks) {
   return coldStreakTicks >= FREEZE_TIER_TICKS[2] ? PUMP_FREEZE_CHANCE_L3 : 0;
+}
+
+function valveFreezeChance(coldStreakTicks) {
+  let chance = VALVE_FREEZE_CHANCE[0];
+  for (let i = 0; i < FREEZE_TIER_TICKS.length; i++) {
+    if (coldStreakTicks >= FREEZE_TIER_TICKS[i]) chance = VALVE_FREEZE_CHANCE[i];
+  }
+  return chance;
 }
 
 /** Call once per tick from SimWorld.tick(), after weather.js's tickWeather so world.weather /
@@ -149,7 +158,7 @@ function pumpFreezeChance(coldStreakTicks) {
 export function tickPipeFreezing(world) {
   if (world.weather !== 'Cold') {
     for (const s of world.structures) {
-      if ((s.kind === 'pipe' || s.kind === 'pump') && s.frozen) s.frozen = false;
+      if ((s.kind === 'pipe' || s.kind === 'pump' || s.kind === 'valve') && s.frozen) s.frozen = false;
     }
     return;
   }
@@ -161,16 +170,17 @@ export function tickPipeFreezing(world) {
 
   const frozenKeys = new Set();
   for (const s of world.structures) {
-    if ((s.kind === 'pipe' || s.kind === 'pump') && s.frozen && !s.destroyed) frozenKeys.add(waterTileKey(s.x, s.y));
+    if ((s.kind === 'pipe' || s.kind === 'pump' || s.kind === 'valve') && s.frozen && !s.destroyed) frozenKeys.add(waterTileKey(s.x, s.y));
   }
 
   let frozeAny = false;
   for (const s of world.structures) {
-    if (s.kind !== 'pipe' && s.kind !== 'pump') continue;
+    if (s.kind !== 'pipe' && s.kind !== 'pump' && s.kind !== 'valve') continue;
     if (s.destroyed || s.underConstruction || s.frozen) continue;
-    // Pump uses its own distinct L3-only chance table (see pumpFreezeChance above); pipe keeps
-    // the existing, already-verified-correct per-tier chance unchanged.
-    let roll = s.kind === 'pump' ? pumpFreezeChance(streak) : chance;
+    // Pump uses its own distinct L3-only chance table (see pumpFreezeChance above); valve uses its
+    // own much-higher-than-pipe table (see valveFreezeChance above); pipe keeps the existing,
+    // already-verified-correct per-tier chance unchanged.
+    let roll = s.kind === 'pump' ? pumpFreezeChance(streak) : s.kind === 'valve' ? valveFreezeChance(streak) : chance;
     const tx = Math.floor(s.x), ty = Math.floor(s.y);
     for (const [dx, dy] of WATER_NEIGHBORS) {
       if (frozenKeys.has((tx + dx) * WATER_TILE_STRIDE + (ty + dy))) { roll += FREEZE_ADJACENT_BONUS; break; }

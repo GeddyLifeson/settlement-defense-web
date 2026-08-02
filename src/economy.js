@@ -7,6 +7,12 @@ export const BUILD_COST = {
   wire: 1, // power conduit -- deliberately near-free so long runs are a layout problem, not a cost one
   pump: 28, // water source, see water.js -- priced close to generator since it's the analogous grid root
   pipe: 1, // water conduit, mirrors wire's near-free long-run pricing, see water.js
+  // Valve (real Prison Architect water-network connector, see water.js's water_isConductor/
+  // VALVE_FREEZE_CHANCE): joins the pipe/pump flood-fill exactly like pipe does, priced a bit
+  // above pipe's near-free 1 (it's a discrete junction fixture, not a per-tile run cost) but
+  // well below pump's 28 -- it has no pump's source role, just connectivity, so it shouldn't
+  // approach source pricing.
+  valve: 4,
   fence: 3,
   trap: 15,
   // Trap variety (RimWorld's real deadfall/IED-trap-tier split): trap (above) is kept exactly as
@@ -113,6 +119,11 @@ export const BUILD_COST = {
   // real, measured protection (see siege.js's comment on the average-damage reduction it buys a
   // vested citizen) but civilian-grade personal gear, not a defense placement of its own.
   vest: 10,
+  // Shield (siege.js's EnergyShield -- a separate absorb-before-armor layer, purchasable
+  // alongside Vest, not instead of it): priced above SPECIALIST_WEAPON_COST (security.js, 60)
+  // to keep guaranteed damage negation the top-tier personal-gear purchase, above Vest's
+  // civilian-grade mitigation-roll protection.
+  shield: 75,
   // Fitness Station (PA needs.txt Exercise -- see citizens.js's EXERCISE_DECAY / jobs.js's
   // SeekingExercise-Exercising job / rooms.js's RoomRole.Gymnasium): ONE consolidated buildable
   // standing in for PA's whole real gym-equipment catalog (Treadmill/TyreApparatus/PullUpBars/

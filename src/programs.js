@@ -436,12 +436,49 @@ export function applyAttendingTick(site, store, i) {
   }
 }
 
+// coverageplans.js hook point: a future coverage plan could discount program/training session
+// costs the same way coverageplans.js's coveragePlanDiscountMult already discounts economy.js's
+// buildCost() (see economy.js's buildCost -- `cost *= coveragePlanDiscountMult(world, kind)`).
+// Named to mirror that established discount-lookup convention (coveragePlanDiscountMult /
+// researchBuildCostMultiplier), just for programs.js's own cost domain instead of buildables.
+// Kept a PURE lookup, unconditionally 1 (no discount) for now -- coverageplans.js is owned by a
+// different concurrent agent this pass doesn't see, so there is nothing here to actually key a
+// discount off yet. sessionCostFor() below already multiplies by this, so the moment
+// coverageplans.js starts returning something other than 1 for a given programKind, the real
+// scrap deduction picks it up with zero further changes to this file.
+export function trainingCostMultFor(world, programKind) {
+  return 1; // HOOK POINT: coverageplans.js may key a real discount off `programKind` here later.
+}
+
+// Real scrap cost of one session of `kind`, discount hook applied and rounded/floored the same
+// way economy.js's buildCost() rounds its own discounted result.
+function sessionCostFor(world, kind) {
+  const def = PROGRAM_DEFS[kind];
+  return Math.max(0, Math.round((def.sessionCost || 0) * trainingCostMultFor(world, kind)));
+}
+
 // Called when citizen i's session-length timer completes one full session at `site` (see jobs.js).
 // sessionsDone is the running per-citizen count of completed sessions at THIS program kind
 // (citizens.js's programSessionsDone, reset once a course is graduated or abandoned). Returns
 // { courseComplete, graduated } so jobs.js knows whether to reset the counter / log a milestone.
 export function completeSession(world, site, store, i, sessionsDone) {
   const def = PROGRAM_DEFS[site.kind];
+
+  // Real sessionCost deduction (PROGRAM_DEFS.sessionCost was previously defined on every kind but
+  // never actually spent anywhere -- programs ran free regardless of cost). This function fires
+  // exactly once per SESSION completed (jobs.js's Attending block calls this every time
+  // programAttendTicks reaches sessionLengthTicks, not just on the course-completing call), so
+  // charging here matches PA's real per-session SessionCost rather than a lump sum at graduation.
+  // Same canAfford-then-spend shape as economy.js's spend() (see that file's `canAfford`/`spend`
+  // pair) so this can never drive world.scrap negative: if the colony can't cover it, the session
+  // the citizen already attended simply isn't clawed back (applyAttendingTick's effects already
+  // landed) and the deduction is skipped rather than going negative or blocking completion.
+  const cost = sessionCostFor(world, site.kind);
+  if (world.scrap >= cost) {
+    world.scrap -= cost;
+    if (world.finance) world.finance.buildSpend += cost; // same budget-report ledger bucket economy.js's spend() posts to
+  }
+
   if (sessionsDone < def.numSessions) return { courseComplete: false, graduated: false };
 
   // Course complete -- Difficulty-style graduation roll (PA's real Difficulty stat, only

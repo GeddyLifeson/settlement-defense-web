@@ -1784,3 +1784,111 @@ run trace to the two pre-existing combat paths (`tickAttackerVsCitizens`, `tickH
 but correctly rare rather than dominating.
 
 Not yet committed as of this handoff update.
+
+## Roadmap wave: 19 remaining-gap items, one dedicated agent per item (same day)
+
+After the RimWorld/PA adoption wave above, the user asked for a roadmap of what was left
+undone/deferred, then "DO IT ALL" with an explicit "subagent for each bullet point" -- 19 items
+(R1-R19), one agent each, no consolidation. `isolation: 'worktree'` failed immediately for every
+agent ("not in a git repository") -- this environment can't do git-worktree isolation the way the
+Agent tool expects, so instead of true isolation, the 19 were grouped by which files they actually
+touch and run via the Workflow tool's `pipeline`/`parallel` composition: 7 fully-independent items
+(art, test-cache fix, quest kinds, trait data, and the 3-piece wage economy) ran in one `parallel()`
+group; three real file-overlap clusters (`world.js`+`input.js`+`water.js`; `siege.js`+`weather.js`+
+`power.js`, 7 agents deep; `jobs.js`+`citizens.js`, 2 agents) each ran as their own internal
+sequential chain so no two agents ever wrote the same file at the same tick of wall-clock time. All
+4 top-level groups ran concurrently with each other.
+
+**First pass: 12/19 landed, 7 failed on the account's session rate limit** (not a real error --
+literally "You've hit your session limit, resets 7pm"), mid-way through the siege/weather chain and
+at the very start of the jobs/citizens chain. Resumed the same workflow run via
+`resumeFromRunId` once the limit cleared -- all 12 prior successes replayed instantly from cache,
+the 7 failures re-ran and all succeeded. Final: 19/19.
+
+**What landed** (each item independently verified/self-tested by its own agent; real numbers where
+the item cites one):
+- **R1** wall demolish: finished walls are now demolishable (50% refund) -- turned out NOT to need
+  the feared wide-blast-radius `grid.js` change; every consumer of `wallThingId` already reads the
+  live array every tick, so clearing one bit and refunding was the whole fix.
+- **R2** distinct SVG/Canvas-primitive art for all 6 new structure kinds from the prior wave.
+- **R3** guard-rank Specialist suppression bonus (real semantics, corrected from the original ask:
+  it's the Specialist's own incoming-suppression *resistance*, not suppression inflicted on
+  attackers -- no such attacker-suppression mechanism exists in this engine).
+- **R4** `programGraduations` now persists across save/load.
+- **R5** test-harness stale-cache bug (the 3rd instance this session) -- fixed via an injected
+  `importmap` in `tests/run.html` mapping every `../src/X.js` specifier to a timestamped one,
+  transparently cache-busting even transitive `src → src` imports with zero test-file changes.
+- **R6/R7/R8** a real wage-cost economy: Officer/Specialist guards now cost real scrap per in-game
+  day (`tickStaffWages`, gated conservatively -- explicitly checked against this session's two prior
+  balance regressions before writing any code), a Coverage Plan wage-discount hook, and a real
+  pre-existing bug fix (`programs.js`'s `sessionCost` was defined but never actually deducted --
+  now it is, gated so it can never push scrap negative).
+- **R9** crop-type variance (Rice/Potato, real yield/cycle-time ratios) and animal trainability
+  tiers + a manhunter/hostile-animal event in `security.js` (no dedicated animal file exists).
+- **R10** a real EMP mechanic: a new `Saboteur` attacker archetype (opt-in, wave 5+, softest combat
+  stats in the roster) that can temporarily stun turrets/generators, mirroring the existing
+  `StunBaton`/`applyStun` shape exactly.
+- **R11** weapon warmup/aim-time and a citizen Shield (absorb-before-armor energy pool). **Found a
+  real hard crash of its own making**: `tickStaffCombat` needed new `citizens.js` fields
+  (`_staffWarmup`/`_staffWarmupTarget`) that didn't exist yet, so any Guard/Sniper holding a live
+  target would throw. R13, running concurrently in the jobs/citizens chain, independently hit and
+  fixed that exact crash. Shields were built defensively duck-typed (`citizens.hasShield?.[c]`) so
+  they stayed inert rather than crashing -- this handoff's own integration pass (below) made them
+  live.
+- **R12** a real season/temperature system (`SEASON_LENGTH_TICKS=3000`, `YEAR_LENGTH_TICKS=12000`,
+  reasoned against this project's own 22-36k-tick baseline) gating weather eligibility structurally
+  (Snow=0 outside Winter, etc.) -- fully self-contained, `pickWeather` was already module-private.
+- **R13** self-isolation (moderate break) and bounded one-shot property damage (severe break,
+  reusing `factions.js`'s Wrecking shape) replacing the old flat rate-penalty-only break model, plus
+  real tracked Joy/Comfort/Beauty needs. Explicitly designed so neither new break behavior adds
+  combat-exposure risk, per this session's own documented Hygiene-regression lesson.
+- **R14** two new quest kinds (`TradeRequest`, `BranchingContract`) in `quests.js`.
+- **R15** Rolling Blackout + Faulty Wiring calamities, gated on a real newly-added `gridLoadFraction`
+  aggregate (no such number existed before) -- deliberately player-caused/avoidable only (build more
+  generation, don't overload the grid), which structurally rules out the "invisible passive drain on
+  a hands-off colony" failure class this session hit twice already.
+- **R16** FoggyRain/VolcanicWinter/Eclipse/Aurora weather variants (Aurora is the one positive one).
+- **R17** a `conflictsWith`/`traitsConflict` conflicting-trait-pair table (pure data, no live effect
+  yet -- seeded for a future second-trait-slot).
+- **R18** a per-attacker gear-tier roll (Poor/Standard/Good, ±18%) layered on wave-budget archetype
+  selection, verified mathematically mirror-symmetric around the 1.0 baseline so it adds variance
+  without shifting average difficulty (~1.0025 average multiplier integrated across the full
+  wave-progress range).
+- **R19** a `valve` water-network structure kind with its own real freeze-chance tiers, distinct
+  from pipe's and pump's.
+
+**Integration pass** (done directly): wired `tickStaffWages`/`tickShieldRecharge`/
+`tickWildAnimalAggression` into `world.js`'s tick loop (none of the three were actually called
+anywhere -- R6/R11/R9 all correctly built and documented the exact hook needed but didn't own
+`world.js`); connected R7's `wageDiscountMultFor` into R6's wage deduction; added `wageCost` to the
+finance ledger (constructor + both `totalExpense` rollups + budget-report UI row, same pattern as
+`factionLoss`); **added the missing `hasShield`/`shieldEnergy`/`shieldBrokenTicks` fields to
+`citizens.js`** (mirroring `hasVest` exactly) so R11's fully-tested shield logic stops being inert;
+added `world.buyShield`/`isShieldedAt`, a `shield` `BUILD_COST` entry, and a real "Buy Shield"
+inspector button (mirroring "Buy Vest" end-to-end, HTML + click handler + hide-once-equipped toggle).
+
+**Verified**: zero duplicate top-level declarations across all touched files (same regex scan as
+the prior wave), `tests/run.html` 133/133 passing cleanly on the first try (no more stale-cache false
+alarms, thanks to R5's own fix landing before this check ran), and a fresh 3-seed 25k-tick soak with
+zero runtime errors/NaN. One seed's survival time visibly dropped from the prior wave's baseline
+(13256 -> 7865 ticks); death-cause tracing (same `Object.defineProperty`-on-`citizens.alive`
+technique as this session's original scrap-drain investigation) confirmed all 27 deaths trace to the
+same pre-existing, already-verified `tickAttackerVsCitizens` combat path -- zero from any new
+mechanic (no EMP/Saboteur, gear-tier, shield, mental-break, or Deep-Freeze-adjacent deaths) --
+consistent with normal seed-to-seed variance now that wave-spawning consumes extra RNG draws for the
+new archetype/gear-tier rolls, not a real regression.
+
+**Known follow-ups, explicitly deferred, not silent gaps** (all flagged by the implementing agents
+themselves):
+- `dogs`/`wildAnimals` save/load doesn't persist `trainingTier`/`hostile`/`health` state -- training
+  resets to Tameness and a mid-fight hostile animal goes passive on reload.
+- `render.js`'s Farm Plot growth bar still reads the flat `FARM_CYCLE_TICKS` instead of
+  `farmCropDefFor(s).cycleTicks` -- a Potato plot's sprout visually "finishes" before its actual
+  (longer) cycle completes.
+- `valve` has no dedicated sprite or frost-overlay in `render.js` (falls through to whatever default
+  unhandled-kind rendering exists) -- same "correctness over art" tradeoff already made for
+  `mortar`/`trap_spike` before their own art landed.
+- No build-time crop-kind picker UI exists yet -- Farm Plots default to Rice.
+- `tests/siege.test.js` has no coverage yet for the new Saboteur/EMP mechanic or the gear-tier roll.
+
+Not yet committed as of this handoff update.

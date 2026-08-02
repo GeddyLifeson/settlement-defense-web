@@ -4,12 +4,12 @@ import { makeRng, AggressionPreset, StaffRoleKind } from './core.js';
 import { SettlementGrid } from './grid.js';
 import { CitizenStore, tickNeedsAndMood, tickWander, CitizenFlags, addMoodEvent } from './citizens.js';
 import { JobState } from './jobs.js';
-import { StaffRoster, tickStaffDuty, tickStaffOffDuty, tickDogs, maybeSpawnWildAnimal, tickWildAnimals, tickDogBreeding, tickArmoryIssuance, tickStaffCorruption, tickStaffTraining, upgradeDog, tickAmmoProduction, AMMO_BASE_CAPACITY, tickGuardRankPromotion } from './security.js';
+import { StaffRoster, tickStaffDuty, tickStaffOffDuty, tickDogs, maybeSpawnWildAnimal, tickWildAnimals, tickDogBreeding, tickArmoryIssuance, tickStaffCorruption, tickStaffTraining, upgradeDog, tickAmmoProduction, AMMO_BASE_CAPACITY, tickGuardRankPromotion, tickStaffWages, tickWildAnimalAggression } from './security.js';
 import {
   AttackerStore, Structure, WaveSpawner, tickAttackers, tickTurrets,
   tickAttackerVsCitizens, tickStaffCombat, tickNuclearHazard, isNuclearContained,
   NUCLEAR_WASTE_RATE, ArrivalMethod, maybeTriggerHeldCitizenCrisis, tickHeldCitizenCrisis,
-  tickSuppression,
+  tickSuppression, tickShieldRecharge, CITIZEN_SHIELD_CAPACITY,
 } from './siege.js';
 import { ZoneGrid, ZoneKind } from './zones.js';
 import { tickJobs, isOnJob, tickCinemas } from './jobs.js';
@@ -234,6 +234,7 @@ export class SimWorld {
       corruptionLoss: 0,  // corrupt-staff scrap diversion (security.js)
       ratLoss: 0,         // rat/vermin food theft (rats.js)
       factionLoss: 0,     // clique unmet-demand scrap pilfering, incl. dealer-trade sub-effect (factions.js)
+      wageCost: 0,        // ranked (Officer/Specialist) staff wages, once per in-game day (security.js)
       history: [],        // rolling snapshots of net scrap change, one per FINANCE_SNAPSHOT_INTERVAL
                            // ticks, capped at FINANCE_HISTORY_MAX entries -- enough for a trend sparkline
     };
@@ -446,6 +447,25 @@ export class SimWorld {
     spend(this, 'vest');
     this.citizens.hasVest[idx] = 1;
     const text = `${this.citizens.name[idx]} was equipped with a Vest`;
+    this.milestoneLog.push({ tick: this.currentTick, text });
+    if (this.milestoneLog.length > 20) this.milestoneLog.shift();
+    return { ok: true };
+  }
+
+  // Shield purchase (siege.js's EnergyShield -- a separate absorb-before-armor layer, purchasable
+  // alongside Vest, not instead of it): mirrors buyVest exactly.
+  buyShield(citizenId) {
+    let idx = -1;
+    for (let i = 0; i < this.citizens.count; i++) {
+      if (this.citizens.id[i] === citizenId) { idx = i; break; }
+    }
+    if (idx < 0 || !this.citizens.isAliveAt(idx)) return { ok: false, reason: 'invalid' };
+    if (this.citizens.isShieldedAt(idx)) return { ok: false, reason: 'already' };
+    if (!canAfford(this, 'shield')) return { ok: false, reason: 'cost' };
+    spend(this, 'shield');
+    this.citizens.hasShield[idx] = 1;
+    this.citizens.shieldEnergy[idx] = CITIZEN_SHIELD_CAPACITY;
+    const text = `${this.citizens.name[idx]} was equipped with a Shield`;
     this.milestoneLog.push({ tick: this.currentTick, text });
     if (this.milestoneLog.length > 20) this.milestoneLog.shift();
     return { ok: true };
@@ -768,6 +788,9 @@ export class SimWorld {
     // Guard rank promotion ladder (security.js, real Prison Architect guardrank_settings.txt):
     // same cheap roster-size-loop cost class as the two calls right above it.
     tickGuardRankPromotion(this);
+    // Ranked-staff wages (security.js, real Prison Architect guardrank_settings.txt wagePerDay):
+    // fires internally on its own once-per-in-game-day gate, so it's safe to call every tick here.
+    tickStaffWages(this);
     // Held-citizen crisis (siege.js): rolls whether a new crisis starts (only at the top unrest
     // tier, see that file's doc comment), then advances any crisis already in progress. Placed
     // after tickStaffDuty above so a staff member who reached a fresh post this tick already has
@@ -813,6 +836,9 @@ export class SimWorld {
     // one from wildAnimals into this.dogs, and tickDogBreeding occasionally grows the dogs list
     // on its own once there are at least two, capped so it can't spiral.
     tickWildAnimals(this.wildAnimals, this.grid, this.rng);
+    // Manhunter/hostile-animal event (security.js, real Prison Architect-adjacent aggression
+    // roll): same cheap per-tick cost class as the two calls right around it.
+    tickWildAnimalAggression(this);
     tickDogBreeding(this.dogs, this.rng, this.currentTick);
     this.relationships.tick(this.citizens, (i) => this.citizens.name[i], this.currentTick);
 
@@ -1036,6 +1062,9 @@ export class SimWorld {
     // tickStaffCombat read it back out for their own accuracy this same tick -- a turret/guard's
     // suppression this tick already reflects who's swarming it right now, not last tick's picture.
     tickSuppression(this.structures, this.attackers, this.citizens);
+    // Shield recharge (siege.js): own per-citizen energy-pool regen, same cheap "every tick, no
+    // gating needed" cost class as tickSuppression right above it.
+    tickShieldRecharge(this.citizens);
     tickTurrets(this.structures, this.attackers, (amt) => this.addScrap(amt, 'kill'), (s) => this.onTurretFire?.(s), () => this.onKill?.(), this.rng, combatAccuracy, this.ammo, (amt) => this.consumeAmmo(amt));
     tickStaffCombat(this.citizens, this.roster, (i) => this.idOf(i), this.attackers, (amt) => this.addScrap(amt, 'kill'), () => this.onKill?.(), this.rng, combatAccuracy, this.ammo, (amt) => this.consumeAmmo(amt));
     // Drafted citizens (draft.js -- RimWorld-style manual control): owns ALL movement/combat for
@@ -1241,7 +1270,7 @@ export class SimWorld {
         this.finance.recyclingScrap + this.finance.conquestScrap + this.finance.processingScrap +
         this.finance.farmScrap + this.finance.restaurantScrap + this.finance.grantScrap +
         this.finance.powerExportScrap + this.finance.otherScrap;
-      const totalExpense = this.finance.buildSpend + this.finance.corruptionLoss + this.finance.ratLoss + this.finance.factionLoss;
+      const totalExpense = this.finance.buildSpend + this.finance.corruptionLoss + this.finance.ratLoss + this.finance.factionLoss + this.finance.wageCost;
       const net = (totalIncome - this._financeLastIncome) - (totalExpense - this._financeLastExpense);
       this.finance.history.push({ tick: this.currentTick, net, scrap: Math.round(this.scrap) });
       if (this.finance.history.length > FINANCE_HISTORY_MAX) this.finance.history.shift();
@@ -1347,6 +1376,10 @@ export class SimWorld {
         activeUntil: Array.from(this.roster._corruptActiveUntil.entries()),
         discovered: Array.from(this.roster._corruptDiscovered),
       },
+      // Program graduations (programs.js's qualification-gated program prerequisites) --
+      // a Map<citizenId, Set<ProgramKind>>, neither of which is JSON-native, so flatten to an
+      // array of [citizenId, ProgramKind[]] entries mirroring the staffCorruption pattern above.
+      programGraduations: Array.from(this.programGraduations || new Map(), ([id, kinds]) => [id, Array.from(kinds)]),
       structures: this.structures.map(s => ({
         kind: s.kind, x: s.x, y: s.y, health: s.health, destroyed: s.destroyed,
         underConstruction: s.underConstruction, buildProgress: s.buildProgress,
@@ -1431,7 +1464,7 @@ export class SimWorld {
         w.finance.farmScrap + w.finance.restaurantScrap + w.finance.grantScrap +
         w.finance.powerExportScrap + w.finance.otherScrap;
       w._financeLastIncome = totalIncome;
-      w._financeLastExpense = w.finance.buildSpend + w.finance.corruptionLoss + w.finance.ratLoss + w.finance.factionLoss;
+      w._financeLastExpense = w.finance.buildSpend + w.finance.corruptionLoss + w.finance.ratLoss + w.finance.factionLoss + w.finance.wageCost;
     }
     w.pollution = json.pollution || 0;
     // Ammo economy -- pre-existing saves have no `ammo` key, so this falls back to the
@@ -1558,6 +1591,9 @@ export class SimWorld {
       w.roster._corruptActiveUntil = new Map(sc.activeUntil || []);
       w.roster._corruptDiscovered = new Set(sc.discovered || []);
     }
+    w.programGraduations = new Map(
+      (json.programGraduations || []).map(([id, kinds]) => [id, new Set(kinds)])
+    );
     w.structures = json.structures.map(s => {
       const built = Object.assign(new Structure(s.kind, s.x, s.y, { instant: true }), s);
       // The constructor's instant:true default marks _builtNotified true regardless of the real

@@ -36,6 +36,66 @@
 </div>
 <div id="results">Running...</div>
 
+<script>
+  // Fix for: static `import ... from '../src/X.js'` statements inside the *.test.js files below
+  // are NOT covered by the freshImport() cache-busting further down -- that only cache-busts the
+  // *fetch of the test file itself* (./citizens.test.js?t=...). Once the browser fetches that test
+  // file's own body, its top-level `import { Foo } from '../src/citizens.js'` (no query string) is
+  // a completely separate module-cache lookup keyed on the literal unversioned URL, which the
+  // browser's plain HTTP cache can keep serving stale indefinitely -- confirmed happening in a real
+  // long-lived dev session (survives brand-new tabs and hard reloads, because it's the HTTP cache
+  // for that exact URL, not anything tied to a tab or a "reload").
+  //
+  // Rewriting every test file's static imports into dynamic import() calls would fix this too, but
+  // it's a much bigger, riskier change (touches every test file, changes their syntax/ergonomics,
+  // and risks breaking top-level-await/ordering assumptions). Instead we fix the ROOT CAUSE in
+  // exactly one place: inject a JSON <script type="importmap"> (must be present before any module
+  // script parses/runs) that rewrites the literal specifier "../src/X.js" to a cache-busted URL
+  // "../src/X.js?t=<timestamp>" for every file in src/. Import maps match on the exact specifier
+  // TEXT as written in the import statement, not on which module does the importing, so this one
+  // map transparently covers every test file's `../src/*.js` imports without touching their source.
+  //
+  // Deliberately NOT using this for './harness.js' -- see the harness.js import comment below for
+  // why that one specifier must stay bare/uncached (splitting it would silently break the shared
+  // `results` array).
+  //
+  // Alternatives considered (see task notes / SESSION_HANDOFF.md for the fuller writeup):
+  //   - Dev server no-cache headers (e.g. a Python http.server subclass adding
+  //     Cache-Control: no-store in end_headers): would work, but means everyone running tests has
+  //     to remember to launch that specific server instead of README's documented plain
+  //     `python -m http.server 8123` -- an easy way for the fix to silently stop applying. An
+  //     import map fixes it from inside the test page itself regardless of which static server
+  //     serves it, and needs no server-side changes at all.
+  //   - Service Worker / Cache API purge: massive overkill for a same-page dev-only problem, and
+  //     introduces its own stale-registration caching footguns (a stray old SW can keep intercepting
+  //     requests across reloads, which is the exact class of bug we're trying to get rid of here).
+  //   - Import maps: browser support (Chrome/Edge 89+, Firefox 108+, Safari 16.4+) is more than
+  //     adequate for a local dev test page, so this is what's implemented below.
+  //
+  // Kept in sync manually with src/ -- if you add a new src/*.js file, add its name here too
+  // (an import of a file missing from this list still works, it just won't be cache-busted).
+  (function () {
+    const SRC_FILES = [
+      'anomaly.js', 'assets.js', 'audio.js', 'augments.js', 'backstories.js', 'citizens.js',
+      'core.js', 'coverageplans.js', 'director.js', 'draft.js', 'drones.js', 'economy.js',
+      'epidemic.js', 'factions.js', 'fire.js', 'forcejob.js', 'grading.js', 'grants.js', 'grid.js',
+      'input.js', 'inspirations.js', 'jobs.js', 'main.js', 'metaprogress.js', 'power.js',
+      'programs.js', 'quests.js', 'ranks.js', 'rats.js', 'relationships.js', 'render.js',
+      'research.js', 'resources.js', 'rooms.js', 'schedule.js', 'security.js', 'sickness.js',
+      'siege.js', 'supplies.js', 'traits.js', 'tutorial.js', 'vehicles.js', 'water.js',
+      'weather.js', 'world.js', 'worldmap.js', 'zones.js',
+    ];
+    const t = Date.now();
+    const imports = {};
+    for (const f of SRC_FILES) imports['../src/' + f] = '../src/' + f + '?t=' + t;
+    // document.write is the only way to synchronously inject markup that the HTML parser picks up
+    // before it reaches the <script type="module"> below -- import maps only take effect if they're
+    // present before the first module script/import runs, and this is a plain classic script so it
+    // runs synchronously in document order.
+    document.write('<script type="importmap">' + JSON.stringify({ imports }) + '<' + '/script>');
+  })();
+</script>
+
 <script type="module">
   // harness.js MUST be imported with this exact bare specifier, not cache-busted -- every test
   // file below also does `import ... from './harness.js'` with the same bare specifier (their own

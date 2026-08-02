@@ -37,6 +37,12 @@ export const TOOLS = [
   // Center's pollution-processing rate instead of turrets/tesla/watchtower.
   { key: 'q', tool: 'pump', label: 'Water Pump', cost: BUILD_COST.pump },
   { key: 'z', tool: 'pipe', label: 'Pipe', cost: BUILD_COST.pipe },
+  // Valve (real Prison Architect water-network connector, see water.js's water_isConductor/
+  // VALVE_FREEZE_CHANCE): a cheap junction fixture that joins the pipe/pump flood-fill, but
+  // freezes far more readily than plain pipe in Cold weather. Every unshifted single-keypress
+  // letter/digit is claimed above -- uppercase 'V' is free (lowercase 'v' is already Recycling
+  // Garage (Fossil)) and reads naturally as "Valve".
+  { key: 'V', tool: 'valve', label: 'Valve (water connector, freezes easily)', cost: BUILD_COST.valve },
   // SEA:R truck fuel-type tradeoff (vehicles.js FUEL_TYPES): each garage now comes in 4 fuel
   // variants instead of one -- fossil (cheap/dirty), gas (best all-around), ethanol (clean,
   // temporarily saps Food zone refill per haul), electric (cleanest, needs the garage powered
@@ -503,13 +509,13 @@ export class InputController {
     return { refund, wasBlueprint };
   }
 
-  // Demolish tool's actual click handler (see the _onDown special-case above). Only ever removes
-  // entries in world.structures -- a FINISHED wall is a real, known gap: once a wall blueprint
-  // completes, world.js's own structures-filter pass converts it into `grid.wallThingId` and drops
-  // it from world.structures entirely (see that file's own comment on the wall/garage handoff), so
-  // there's no structure object left here to find/remove. grid.js/world.js aren't owned by this
-  // task, so a finished wall can't be demolished yet -- surfaced as an honest toast below instead
-  // of a silent no-op, rather than pretending it worked.
+  // Demolish tool's actual click handler (see the _onDown special-case above). Structures still
+  // under construction or already finished both live in world.structures and go through
+  // _removeStructureAt below -- EXCEPT a finished wall, which by the time it's finished has
+  // already been folded into `grid.wallThingId` and dropped from world.structures entirely (see
+  // world.js's structures-filter pass / the wall+garage handoff comment there). That's handled as
+  // a second case below, via _demolishWallAt, rather than pretending grid.js's wall tiles are
+  // structure objects.
   _demolishAt(world, x, y) {
     // Same bounds guard _place() applies before ever touching grid.wallThingId -- without it, an
     // out-of-range (x,y) (reachable in practice: the camera can pan/zoom so a click near the
@@ -520,7 +526,7 @@ export class InputController {
     const idx = world.structures.findIndex(s => !s.destroyed && Math.floor(s.x) === x && Math.floor(s.y) === y);
     if (idx < 0) {
       if (world.grid.wallThingId[world.grid.index(x, y)] !== 0) {
-        this.onToast?.('Cannot demolish a finished wall yet');
+        this._demolishWallAt(world, x, y);
       } else {
         this.onToast?.('Nothing to demolish here');
       }
@@ -528,6 +534,29 @@ export class InputController {
     }
     const { refund, wasBlueprint } = this._removeStructureAt(world, idx);
     this.onToast?.(wasBlueprint ? 'Blueprint cancelled' : (refund > 0 ? `Demolished -- refunded ${refund} scrap` : 'Demolished'));
+  }
+
+  // Finished walls aren't world.structures entries -- they're a single bit of grid state
+  // (grid.wallThingId[i] !== 0) with no Structure object, no .kind, no .destroyed flag. There's
+  // also no existing "wall gets destroyed" code path to borrow from combat: walls never take
+  // damage or die from attacker fire anywhere in this codebase (only fences/traps/generators/
+  // pumps/garages -- real Structure objects with a .destroyed flag -- can be lost that way, per
+  // world.js's critical-structure-watchdog comment). So the removal here is the simplest correct
+  // thing: clear the grid cell back to passable ground and refund 50% of BUILD_COST.wall, exactly
+  // matching _removeStructureAt's refund rule for every other finished structure. This is provably
+  // safe rather than "genuinely risky": every consumer of wallThingId (grid.isBlocked for pathing,
+  // render.js's wall tiles, rooms.js's flood-fill) reads the live typed array directly on every
+  // tick/frame -- nothing caches a stale copy -- and world.js's own tick loop already recomputes
+  // `this.rooms` whenever the wallThingId-derived signature (`wallSum`) changes for ANY reason, so
+  // clearing one cell here is automatically picked up next tick with no extra bookkeeping. The one
+  // caveat: the constant `1` grid.setWall(...) currently uses as "thingId" (see world.js) means
+  // there's no way to recover a *different* per-wall cost if walls ever stop being a single kind --
+  // today there is only one wall kind (BUILD_COST.wall), so that's not a real gap yet.
+  _demolishWallAt(world, x, y) {
+    world.grid.setWall(x, y, 0);
+    const refund = demolishRefund('wall');
+    if (refund > 0) world.scrap += refund;
+    this.onToast?.(refund > 0 ? `Demolished -- refunded ${refund} scrap` : 'Demolished');
   }
 
   _onUp(e) {
@@ -620,9 +649,11 @@ export class InputController {
       return;
     }
 
-    // A finished wall still hard-blocks placement -- see _demolishAt's doc comment above for why
-    // (it's not even a world.structures entry anymore by the time it's finished, this project has
-    // no way to un-wall a tile without touching grid.js/world.js).
+    // A finished wall still hard-blocks direct placement of a NEW blueprint on top of it -- it's
+    // not even a world.structures entry by the time it's finished (see _demolishAt/_demolishWallAt
+    // above), so the blueprint-override branch below can't find-and-replace it like it does for
+    // real structures. The player can still free the tile up first via the Demolish tool
+    // (_demolishWallAt), then place here on a later click.
     if (world.grid.wallThingId[world.grid.index(x, y)] !== 0) { this.onToast?.('Already occupied'); return; }
 
     // Tech gate (research.js) -- checked BEFORE the scrap check so a locked buildable reports the

@@ -77,12 +77,20 @@
 //    instant structural-health restore is the honest equivalent of "reconstruction specialists"
 //    rather than inventing a parallel repair-economy this codebase doesn't have.
 //
-// Two dimensions from the task brief were evaluated and deliberately NOT added:
-//  - wageDiscount: real PA plans also discount themed staff WAGES, not just buildable costs. This
-//    project has no ongoing per-citizen/per-role cost anywhere (grepped wage/salary/stipend/
-//    payroll/upkeep across the whole src/ tree -- zero hits; economy.js's only recurring costs are
-//    one-time buildable purchases, already covered by `discounts` below). Adding a `wageDiscount`
-//    field with nothing behind it would be a fake knob, so it's skipped rather than invented.
+// Wage-discount dimension (added in a later pass once a real per-role wage system landed
+// elsewhere in this codebase -- see security.js): real PA plans also discount themed staff WAGES,
+// a separate dimension from the buildable-cost `discounts` above. The Security Response Plan
+// (already the combat/defense-themed plan above) is the natural carrier -- its 30% buildable
+// discount already covers turret/watchtower/armory, and its themed role is exactly Guard/Sniper
+// (StaffRoleKind.Guard/Sniper, core.js), the same defense-tier roles security.js's own
+// CORRUPTION_ELIGIBLE_ROLES/GUARD_RANK_ELIGIBLE_ROLES sets already single out from Monitor/
+// K9Handler. `wageDiscountMultFor(world, role)` below mirrors coveragePlanDiscountMult's exact
+// shape (1 = no discount, multiplicative across active plans) so whichever file ends up actually
+// deducting wages (security.js, per the concurrent work this file doesn't own) can multiply its
+// per-tick/per-payout wage number by this the same way economy.js's buildCost() already multiplies
+// by coveragePlanDiscountMult.
+//
+// One dimension from the task brief was evaluated and deliberately NOT added:
 //  - Training-program discount: programs.js's PROGRAM_DEFS does define a `sessionCost` per program,
 //    but it's never actually deducted from world.scrap anywhere in this codebase (grepped
 //    `sessionCost` project-wide -- its only other use is a display-only string in main.js's
@@ -143,6 +151,14 @@ export const COVERAGE_PLAN_DEFS = Object.freeze({
     // tier, as opposed to Fire/Medical's crisis-cleanup furniture. 30% off, a real discount but
     // shallower than Fire/Medical's 50% since it applies to three buildables instead of one kind.
     discounts: Object.freeze({ turret: 0.3, watchtower: 0.3, armory: 0.3 }),
+    // Themed staff-wage discount (separate dimension from `discounts` above, which only covers
+    // buildable purchase cost) -- 25% off wages for this plan's own combat-tier roles, core.js's
+    // StaffRoleKind.Guard/Sniper (the same pair security.js's CORRUPTION_ELIGIBLE_ROLES/
+    // GUARD_RANK_ELIGIBLE_ROLES already treat as the defense-staff tier, as opposed to Monitor/
+    // K9Handler). Read via wageDiscountMultFor(world, role) below; nothing in this file deducts
+    // wages itself -- see that function's doc comment for the actual point-of-sale hook this is
+    // meant to be wired into once the wage-deduction system lands.
+    wageDiscount: Object.freeze({ Guard: 0.25, Sniper: 0.25 }),
     callIn: Object.freeze({
       label: 'Call In Tactical Reinforcements',
       description: `Boosts every turret and staff defender's accuracy by ${Math.round((SECURITY_RESPONSE_ACCURACY_MULT - 1) * 100)}% for a short window.`,
@@ -222,6 +238,25 @@ export function coveragePlanDiscountMult(world, buildKind) {
   let mult = 1;
   for (const kind of world.coveragePlans) {
     const pct = COVERAGE_PLAN_DEFS[kind]?.discounts?.[buildKind];
+    if (pct) mult *= (1 - pct);
+  }
+  return mult;
+}
+
+/** Combined wage-discount multiplier for `role` (a core.js StaffRoleKind value, e.g. 'Guard' or
+ *  'Sniper') across every currently-active plan -- the wage-side counterpart to
+ *  coveragePlanDiscountMult above, same shape (1 = no discount, multiplicative across plans if
+ *  more than one ever discounts the same role). This is a pure lookup/multiplier: nothing in this
+ *  file actually deducts wages anywhere, since this project's real per-role wage deduction lives
+ *  (or is landing) in security.js, a file this task doesn't own. The intended call site is
+ *  wherever that system actually pays out a wage for a citizen holding a given role -- multiply
+ *  the wage amount by `wageDiscountMultFor(world, role)` the same way economy.js's buildCost()
+ *  already multiplies by coveragePlanDiscountMult(world, buildKind). */
+export function wageDiscountMultFor(world, role) {
+  if (!world.coveragePlans || world.coveragePlans.size === 0) return 1;
+  let mult = 1;
+  for (const kind of world.coveragePlans) {
+    const pct = COVERAGE_PLAN_DEFS[kind]?.wageDiscount?.[role];
     if (pct) mult *= (1 - pct);
   }
   return mult;
