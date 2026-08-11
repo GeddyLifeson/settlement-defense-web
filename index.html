@@ -149,8 +149,14 @@
      (not pixels) borrowed from live observation of Super Energy Apocalypse: Recycled's build
      panel -- every color/icon/class here is this project's own. Header + collapsible body so it
      doesn't eat screen space while not building (click the header or the arrow to collapse). */
+  /* Hugs its content height (header + whatever the body currently shows) instead of always
+     stretching to the bottom of the screen -- collapsed to just the category grid, this panel used
+     to still occupy the full left-edge height as a mostly-empty bordered card (a real "feel" bug:
+     a giant dead-space panel sitting there at all times). max-height is a safety cap, not a floor,
+     for the one case content can legitimately get tall (Economy & Vehicles' 15-item list) --
+     toolbar-body's own overflow-y:auto takes over and scrolls internally past that cap. */
   #toolbar {
-    position: fixed; left: 10px; top: 60px; bottom: 10px;
+    position: fixed; left: 10px; top: 60px; max-height: calc(100vh - 70px);
     display: flex; flex-direction: column;
     padding: 0; font-size: 13px; width: 220px;
     overflow: hidden;
@@ -167,7 +173,7 @@
   }
   #toolbar-head button:hover { background: #3a342f; }
   #toolbar-body {
-    display: flex; flex-direction: column; gap: 6px;
+    display: flex; flex-direction: column; gap: 6px; flex: 1 1 auto; min-height: 0;
     padding: 8px; overflow-y: auto; scrollbar-width: thin;
   }
   #toolbar-body.hidden { display: none; }

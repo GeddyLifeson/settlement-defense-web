@@ -1892,3 +1892,90 @@ themselves):
 - `tests/siege.test.js` has no coverage yet for the new Saboteur/EMP mechanic or the gear-tier roll.
 
 Not yet committed as of this handoff update.
+
+## Game-feel audit (this session, immediately after the roadmap wave)
+
+User feedback, verbatim in spirit: the game has all the mechanics now but doesn't *feel* right,
+and doesn't feel like any of RimWorld/Prison Architect/SEA:R despite porting real numbers from all
+three. Asked to actually fix that, not port more mechanics. Correctly read as a different KIND of
+work than the two waves above -- diagnosed by actually driving the live game (not just headless
+`window.__debug` calls, which is most of what this session had done up to this point) before
+touching any code.
+
+**Root cause #1, confirmed with real measurements, not guessed**: `#topbar`'s `scrollWidth` was
+2271px inside a 1258px container (`overflow-x: auto`, no visible scrollbar affordance) -- every
+one of this session's ~15 new panel/system buttons had been added directly to the always-visible
+row with nothing ever checking whether they still fit. Concretely, mid-game, a player could not
+reach Save, Load, Help, Fullscreen, Sound, New Settlement, or 5 of the 9 report panels (Programs,
+Charters, Contracts, Coverage, Drones) without discovering an invisible horizontal scroll. **Fixed**
+(commit `fa7c3d8`): collapsed all 9 panel launchers + the rarely-needed system actions (Help/Save/
+Load/New -- Save and Settings are already reachable via the pause menu) into one "☰ Menu" dropdown
+trigger; Fullscreen/Sound stay inline as the two genuinely frequent single-click toggles. Every
+button kept its exact original id/handler/hotkey -- only the container changed. Verified live:
+dropdown opens/closes, picking a panel opens it AND auto-closes the dropdown, content width cut
+2271px -> 1091px, 133/133 tests still passing. This also fixes the actual root cause, not just the
+symptom -- a future panel now costs one dropdown line, not one more permanent topbar slot.
+
+**Root cause #2, identified but NOT yet fixed, flagged for the user before proceeding**: the build
+toolbar (`#toolbar`) DOES have category headers (Defense/Power & Water/Economy & Vehicles/
+Furniture/Security/Zones) but renders every buildable across every category as one continuous
+always-expanded 648px-tall column, all visible simultaneously. This is structurally different from
+how all three reference games actually present their build menus (RimWorld's architect menu:
+compact category icons, click one, get a flyout of just that category; Prison Architect: the same
+click-a-tab pattern). Every one of today's new buildables (turret tiers, mortar, traps, valve,
+demolish) just extended this same flat always-expanded list further. This is very likely a second
+real contributor to "doesn't feel like any of the three games" -- diagnosed via the same live-DOM-
+inspection method as root cause #1, not yet touched. Given this is a genuine design/redesign
+decision (not a mechanical bug fix like the topbar), stopped here to check in with the user on
+direction rather than silently redesigning it, matching the explicit feedback that drove this
+whole audit (don't just keep producing large silent output).
+
+Also had real environment friction this session unrelated to game code: the dev server this whole
+session had been running on died at some point (another chat's server was occupying the port by
+the time this was noticed), and the Browser pane's viewport was reporting `innerWidth: 0`
+(not composited/displayed) for several verification attempts -- neither is a game bug, both are
+noted here so a future session recognizes the symptoms immediately (`ERR_CONNECTION_RESET` on a
+freshly-navigated page + `window.__debug` staying `undefined` = the server connection reset
+mid-load, just reload again; `window.innerWidth === 0` on every element = the pane isn't currently
+displayed, box-model reads off individual elements' `getBoundingClientRect()` are still valid, only
+the global `window.innerWidth`/screenshot compositing is affected). Registered this project's dev
+server properly in `C:\.claude\launch.json` (was previously only in a per-project, unread
+`.claude/launch.json` that the harness never actually looks at) as `settlement-defense-web`, port
+8199, so `preview_start({name: 'settlement-defense-web'})` works cleanly going forward instead of
+an ad-hoc background `python -m http.server` call the harness doesn't track.
+
+Not yet committed as of this handoff update (this section only -- the topbar fix itself is already
+committed as `fa7c3d8`).
+
+### Follow-up: build-toolbar "giant dead-space panel" bug (user said "DO IT ALL", proceeded)
+
+Went back into `#toolbar` (the build panel) expecting to have to do the category-flyout redesign
+flagged above as undone. Turned out that redesign already exists in `src/main.js` -- category grid
+-> that category's item list -> a detail-before-commit readout, exactly the RimWorld/Prison
+Architect click-a-category pattern this audit was about to go build. Verified this live before
+writing any code (`toolbar-items`/`toolbar-categories`/`toolbar-detail` all present and behaving
+correctly, 0 items rendered when no category is open) rather than trusting the prior session's
+"648px flat list" read at face value -- that number was real but the diagnosis attached to it was
+wrong.
+
+Actual bug: `#toolbar`'s CSS pinned `top: 60px; bottom: 10px` -- a fixed-position element told to
+span from just under the topbar to just above the screen edge, *regardless of how much content it
+actually held*. Since `.panel` (its class) paints a solid background/border/blur, this rendered as
+a large bordered card sitting on the left edge of the screen at all times, most of it empty --
+confirmed live: with no category open the real content was 249px tall inside a 650px card, i.e.
+~400px of dead space above just the Select/Demolish buttons and 6 category icons. This is exactly
+the kind of thing that reads as "doesn't feel like any of the three games" -- none of them show a
+giant mostly-empty panel by default.
+
+**Fix** (`index.html`, CSS-only, no bundle rebuild needed): dropped the `bottom: 10px` anchor,
+replaced with `max-height: calc(100vh - 70px)` -- the panel now hugs whatever it's actually
+showing, with the old full-height value kept only as an upper cap for the one category that can
+legitimately get tall (Economy & Vehicles, 14 items). Added `flex: 1 1 auto; min-height: 0;` to
+`#toolbar-body` so the existing `overflow-y: auto` on that element actually engages once the cap is
+hit, instead of the flex column just growing past it. Verified live via `getBoundingClientRect()`
+across all three states: no category open 650px -> 249px, header fully collapsed -> 45px, Economy
+(largest category) open -> correctly caps at 650px and scrolls its item list internally rather than
+overflowing the viewport. 133/133 tests still pass (CSS-only change, but reran the full suite for
+the same "trust nothing, verify everything" discipline this session has followed throughout).
+
+Not yet committed as of this handoff update.
