@@ -1978,4 +1978,39 @@ across all three states: no category open 650px -> 249px, header fully collapsed
 overflowing the viewport. 133/133 tests still pass (CSS-only change, but reran the full suite for
 the same "trust nothing, verify everything" discipline this session has followed throughout).
 
-Not yet committed as of this handoff update.
+Committed as `dee9a1b`.
+
+### Follow-up: systematic sweep for the same class of bug, 3 more found and fixed
+
+Once the toolbar's own dead-space bug was fixed, went looking for the same root cause elsewhere --
+any fixed-position HUD panel whose coordinates were hand-picked against an older, differently-sized
+neighbor and never re-checked as neighbors changed shape over this session's many feature waves.
+Method: pull every non-modal fixed-position panel's `getBoundingClientRect()` live (modals using the
+shared `inset:0` + `.box{max-height:92vh;overflow:auto}` pattern from the menus/UX wave were trusted
+as already correct and not re-audited) and check pairwise overlaps / off-screen extents. Found three
+more real bugs this way, all committed individually:
+
+1. **Grading popover overlapped the toolbar by 30px** (`f576844`) -- positioned off a comment
+   estimating "toolbar ends around x=170"; the toolbar's real right edge is x=230. Moved to
+   left:240px.
+2. **Event log overlapped the toolbar by 50px** (`d045d10`) -- same stale-coordinate root cause,
+   worse in practice since both a tall toolbar category and a populated event log are *common*
+   states in normal play, not edge cases. Moved to left:240px.
+3. **Citizen inspector was silently losing ~half its own content off-screen** (`31e1333`) -- the
+   single biggest find of this sweep. `#inspector` had no `max-height`/`overflow` at all; with a
+   fully-loaded citizen (traits/skills/health/augments/buttons) it measured 1240px tall against a
+   720px viewport. The page is `overflow:hidden` (fixed-layout game UI, not a scrolling document),
+   so everything past ~660px -- augment slots, several stat rows, the action buttons -- was
+   permanently invisible and unreachable, with no visual indication anything was missing. This had
+   been getting silently worse every time a feature wave added one more stat row to the panel, all
+   session, and is very likely the single biggest concrete contributor to "doesn't feel right" of
+   everything found in this whole audit: the most-used panel in a RimWorld-like was losing content.
+   Fixed with the same `max-height: calc(100vh - 70px); overflow-y: auto` pattern as the toolbar.
+   Same commit also fixed the minimap (`right:10px`) painting directly over the inspector's column
+   (`right:10px; width:240px`) whenever both were visible -- moved the minimap to `right:260px`.
+
+All four fixes verified live via `getBoundingClientRect()`/`scrollHeight` before and after (not
+screenshots -- the Browser pane's compositor has been unavailable this whole session, a known
+environment artifact, not a game bug); 133/133 tests re-run and passing after each one.
+
+Not yet committed as of this handoff update (this section only -- all four fixes above already are).
