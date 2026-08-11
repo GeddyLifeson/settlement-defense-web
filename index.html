@@ -238,10 +238,18 @@
   }
   .tb-detail-back:hover { background: #3a342f; }
 
-  /* ---- Citizen inspector ---- */
+  /* ---- Citizen inspector ----
+     max-height + overflow-y:auto (added late in this session's feature-adoption work): the page
+     itself is overflow:hidden (this is a fixed-layout game UI, not a scrolling document), and this
+     panel had no height cap at all -- confirmed live at 1240px tall against a 720px viewport, with
+     everything past ~660px (roughly half the panel: augment slots, several stat rows, and the
+     action buttons for a citizen with a full trait/skill/augment loadout) permanently invisible
+     and unreachable. This was very likely the single biggest contributor to the game not "feeling
+     right" -- the most-used panel in a RimWorld-like was silently losing most of its own content
+     every time a feature wave added one more stat row, with nothing to catch it. */
   #inspector {
-    position: fixed; right: 10px; top: 60px; width: 240px;
-    padding: 12px 14px; font-size: 13px;
+    position: fixed; right: 10px; top: 60px; width: 240px; max-height: calc(100vh - 70px);
+    padding: 12px 14px; font-size: 13px; overflow-y: auto; scrollbar-width: thin;
   }
   #inspector.hidden { display: none; }
   #inspector h3 { margin: 0 0 2px 0; font-size: 16px; }
@@ -1217,9 +1225,16 @@
     padding: 6px 10px; font-size: 11px; color: var(--text-dim);
   }
 
-  /* ---- Minimap ---- */
+  /* ---- Minimap ----
+     right:260px, not 10px -- confirmed live that at right:10px this widget's 170x170 box sat
+     directly inside the citizen inspector's column (inspector is right:10px, width:240px, so its
+     footprint is x:[viewportWidth-250, viewportWidth-10]) and, being later in the DOM, painted
+     over roughly a third of the inspector's stat rows any time both a citizen was selected and the
+     minimap was showing -- not an edge case, that's the common case in normal play. 260px = the
+     inspector's own 240px width plus a 20px gap, so the minimap now sits just left of the
+     inspector's column instead of on top of it. */
   #minimap-wrap {
-    position: fixed; right: 10px; bottom: 46px;
+    position: fixed; right: 260px; bottom: 46px;
     padding: 4px; line-height: 0;
   }
   #minimap { display: block; cursor: pointer; image-rendering: pixelated; background: #241f1a; }
