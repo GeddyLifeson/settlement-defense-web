@@ -403,9 +403,13 @@
   #workprio tr.wp-row-selected .wp-name { color: var(--accent); }
   #workprio .wp-empty { color: var(--text-dim); font-size: 12.5px; padding: 12px 4px; }
 
-  /* ---- Event log ---- */
+  /* ---- Event log ----
+     left:240px, not 180px -- the toolbar's real right edge is x=230 (left:10px + width:220px,
+     confirmed live), so 180px let this log's top-left corner sit 50px inside the toolbar whenever
+     a category with a tall item list was open, same class of bug as the grading-popover fix
+     above. */
   #eventlog {
-    position: fixed; left: 180px; bottom: 10px; width: 320px;
+    position: fixed; left: 240px; bottom: 10px; width: 320px;
     padding: 8px 12px; font-size: 12px; color: var(--text-dim);
     max-height: 90px; overflow: hidden;
   }
