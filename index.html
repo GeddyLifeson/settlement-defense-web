@@ -597,10 +597,11 @@
 
   /* ---- Settlement Grading popover (non-carceral reframe of Prison Architect's 4-axis Grading
      tab -- Safety/Wellbeing/Sustainability/Cohesion, see grading.js). Click-to-expand from the
-     topbar icon; sits over free canvas space rather than any other panel's slot (toolbar ends
-     around x=170, inspector/minimap/eventlog/finance occupy the other corners). ---- */
+     topbar icon; sits over free canvas space rather than any other panel's slot (toolbar's real
+     right edge is x=230 -- left:10px + width:220px -- confirmed live; a prior x=170 estimate here
+     was wrong and left this popover overlapping the toolbar by 30px whenever both were open). ---- */
   #grading-popover {
-    position: fixed; left: 200px; top: 60px; width: 230px;
+    position: fixed; left: 240px; top: 60px; width: 230px;
     padding: 12px 14px; font-size: 13px; z-index: 15;
   }
   #grading-popover.hidden { display: none; }
