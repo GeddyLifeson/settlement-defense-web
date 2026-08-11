@@ -24213,6 +24213,37 @@ document.getElementById('btn-load').addEventListener('click', () => confirmedLoa
 document.getElementById('btn-restart').addEventListener('click', () => confirmRestart());
 document.getElementById('btn-restart-modal').addEventListener('click', () => restart());
 document.getElementById('btn-recenter').addEventListener('click', () => input.recenter());
+
+// Reports & Menus dropdown (index.html's #topbar-menu-dropdown -- see that file's comment on why
+// this exists: the topbar was overflowing its own container once enough report panels existed,
+// 2271px of buttons in a 1258px box with no visible scroll affordance). Every button inside the
+// dropdown keeps its own original click listener (registered right below, unchanged) -- this only
+// adds the open/close/outside-click/Escape behavior for the dropdown shell itself.
+const topbarMenuBtn = document.getElementById('btn-topbar-menu');
+const topbarMenuDropdown = document.getElementById('topbar-menu-dropdown');
+function setTopbarMenuOpen(open) {
+  topbarMenuDropdown.classList.toggle('hidden', !open);
+  topbarMenuBtn.classList.toggle('active', open);
+}
+topbarMenuBtn.addEventListener('click', (e) => {
+  e.stopPropagation();
+  setTopbarMenuOpen(topbarMenuDropdown.classList.contains('hidden'));
+});
+// Closing on any click inside the dropdown (after that button's own listener already ran) means
+// picking "Research" both opens the Research panel AND closes this dropdown in one click, instead
+// of leaving it hovering over the panel that just opened.
+topbarMenuDropdown.addEventListener('click', (e) => {
+  if (e.target.tagName === 'BUTTON') setTopbarMenuOpen(false);
+});
+document.addEventListener('click', (e) => {
+  if (!topbarMenuDropdown.classList.contains('hidden') && !topbarMenuDropdown.contains(e.target) && e.target !== topbarMenuBtn) {
+    setTopbarMenuOpen(false);
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !topbarMenuDropdown.classList.contains('hidden')) setTopbarMenuOpen(false);
+});
+
 document.getElementById('btn-worldmap').addEventListener('click', () => toggleWorldMap());
 document.getElementById('btn-worldmap-close').addEventListener('click', () => toggleWorldMap(false));
 document.getElementById('btn-finance').addEventListener('click', () => toggleFinance());
