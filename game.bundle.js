@@ -16017,7 +16017,6 @@ function tickRats(world) {
 
 
 
-
 const AnomalyTier = Object.freeze({ Low: 'Low', Medium: 'Medium', High: 'High' });
 
 // Tier thresholds on the 0..1 scale, deliberately proportioned the same way rats.js's real-PA
@@ -26665,7 +26664,7 @@ function buildRadioList(containerId, descId, cards, getSelected, onSelect, onCha
     const sel = cards.find(([value]) => value === getSelected());
     descEl.textContent = sel ? sel[2] : '';
   };
-  for (const [value, name, desc] of cards) {
+  for (const [value, name] of cards) {
     const row = document.createElement('div');
     row.className = 'radio-option' + (value === getSelected() ? ' selected' : '');
     row.dataset.value = value;

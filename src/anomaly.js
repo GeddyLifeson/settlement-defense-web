@@ -15,7 +15,6 @@
 // (schedule.js) rather than copying RimWorld's tick rate.
 import { DAY_NIGHT_CYCLE_TICKS } from './schedule.js';
 import { colonyStrength } from './director.js';
-import { roomContaining } from './rooms.js';
 import { addMoodEvent } from './citizens.js';
 
 export const AnomalyTier = Object.freeze({ Low: 'Low', Medium: 'Medium', High: 'High' });

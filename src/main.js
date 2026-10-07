@@ -17,7 +17,7 @@ import {
   isMuted, toggleMute, getVolume, setVolume, getMasterGainValue,
 } from './audio.js';
 import { WeatherKind, tryWandererEvent, tryBlightEvent, tryResourceGiftEvent, tryTraderEvent, tryMassFireEvent, isHazardActive, hazardRefillMult, tickHazardCondition, HAZARD_EARLIEST_TICK, HAZARD_MIN_REFIRE_TICKS } from './weather.js';
-import { WEAPON_TIERS, WeaponTier, fireCorruptStaff, forceCorruptionRoll, forceActivateCorruption, CORRUPTION_FIRE_REWARD, K9_UPGRADE_SCRAP_COST } from './security.js';
+import { WEAPON_TIERS, fireCorruptStaff, forceCorruptionRoll, forceActivateCorruption, CORRUPTION_FIRE_REWARD, K9_UPGRADE_SCRAP_COST } from './security.js';
 import { forceHeldCitizenCrisis } from './siege.js';
 import { buildCost } from './economy.js'; // vest purchase price display, see the inspector's Buy Vest button
 import { canInspectDelivery, canSearchDelivery } from './supplies.js'; // tainted-delivery banner gating, see updateSupplyAlert below
@@ -31,14 +31,14 @@ import {
   initOnboarding, maybeStartTutorial, startTutorial, stopTutorial, isTutorialActive,
   toggleHelp, isHelpOpen, hasSeenTutorial, resetTutorialSeen, TUTORIAL_SEEN_KEY, TUTORIAL_STEPS,
 } from './tutorial.js';
-import { WorkCategory, WORK_CATEGORY_ORDER, WORK_CATEGORY_LABELS, WORK_CATEGORY_FIELD } from './jobs.js';
-import { ProgramKind, PROGRAM_DEFS, PROGRAM_ORDER, isSiteStaffed, assignProgramStaff } from './programs.js';
+import { WORK_CATEGORY_ORDER, WORK_CATEGORY_LABELS, WORK_CATEGORY_FIELD } from './jobs.js';
+import { PROGRAM_DEFS, PROGRAM_ORDER, isSiteStaffed, assignProgramStaff } from './programs.js';
 import {
   GRANT_DEFS, GRANT_ORDER, CharterKind, charterStatus, InvestmentTerm, startInvestment, resolveText,
   INVEST_COST, INVEST_SHORT_TICKS, INVEST_LONG_TICKS, INVEST_SHORT_PAYOUT, INVEST_LONG_PAYOUT,
 } from './grants.js';
 import { computeCitizenUnrestScore } from './citizens.js';
-import { QuestKind, offerQuest, acceptQuest, declineQuest } from './quests.js';
+import { QuestKind, acceptQuest, declineQuest } from './quests.js';
 import {
   COVERAGE_PLAN_DEFS, COVERAGE_PLAN_ORDER, isPlanActive, purchaseCoveragePlan,
   isCallInReady, callInLiveCount, triggerCallIn,
@@ -3152,7 +3152,7 @@ function buildRadioList(containerId, descId, cards, getSelected, onSelect, onCha
     const sel = cards.find(([value]) => value === getSelected());
     descEl.textContent = sel ? sel[2] : '';
   };
-  for (const [value, name, desc] of cards) {
+  for (const [value, name] of cards) {
     const row = document.createElement('div');
     row.className = 'radio-option' + (value === getSelected() ? ' selected' : '');
     row.dataset.value = value;

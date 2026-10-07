@@ -1,6 +1,6 @@
 // Ported/condensed from SD.Sim (CitizenStore, NeedsDecaySystem, NeedsMoodBreakTickGroup,
 // SocialInteractionSystem). Struct-of-arrays store, same shape as the C# CitizenStore.
-import { randomTrait, ageBandFor } from './traits.js';
+import { randomTrait } from './traits.js';
 import { roomContaining, RoomRole } from './rooms.js';
 import { randomBackstory, randomPassions } from './backstories.js';
 import { isWateredAt } from './water.js';

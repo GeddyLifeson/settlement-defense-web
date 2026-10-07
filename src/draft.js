@@ -54,7 +54,7 @@ import { CitizenFlags } from './citizens.js';
 import { releaseCurrentJobClaim, JOB_SPEED, ARRIVE_DIST } from './jobs.js';
 import { clearForcedJob } from './forcejob.js';
 import {
-  nearestAliveAttacker, damageAttacker, rollsHit, DamageType,
+  damageAttacker, rollsHit, DamageType,
   GUARD_RANGE, GUARD_DAMAGE, GUARD_COOLDOWN, GUARD_PENETRATION,
   SNIPER_RANGE, SNIPER_DAMAGE, SNIPER_COOLDOWN, SNIPER_PENETRATION,
 } from './siege.js';
